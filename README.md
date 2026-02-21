@@ -68,6 +68,3 @@ httpServer := vgirpc.NewHttpServer(server) // HTTP
 http.ListenAndServe(":8080", httpServer)
 ```
 
-## License
-
-Apache-2.0
