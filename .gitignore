@@ -2,3 +2,4 @@ conformance-worker
 hello-worker
 __pycache__/
 .benchmarks/
+site/

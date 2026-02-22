@@ -1,0 +1,87 @@
+site_name: vgi-rpc-go
+site_description: "vgi-rpc-go: Go implementation of the vgi_rpc framework — Apache Arrow IPC-based RPC for high-performance data services"
+site_url: https://vgi-rpc-go.query.farm/
+repo_url: https://github.com/Query-farm/vgi-rpc-go
+repo_name: Query-farm/vgi-rpc-go
+copyright: "&copy; 2026 <a href=\"https://query.farm\">Query.Farm LLC</a>"
+
+extra:
+  social:
+    - icon: material/web
+      link: https://query.farm
+      name: Query.Farm
+    - icon: fontawesome/brands/github
+      link: https://github.com/Query-farm
+      name: Query.Farm on GitHub
+
+extra_css:
+  - stylesheets/extra.css
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  custom_dir: docs/overrides
+  logo: assets/logo.png
+  favicon: assets/favicon.ico
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - tables
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets:
+      base_path: .
+  - attr_list
+  - md_in_html
+
+plugins:
+  - search
+  - section-index
+
+nav:
+  - Home: index.md
+  - Guide:
+    - guide/index.md
+    - Struct Tags: guide/struct-tags.md
+    - Streaming: guide/streaming.md
+    - ArrowSerializable: guide/arrow-serializable.md
+    - HTTP Transport: guide/http.md
+    - Error Handling: guide/errors.md
+    - Introspection: guide/introspection.md
+  - API Reference: api.md
+  - Examples: examples.md
