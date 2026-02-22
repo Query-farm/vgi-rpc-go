@@ -13,7 +13,7 @@ hide:
 
 # vgi-rpc-go
 
-Go implementation of the [vgi_rpc](https://github.com/Query-farm/vgi-rpc) framework — Apache Arrow IPC-based RPC for high-performance data services.
+Go implementation of the [vgi_rpc](https://vgi-rpc.query.farm/) framework — Apache Arrow IPC-based RPC for high-performance data services.
 
 <p class="built-by">Built by <a href="https://query.farm">Query.Farm</a></p>
 
@@ -104,9 +104,11 @@ func main() {
 - Read the [Guide](guide/index.md) for struct tags, streaming, HTTP transport, and more
 - Browse the [API Reference](api.md) for all exported types and functions
 - Check out the [Examples](examples.md) for runnable programs
+- Learn about the [wire protocol](https://vgi-rpc.query.farm/wire-protocol) and [benchmarks](https://vgi-rpc.query.farm/benchmarks) on the main vgi-rpc site
+- See all [language implementations](https://vgi-rpc.query.farm/#languages) — Python, Go, TypeScript, C++
 
 ---
 
 <p style="text-align: center; opacity: 0.7;">
-  <a href="https://query.farm">Query.Farm</a>
+  <a href="https://vgi-rpc.query.farm">vgi-rpc</a> &middot; <a href="https://query.farm">Query.Farm</a>
 </p>

@@ -1,6 +1,6 @@
 # API Reference
 
-Full Go documentation is available on [pkg.go.dev](https://pkg.go.dev/github.com/Query-farm/vgi-rpc-go/vgirpc).
+Full Go documentation is available on [pkg.go.dev](https://pkg.go.dev/github.com/Query-farm/vgi-rpc-go/vgirpc). For the protocol specification, see the [wire protocol](https://vgi-rpc.query.farm/wire-protocol) page.
 
 ## Registration Functions
 

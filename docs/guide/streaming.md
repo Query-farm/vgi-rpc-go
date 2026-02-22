@@ -1,6 +1,6 @@
 # Streaming
 
-vgi-rpc-go supports two streaming patterns: **producer** (server pushes data) and **exchange** (lockstep bidirectional). Both use the `OutputCollector` to emit batches and the `StreamResult` to carry state.
+vgi-rpc-go supports two streaming patterns: **producer** (server pushes data) and **exchange** (lockstep bidirectional). Both use the `OutputCollector` to emit batches and the `StreamResult` to carry state. For a high-level comparison with other RPC frameworks, see the [comparison table](https://vgi-rpc.query.farm/#comparison) on the main vgi-rpc site.
 
 ## Producer Streams
 

@@ -1,6 +1,6 @@
 # HTTP Transport
 
-`HttpServer` wraps a `Server` and serves RPC over HTTP:
+`HttpServer` wraps a `Server` and serves RPC over HTTP. For background on available transports, see the [transports overview](https://vgi-rpc.query.farm/#transports) on the main vgi-rpc site.
 
 ```go
 httpServer := vgirpc.NewHttpServer(server)

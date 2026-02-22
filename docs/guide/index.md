@@ -1,6 +1,6 @@
 # Guide
 
-This guide covers the core concepts of `vgi-rpc-go` — from struct tags and streaming to HTTP transport and error handling.
+This guide covers the core concepts of `vgi-rpc-go` — from struct tags and streaming to HTTP transport and error handling. For protocol-level details, see the [wire protocol specification](https://vgi-rpc.query.farm/wire-protocol) on the main vgi-rpc site.
 
 ## Topics
 
