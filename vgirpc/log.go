@@ -1,3 +1,6 @@
+// © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+// SPDX-License-Identifier: Apache-2.0
+
 package vgirpc
 
 // LogLevel represents the severity of a log message in the vgi_rpc protocol.
