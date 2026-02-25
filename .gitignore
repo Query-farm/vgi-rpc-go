@@ -1,5 +1,8 @@
 conformance-worker
 hello-worker
+benchmark-worker
 __pycache__/
 .benchmarks/
 site/
+.playwright-mcp/
+docs-*.png
