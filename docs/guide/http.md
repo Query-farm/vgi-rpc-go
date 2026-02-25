@@ -56,7 +56,7 @@ package main
 
 import (
     "net/http"
-    "github.com/Query-farm/vgi-rpc-go/vgirpc"
+    "github.com/Query-farm/vgi-rpc/vgirpc"
 )
 
 func init() {

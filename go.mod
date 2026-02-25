@@ -1,4 +1,4 @@
-module github.com/Query-farm/vgi-rpc-go
+module github.com/Query-farm/vgi-rpc
 
 go 1.24.0
 

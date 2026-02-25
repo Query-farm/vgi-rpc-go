@@ -8,84 +8,84 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/Query-farm/vgi-rpc-go/vgirpc"
+	"github.com/Query-farm/vgi-rpc/vgirpc"
 )
 
 // --- Parameter structs for each method ---
 
-type EchoStringParams struct {
+type echoStringParams struct {
 	Value string `vgirpc:"value"`
 }
-type EchoBytesParams struct {
+type echoBytesParams struct {
 	Data []byte `vgirpc:"data"`
 }
-type EchoIntParams struct {
+type echoIntParams struct {
 	Value int64 `vgirpc:"value"`
 }
-type EchoFloatParams struct {
+type echoFloatParams struct {
 	Value float64 `vgirpc:"value"`
 }
-type EchoBoolParams struct {
+type echoBoolParams struct {
 	Value bool `vgirpc:"value"`
 }
-type VoidNoopParams struct{}
-type VoidWithParamParams struct {
+type voidNoopParams struct{}
+type voidWithParamParams struct {
 	Value int64 `vgirpc:"value"`
 }
-type EchoEnumParams struct {
+type echoEnumParams struct {
 	Status Status `vgirpc:"status,enum"`
 }
-type EchoListParams struct {
+type echoListParams struct {
 	Values []string `vgirpc:"values"`
 }
-type EchoDictParams struct {
+type echoDictParams struct {
 	Mapping map[string]int64 `vgirpc:"mapping"`
 }
-type EchoNestedListParams struct {
+type echoNestedListParams struct {
 	Matrix [][]int64 `vgirpc:"matrix"`
 }
-type EchoOptionalStringParams struct {
+type echoOptionalStringParams struct {
 	Value *string `vgirpc:"value"`
 }
-type EchoOptionalIntParams struct {
+type echoOptionalIntParams struct {
 	Value *int64 `vgirpc:"value"`
 }
-type EchoPointParams struct {
+type echoPointParams struct {
 	Point Point `vgirpc:"point,binary"`
 }
-type EchoAllTypesParams struct {
+type echoAllTypesParams struct {
 	Data AllTypes `vgirpc:"data,binary"`
 }
-type EchoBoundingBoxParams struct {
+type echoBoundingBoxParams struct {
 	Box BoundingBox `vgirpc:"box,binary"`
 }
-type InspectPointParams struct {
+type inspectPointParams struct {
 	Point Point `vgirpc:"point,binary"`
 }
-type EchoInt32Params struct {
+type echoInt32Params struct {
 	Value int64 `vgirpc:"value,int32"`
 }
-type EchoFloat32Params struct {
+type echoFloat32Params struct {
 	Value float64 `vgirpc:"value,float32"`
 }
-type AddFloatsParams struct {
+type addFloatsParams struct {
 	A float64 `vgirpc:"a"`
 	B float64 `vgirpc:"b"`
 }
-type ConcatenateParams struct {
+type concatenateParams struct {
 	Prefix    string `vgirpc:"prefix"`
 	Suffix    string `vgirpc:"suffix"`
 	Separator string `vgirpc:"separator,default=-"`
 }
-type WithDefaultsParams struct {
+type withDefaultsParams struct {
 	Required    int64  `vgirpc:"required"`
 	OptionalStr string `vgirpc:"optional_str,default=default"`
 	OptionalInt int64  `vgirpc:"optional_int,default=42"`
 }
-type RaiseErrorParams struct {
+type raiseErrorParams struct {
 	Message string `vgirpc:"message"`
 }
-type EchoWithLogParams struct {
+type echoWithLogParams struct {
 	Value string `vgirpc:"value"`
 }
 
@@ -140,67 +140,67 @@ func RegisterMethods(server *vgirpc.Server) {
 	vgirpc.Unary(server, "echo_with_log_extras", echoWithLogExtras)
 
 	// Producer streams
-	vgirpc.Producer(server, "produce_n", CounterSchema, produceN)
-	vgirpc.Producer(server, "produce_empty", CounterSchema, produceEmpty)
-	vgirpc.Producer(server, "produce_single", CounterSchema, produceSingle)
-	vgirpc.Producer(server, "produce_large_batches", CounterSchema, produceLargeBatches)
-	vgirpc.Producer(server, "produce_with_logs", CounterSchema, produceWithLogs)
-	vgirpc.Producer(server, "produce_error_mid_stream", CounterSchema, produceErrorMidStream)
-	vgirpc.Producer(server, "produce_error_on_init", CounterSchema, produceErrorOnInit)
+	vgirpc.Producer(server, "produce_n", counterSchema, produceN)
+	vgirpc.Producer(server, "produce_empty", counterSchema, produceEmpty)
+	vgirpc.Producer(server, "produce_single", counterSchema, produceSingle)
+	vgirpc.Producer(server, "produce_large_batches", counterSchema, produceLargeBatches)
+	vgirpc.Producer(server, "produce_with_logs", counterSchema, produceWithLogs)
+	vgirpc.Producer(server, "produce_error_mid_stream", counterSchema, produceErrorMidStream)
+	vgirpc.Producer(server, "produce_error_on_init", counterSchema, produceErrorOnInit)
 
 	// Producer streams with headers
 	headerSchema := ConformanceHeader{}.ArrowSchema()
-	vgirpc.ProducerWithHeader(server, "produce_with_header", CounterSchema, headerSchema, produceWithHeader)
-	vgirpc.ProducerWithHeader(server, "produce_with_header_and_logs", CounterSchema, headerSchema, produceWithHeaderAndLogs)
+	vgirpc.ProducerWithHeader(server, "produce_with_header", counterSchema, headerSchema, produceWithHeader)
+	vgirpc.ProducerWithHeader(server, "produce_with_header_and_logs", counterSchema, headerSchema, produceWithHeaderAndLogs)
 
 	// Exchange streams
-	vgirpc.Exchange(server, "exchange_scale", ScaleOutputSchema, ScaleInputSchema, exchangeScale)
-	vgirpc.Exchange(server, "exchange_accumulate", AccumOutputSchema, AccumInputSchema, exchangeAccumulate)
-	vgirpc.Exchange(server, "exchange_with_logs", ScaleOutputSchema, ScaleInputSchema, exchangeWithLogs)
-	vgirpc.Exchange(server, "exchange_error_on_nth", ScaleOutputSchema, ScaleInputSchema, exchangeErrorOnNth)
-	vgirpc.Exchange(server, "exchange_error_on_init", ScaleOutputSchema, ScaleInputSchema, exchangeErrorOnInit)
+	vgirpc.Exchange(server, "exchange_scale", scaleOutputSchema, scaleInputSchema, exchangeScale)
+	vgirpc.Exchange(server, "exchange_accumulate", accumOutputSchema, accumInputSchema, exchangeAccumulate)
+	vgirpc.Exchange(server, "exchange_with_logs", scaleOutputSchema, scaleInputSchema, exchangeWithLogs)
+	vgirpc.Exchange(server, "exchange_error_on_nth", scaleOutputSchema, scaleInputSchema, exchangeErrorOnNth)
+	vgirpc.Exchange(server, "exchange_error_on_init", scaleOutputSchema, scaleInputSchema, exchangeErrorOnInit)
 
 	// Exchange streams with headers
-	vgirpc.ExchangeWithHeader(server, "exchange_with_header", ScaleOutputSchema, ScaleInputSchema, headerSchema, exchangeWithHeader)
+	vgirpc.ExchangeWithHeader(server, "exchange_with_header", scaleOutputSchema, scaleInputSchema, headerSchema, exchangeWithHeader)
 }
 
 // --- Producer stream parameter structs ---
 
-type ProduceNParams struct {
+type produceNParams struct {
 	Count int64 `vgirpc:"count"`
 }
-type ProduceEmptyParams struct{}
-type ProduceSingleParams struct{}
-type ProduceLargeBatchesParams struct {
+type produceEmptyParams struct{}
+type produceSingleParams struct{}
+type produceLargeBatchesParams struct {
 	RowsPerBatch int64 `vgirpc:"rows_per_batch"`
 	BatchCount   int64 `vgirpc:"batch_count"`
 }
-type ProduceWithLogsParams struct {
+type produceWithLogsParams struct {
 	Count int64 `vgirpc:"count"`
 }
-type ProduceErrorMidStreamParams struct {
+type produceErrorMidStreamParams struct {
 	EmitBeforeError int64 `vgirpc:"emit_before_error"`
 }
-type ProduceErrorOnInitParams struct{}
-type ProduceWithHeaderParams struct {
+type produceErrorOnInitParams struct{}
+type produceWithHeaderParams struct {
 	Count int64 `vgirpc:"count"`
 }
-type ProduceWithHeaderAndLogsParams struct {
+type produceWithHeaderAndLogsParams struct {
 	Count int64 `vgirpc:"count"`
 }
 
 // --- Exchange stream parameter structs ---
 
-type ExchangeScaleParams struct {
+type exchangeScaleParams struct {
 	Factor float64 `vgirpc:"factor"`
 }
-type ExchangeAccumulateParams struct{}
-type ExchangeWithLogsParams struct{}
-type ExchangeErrorOnNthParams struct {
+type exchangeAccumulateParams struct{}
+type exchangeWithLogsParams struct{}
+type exchangeErrorOnNthParams struct {
 	FailOn int64 `vgirpc:"fail_on"`
 }
-type ExchangeErrorOnInitParams struct{}
-type ExchangeWithHeaderParams struct {
+type exchangeErrorOnInitParams struct{}
+type exchangeWithHeaderParams struct {
 	Factor float64 `vgirpc:"factor"`
 }
 
@@ -225,120 +225,120 @@ func containsDot(s string) bool {
 
 // --- Scalar echo ---
 
-func echoString(_ context.Context, ctx *vgirpc.CallContext, p EchoStringParams) (string, error) {
+func echoString(_ context.Context, ctx *vgirpc.CallContext, p echoStringParams) (string, error) {
 	return p.Value, nil
 }
-func echoBytes(_ context.Context, ctx *vgirpc.CallContext, p EchoBytesParams) ([]byte, error) {
+func echoBytes(_ context.Context, ctx *vgirpc.CallContext, p echoBytesParams) ([]byte, error) {
 	return p.Data, nil
 }
-func echoInt(_ context.Context, ctx *vgirpc.CallContext, p EchoIntParams) (int64, error) {
+func echoInt(_ context.Context, ctx *vgirpc.CallContext, p echoIntParams) (int64, error) {
 	return p.Value, nil
 }
-func echoFloat(_ context.Context, ctx *vgirpc.CallContext, p EchoFloatParams) (float64, error) {
+func echoFloat(_ context.Context, ctx *vgirpc.CallContext, p echoFloatParams) (float64, error) {
 	return p.Value, nil
 }
-func echoBool(_ context.Context, ctx *vgirpc.CallContext, p EchoBoolParams) (bool, error) {
+func echoBool(_ context.Context, ctx *vgirpc.CallContext, p echoBoolParams) (bool, error) {
 	return p.Value, nil
 }
 
 // --- Void ---
 
-func voidNoop(_ context.Context, ctx *vgirpc.CallContext, _ VoidNoopParams) error {
+func voidNoop(_ context.Context, ctx *vgirpc.CallContext, _ voidNoopParams) error {
 	return nil
 }
-func voidWithParam(_ context.Context, ctx *vgirpc.CallContext, _ VoidWithParamParams) error {
+func voidWithParam(_ context.Context, ctx *vgirpc.CallContext, _ voidWithParamParams) error {
 	return nil
 }
 
 // --- Complex type echo ---
 
-func echoEnum(_ context.Context, ctx *vgirpc.CallContext, p EchoEnumParams) (Status, error) {
+func echoEnum(_ context.Context, ctx *vgirpc.CallContext, p echoEnumParams) (Status, error) {
 	return p.Status, nil
 }
-func echoList(_ context.Context, ctx *vgirpc.CallContext, p EchoListParams) ([]string, error) {
+func echoList(_ context.Context, ctx *vgirpc.CallContext, p echoListParams) ([]string, error) {
 	return p.Values, nil
 }
-func echoDict(_ context.Context, ctx *vgirpc.CallContext, p EchoDictParams) (map[string]int64, error) {
+func echoDict(_ context.Context, ctx *vgirpc.CallContext, p echoDictParams) (map[string]int64, error) {
 	return p.Mapping, nil
 }
-func echoNestedList(_ context.Context, ctx *vgirpc.CallContext, p EchoNestedListParams) ([][]int64, error) {
+func echoNestedList(_ context.Context, ctx *vgirpc.CallContext, p echoNestedListParams) ([][]int64, error) {
 	return p.Matrix, nil
 }
 
 // --- Optional/nullable ---
 
-func echoOptionalString(_ context.Context, ctx *vgirpc.CallContext, p EchoOptionalStringParams) (*string, error) {
+func echoOptionalString(_ context.Context, ctx *vgirpc.CallContext, p echoOptionalStringParams) (*string, error) {
 	return p.Value, nil
 }
-func echoOptionalInt(_ context.Context, ctx *vgirpc.CallContext, p EchoOptionalIntParams) (*int64, error) {
+func echoOptionalInt(_ context.Context, ctx *vgirpc.CallContext, p echoOptionalIntParams) (*int64, error) {
 	return p.Value, nil
 }
 
 // --- Dataclass round-trip ---
 
-func echoPoint(_ context.Context, ctx *vgirpc.CallContext, p EchoPointParams) (Point, error) {
+func echoPoint(_ context.Context, ctx *vgirpc.CallContext, p echoPointParams) (Point, error) {
 	return p.Point, nil
 }
-func echoAllTypes(_ context.Context, ctx *vgirpc.CallContext, p EchoAllTypesParams) (AllTypes, error) {
+func echoAllTypes(_ context.Context, ctx *vgirpc.CallContext, p echoAllTypesParams) (AllTypes, error) {
 	return p.Data, nil
 }
-func echoBoundingBox(_ context.Context, ctx *vgirpc.CallContext, p EchoBoundingBoxParams) (BoundingBox, error) {
+func echoBoundingBox(_ context.Context, ctx *vgirpc.CallContext, p echoBoundingBoxParams) (BoundingBox, error) {
 	return p.Box, nil
 }
 
 // --- Dataclass as parameter ---
 
-func inspectPoint(_ context.Context, ctx *vgirpc.CallContext, p InspectPointParams) (string, error) {
+func inspectPoint(_ context.Context, ctx *vgirpc.CallContext, p inspectPointParams) (string, error) {
 	return fmt.Sprintf("Point(%g, %g)", p.Point.X, p.Point.Y), nil
 }
 
 // --- Annotated types ---
 
-func echoInt32(_ context.Context, ctx *vgirpc.CallContext, p EchoInt32Params) (int64, error) {
+func echoInt32(_ context.Context, ctx *vgirpc.CallContext, p echoInt32Params) (int64, error) {
 	return p.Value, nil
 }
-func echoFloat32(_ context.Context, ctx *vgirpc.CallContext, p EchoFloat32Params) (float64, error) {
+func echoFloat32(_ context.Context, ctx *vgirpc.CallContext, p echoFloat32Params) (float64, error) {
 	return p.Value, nil
 }
 
 // --- Multi-param & defaults ---
 
-func addFloats(_ context.Context, ctx *vgirpc.CallContext, p AddFloatsParams) (float64, error) {
+func addFloats(_ context.Context, ctx *vgirpc.CallContext, p addFloatsParams) (float64, error) {
 	return p.A + p.B, nil
 }
-func concatenate(_ context.Context, ctx *vgirpc.CallContext, p ConcatenateParams) (string, error) {
+func concatenate(_ context.Context, ctx *vgirpc.CallContext, p concatenateParams) (string, error) {
 	return p.Prefix + p.Separator + p.Suffix, nil
 }
-func withDefaults(_ context.Context, ctx *vgirpc.CallContext, p WithDefaultsParams) (string, error) {
+func withDefaults(_ context.Context, ctx *vgirpc.CallContext, p withDefaultsParams) (string, error) {
 	return fmt.Sprintf("required=%d, optional_str=%s, optional_int=%d",
 		p.Required, p.OptionalStr, p.OptionalInt), nil
 }
 
 // --- Error propagation ---
 
-func raiseValueError(_ context.Context, ctx *vgirpc.CallContext, p RaiseErrorParams) (string, error) {
+func raiseValueError(_ context.Context, ctx *vgirpc.CallContext, p raiseErrorParams) (string, error) {
 	return "", &vgirpc.RpcError{Type: "ValueError", Message: p.Message}
 }
-func raiseRuntimeError(_ context.Context, ctx *vgirpc.CallContext, p RaiseErrorParams) (string, error) {
+func raiseRuntimeError(_ context.Context, ctx *vgirpc.CallContext, p raiseErrorParams) (string, error) {
 	return "", &vgirpc.RpcError{Type: "RuntimeError", Message: p.Message}
 }
-func raiseTypeError(_ context.Context, ctx *vgirpc.CallContext, p RaiseErrorParams) (string, error) {
+func raiseTypeError(_ context.Context, ctx *vgirpc.CallContext, p raiseErrorParams) (string, error) {
 	return "", &vgirpc.RpcError{Type: "TypeError", Message: p.Message}
 }
 
 // --- Client-directed logging ---
 
-func echoWithInfoLog(_ context.Context, ctx *vgirpc.CallContext, p EchoWithLogParams) (string, error) {
+func echoWithInfoLog(_ context.Context, ctx *vgirpc.CallContext, p echoWithLogParams) (string, error) {
 	ctx.ClientLog(vgirpc.LogInfo, fmt.Sprintf("info: %s", p.Value))
 	return p.Value, nil
 }
-func echoWithMultiLogs(_ context.Context, ctx *vgirpc.CallContext, p EchoWithLogParams) (string, error) {
+func echoWithMultiLogs(_ context.Context, ctx *vgirpc.CallContext, p echoWithLogParams) (string, error) {
 	ctx.ClientLog(vgirpc.LogDebug, fmt.Sprintf("debug: %s", p.Value))
 	ctx.ClientLog(vgirpc.LogInfo, fmt.Sprintf("info: %s", p.Value))
 	ctx.ClientLog(vgirpc.LogWarn, fmt.Sprintf("warn: %s", p.Value))
 	return p.Value, nil
 }
-func echoWithLogExtras(_ context.Context, ctx *vgirpc.CallContext, p EchoWithLogParams) (string, error) {
+func echoWithLogExtras(_ context.Context, ctx *vgirpc.CallContext, p echoWithLogParams) (string, error) {
 	ctx.ClientLog(vgirpc.LogInfo, "echo_with_extras",
 		vgirpc.KV{Key: "source", Value: "conformance"},
 		vgirpc.KV{Key: "detail", Value: p.Value},
@@ -348,112 +348,112 @@ func echoWithLogExtras(_ context.Context, ctx *vgirpc.CallContext, p EchoWithLog
 
 // --- Producer stream handlers ---
 
-func produceN(_ context.Context, ctx *vgirpc.CallContext, p ProduceNParams) (*vgirpc.StreamResult, error) {
+func produceN(_ context.Context, ctx *vgirpc.CallContext, p produceNParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: CounterSchema,
-		State:        &CounterProducerState{Count: int(p.Count)},
+		OutputSchema: counterSchema,
+		State:        &counterProducerState{Count: int(p.Count)},
 	}, nil
 }
 
-func produceEmpty(_ context.Context, ctx *vgirpc.CallContext, _ ProduceEmptyParams) (*vgirpc.StreamResult, error) {
+func produceEmpty(_ context.Context, ctx *vgirpc.CallContext, _ produceEmptyParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: CounterSchema,
-		State:        &EmptyProducerState{},
+		OutputSchema: counterSchema,
+		State:        &emptyProducerState{},
 	}, nil
 }
 
-func produceSingle(_ context.Context, ctx *vgirpc.CallContext, _ ProduceSingleParams) (*vgirpc.StreamResult, error) {
+func produceSingle(_ context.Context, ctx *vgirpc.CallContext, _ produceSingleParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: CounterSchema,
-		State:        &SingleProducerState{},
+		OutputSchema: counterSchema,
+		State:        &singleProducerState{},
 	}, nil
 }
 
-func produceLargeBatches(_ context.Context, ctx *vgirpc.CallContext, p ProduceLargeBatchesParams) (*vgirpc.StreamResult, error) {
+func produceLargeBatches(_ context.Context, ctx *vgirpc.CallContext, p produceLargeBatchesParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: CounterSchema,
-		State:        &LargeProducerState{RowsPerBatch: int(p.RowsPerBatch), BatchCount: int(p.BatchCount)},
+		OutputSchema: counterSchema,
+		State:        &largeProducerState{RowsPerBatch: int(p.RowsPerBatch), BatchCount: int(p.BatchCount)},
 	}, nil
 }
 
-func produceWithLogs(_ context.Context, ctx *vgirpc.CallContext, p ProduceWithLogsParams) (*vgirpc.StreamResult, error) {
+func produceWithLogs(_ context.Context, ctx *vgirpc.CallContext, p produceWithLogsParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: CounterSchema,
-		State:        &LoggingProducerState{Count: int(p.Count)},
+		OutputSchema: counterSchema,
+		State:        &loggingProducerState{Count: int(p.Count)},
 	}, nil
 }
 
-func produceErrorMidStream(_ context.Context, ctx *vgirpc.CallContext, p ProduceErrorMidStreamParams) (*vgirpc.StreamResult, error) {
+func produceErrorMidStream(_ context.Context, ctx *vgirpc.CallContext, p produceErrorMidStreamParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: CounterSchema,
-		State:        &ErrorAfterNState{EmitBeforeError: int(p.EmitBeforeError)},
+		OutputSchema: counterSchema,
+		State:        &errorAfterNState{EmitBeforeError: int(p.EmitBeforeError)},
 	}, nil
 }
 
-func produceErrorOnInit(_ context.Context, ctx *vgirpc.CallContext, _ ProduceErrorOnInitParams) (*vgirpc.StreamResult, error) {
+func produceErrorOnInit(_ context.Context, ctx *vgirpc.CallContext, _ produceErrorOnInitParams) (*vgirpc.StreamResult, error) {
 	return nil, &vgirpc.RpcError{Type: "RuntimeError", Message: "intentional init error"}
 }
 
-func produceWithHeader(_ context.Context, ctx *vgirpc.CallContext, p ProduceWithHeaderParams) (*vgirpc.StreamResult, error) {
+func produceWithHeader(_ context.Context, ctx *vgirpc.CallContext, p produceWithHeaderParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: CounterSchema,
-		State:        &HeaderProducerState{Count: int(p.Count)},
+		OutputSchema: counterSchema,
+		State:        &headerProducerState{Count: int(p.Count)},
 		Header:       ConformanceHeader{TotalExpected: p.Count, Description: fmt.Sprintf("producing %d batches", p.Count)},
 	}, nil
 }
 
-func produceWithHeaderAndLogs(_ context.Context, ctx *vgirpc.CallContext, p ProduceWithHeaderAndLogsParams) (*vgirpc.StreamResult, error) {
+func produceWithHeaderAndLogs(_ context.Context, ctx *vgirpc.CallContext, p produceWithHeaderAndLogsParams) (*vgirpc.StreamResult, error) {
 	ctx.ClientLog(vgirpc.LogInfo, "stream init log")
 	return &vgirpc.StreamResult{
-		OutputSchema: CounterSchema,
-		State:        &HeaderProducerState{Count: int(p.Count)},
+		OutputSchema: counterSchema,
+		State:        &headerProducerState{Count: int(p.Count)},
 		Header:       ConformanceHeader{TotalExpected: p.Count, Description: fmt.Sprintf("producing %d with logs", p.Count)},
 	}, nil
 }
 
 // --- Exchange stream handlers ---
 
-func exchangeScale(_ context.Context, ctx *vgirpc.CallContext, p ExchangeScaleParams) (*vgirpc.StreamResult, error) {
+func exchangeScale(_ context.Context, ctx *vgirpc.CallContext, p exchangeScaleParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: ScaleOutputSchema,
-		InputSchema:  ScaleInputSchema,
-		State:        &ScaleExchangeState{Factor: p.Factor},
+		OutputSchema: scaleOutputSchema,
+		InputSchema:  scaleInputSchema,
+		State:        &scaleExchangeState{Factor: p.Factor},
 	}, nil
 }
 
-func exchangeAccumulate(_ context.Context, ctx *vgirpc.CallContext, _ ExchangeAccumulateParams) (*vgirpc.StreamResult, error) {
+func exchangeAccumulate(_ context.Context, ctx *vgirpc.CallContext, _ exchangeAccumulateParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: AccumOutputSchema,
-		InputSchema:  AccumInputSchema,
-		State:        &AccumulatingExchangeState{},
+		OutputSchema: accumOutputSchema,
+		InputSchema:  accumInputSchema,
+		State:        &accumulatingExchangeState{},
 	}, nil
 }
 
-func exchangeWithLogs(_ context.Context, ctx *vgirpc.CallContext, _ ExchangeWithLogsParams) (*vgirpc.StreamResult, error) {
+func exchangeWithLogs(_ context.Context, ctx *vgirpc.CallContext, _ exchangeWithLogsParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: ScaleOutputSchema,
-		InputSchema:  ScaleInputSchema,
-		State:        &LoggingExchangeState{},
+		OutputSchema: scaleOutputSchema,
+		InputSchema:  scaleInputSchema,
+		State:        &loggingExchangeState{},
 	}, nil
 }
 
-func exchangeErrorOnNth(_ context.Context, ctx *vgirpc.CallContext, p ExchangeErrorOnNthParams) (*vgirpc.StreamResult, error) {
+func exchangeErrorOnNth(_ context.Context, ctx *vgirpc.CallContext, p exchangeErrorOnNthParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: ScaleOutputSchema,
-		InputSchema:  ScaleInputSchema,
-		State:        &FailOnExchangeNState{FailOn: int(p.FailOn)},
+		OutputSchema: scaleOutputSchema,
+		InputSchema:  scaleInputSchema,
+		State:        &failOnExchangeNState{FailOn: int(p.FailOn)},
 	}, nil
 }
 
-func exchangeErrorOnInit(_ context.Context, ctx *vgirpc.CallContext, _ ExchangeErrorOnInitParams) (*vgirpc.StreamResult, error) {
+func exchangeErrorOnInit(_ context.Context, ctx *vgirpc.CallContext, _ exchangeErrorOnInitParams) (*vgirpc.StreamResult, error) {
 	return nil, &vgirpc.RpcError{Type: "RuntimeError", Message: "intentional exchange init error"}
 }
 
-func exchangeWithHeader(_ context.Context, ctx *vgirpc.CallContext, p ExchangeWithHeaderParams) (*vgirpc.StreamResult, error) {
+func exchangeWithHeader(_ context.Context, ctx *vgirpc.CallContext, p exchangeWithHeaderParams) (*vgirpc.StreamResult, error) {
 	return &vgirpc.StreamResult{
-		OutputSchema: ScaleOutputSchema,
-		InputSchema:  ScaleInputSchema,
-		State:        &ScaleExchangeState{Factor: p.Factor},
+		OutputSchema: scaleOutputSchema,
+		InputSchema:  scaleInputSchema,
+		State:        &scaleExchangeState{Factor: p.Factor},
 		Header:       ConformanceHeader{TotalExpected: 0, Description: "scale by " + formatFloat(p.Factor)},
 	}, nil
 }

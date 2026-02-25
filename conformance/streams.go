@@ -10,33 +10,33 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
-	"github.com/Query-farm/vgi-rpc-go/vgirpc"
+	"github.com/Query-farm/vgi-rpc/vgirpc"
 )
 
 func init() {
 	// Register all state types for gob serialization (needed for HTTP transport).
-	vgirpc.RegisterStateType(&CounterProducerState{})
-	vgirpc.RegisterStateType(&EmptyProducerState{})
-	vgirpc.RegisterStateType(&SingleProducerState{})
-	vgirpc.RegisterStateType(&LargeProducerState{})
-	vgirpc.RegisterStateType(&LoggingProducerState{})
-	vgirpc.RegisterStateType(&ErrorAfterNState{})
-	vgirpc.RegisterStateType(&HeaderProducerState{})
-	vgirpc.RegisterStateType(&ScaleExchangeState{})
-	vgirpc.RegisterStateType(&AccumulatingExchangeState{})
-	vgirpc.RegisterStateType(&LoggingExchangeState{})
-	vgirpc.RegisterStateType(&FailOnExchangeNState{})
+	vgirpc.RegisterStateType(&counterProducerState{})
+	vgirpc.RegisterStateType(&emptyProducerState{})
+	vgirpc.RegisterStateType(&singleProducerState{})
+	vgirpc.RegisterStateType(&largeProducerState{})
+	vgirpc.RegisterStateType(&loggingProducerState{})
+	vgirpc.RegisterStateType(&errorAfterNState{})
+	vgirpc.RegisterStateType(&headerProducerState{})
+	vgirpc.RegisterStateType(&scaleExchangeState{})
+	vgirpc.RegisterStateType(&accumulatingExchangeState{})
+	vgirpc.RegisterStateType(&loggingExchangeState{})
+	vgirpc.RegisterStateType(&failOnExchangeNState{})
 }
 
 // --- Producer States ---
 
-// CounterProducerState produces count batches with {index, value}.
-type CounterProducerState struct {
+// counterProducerState produces count batches with {index, value}.
+type counterProducerState struct {
 	Count   int
 	Current int
 }
 
-func (s *CounterProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *counterProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	if s.Current >= s.Count {
 		return out.Finish()
 	}
@@ -47,19 +47,19 @@ func (s *CounterProducerState) Produce(_ context.Context, out *vgirpc.OutputColl
 	return nil
 }
 
-// EmptyProducerState finishes immediately — zero batches.
-type EmptyProducerState struct{}
+// emptyProducerState finishes immediately — zero batches.
+type emptyProducerState struct{}
 
-func (s *EmptyProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *emptyProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	return out.Finish()
 }
 
-// SingleProducerState emits exactly one batch, then finishes.
-type SingleProducerState struct {
+// singleProducerState emits exactly one batch, then finishes.
+type singleProducerState struct {
 	Emitted bool
 }
 
-func (s *SingleProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *singleProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	if s.Emitted {
 		return out.Finish()
 	}
@@ -67,14 +67,14 @@ func (s *SingleProducerState) Produce(_ context.Context, out *vgirpc.OutputColle
 	return emitCounterBatch(out, 0)
 }
 
-// LargeProducerState produces batch_count batches of rows_per_batch rows each.
-type LargeProducerState struct {
+// largeProducerState produces batch_count batches of rows_per_batch rows each.
+type largeProducerState struct {
 	RowsPerBatch int
 	BatchCount   int
 	Current      int
 }
 
-func (s *LargeProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *largeProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	if s.Current >= s.BatchCount {
 		return out.Finish()
 	}
@@ -105,13 +105,13 @@ func (s *LargeProducerState) Produce(_ context.Context, out *vgirpc.OutputCollec
 	return nil
 }
 
-// LoggingProducerState produces batches with an INFO log before each.
-type LoggingProducerState struct {
+// loggingProducerState produces batches with an INFO log before each.
+type loggingProducerState struct {
 	Count   int
 	Current int
 }
 
-func (s *LoggingProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *loggingProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	if s.Current >= s.Count {
 		return out.Finish()
 	}
@@ -123,13 +123,13 @@ func (s *LoggingProducerState) Produce(_ context.Context, out *vgirpc.OutputColl
 	return nil
 }
 
-// ErrorAfterNState raises after emitting emit_before_error batches.
-type ErrorAfterNState struct {
+// errorAfterNState raises after emitting emit_before_error batches.
+type errorAfterNState struct {
 	EmitBeforeError int
 	Current         int
 }
 
-func (s *ErrorAfterNState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *errorAfterNState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	if s.Current >= s.EmitBeforeError {
 		return &vgirpc.RpcError{Type: "RuntimeError", Message: fmt.Sprintf("intentional error after %d batches", s.EmitBeforeError)}
 	}
@@ -140,13 +140,13 @@ func (s *ErrorAfterNState) Produce(_ context.Context, out *vgirpc.OutputCollecto
 	return nil
 }
 
-// HeaderProducerState is used with stream headers — same as CounterProducerState.
-type HeaderProducerState struct {
+// headerProducerState is used with stream headers — same as counterProducerState.
+type headerProducerState struct {
 	Count   int
 	Current int
 }
 
-func (s *HeaderProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *headerProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	if s.Current >= s.Count {
 		return out.Finish()
 	}
@@ -159,12 +159,12 @@ func (s *HeaderProducerState) Produce(_ context.Context, out *vgirpc.OutputColle
 
 // --- Exchange States ---
 
-// ScaleExchangeState multiplies the value column by factor.
-type ScaleExchangeState struct {
+// scaleExchangeState multiplies the value column by factor.
+type scaleExchangeState struct {
 	Factor float64
 }
 
-func (s *ScaleExchangeState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *scaleExchangeState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	// Read input value column
 	valueCol := input.Column(0).(*array.Float64)
 	numRows := input.NumRows()
@@ -181,13 +181,13 @@ func (s *ScaleExchangeState) Exchange(_ context.Context, input arrow.RecordBatch
 	return out.EmitArrays([]arrow.Array{arr}, numRows)
 }
 
-// AccumulatingExchangeState maintains running sum and exchange count.
-type AccumulatingExchangeState struct {
+// accumulatingExchangeState maintains running sum and exchange count.
+type accumulatingExchangeState struct {
 	RunningSum    float64
 	ExchangeCount int64
 }
 
-func (s *AccumulatingExchangeState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *accumulatingExchangeState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	valueCol := input.Column(0).(*array.Float64)
 	numRows := input.NumRows()
 
@@ -216,22 +216,22 @@ func (s *AccumulatingExchangeState) Exchange(_ context.Context, input arrow.Reco
 	return out.EmitArrays([]arrow.Array{sumArr, countArr}, 1)
 }
 
-// LoggingExchangeState logs INFO + DEBUG per exchange, then echoes input.
-type LoggingExchangeState struct{}
+// loggingExchangeState logs INFO + DEBUG per exchange, then echoes input.
+type loggingExchangeState struct{}
 
-func (s *LoggingExchangeState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *loggingExchangeState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	out.ClientLog(vgirpc.LogInfo, "exchange processing")
 	out.ClientLog(vgirpc.LogDebug, "exchange debug")
 	return out.Emit(input)
 }
 
-// FailOnExchangeNState raises on the Nth exchange (1-indexed).
-type FailOnExchangeNState struct {
+// failOnExchangeNState raises on the Nth exchange (1-indexed).
+type failOnExchangeNState struct {
 	FailOn        int
 	ExchangeCount int
 }
 
-func (s *FailOnExchangeNState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+func (s *failOnExchangeNState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	s.ExchangeCount++
 	if s.ExchangeCount >= s.FailOn {
 		return &vgirpc.RpcError{Type: "RuntimeError", Message: fmt.Sprintf("intentional error on exchange %d", s.ExchangeCount)}
@@ -261,19 +261,19 @@ func emitCounterBatch(out *vgirpc.OutputCollector, index int64) error {
 
 // --- Schemas ---
 
-var ScaleInputSchema = arrow.NewSchema([]arrow.Field{
+var scaleInputSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "value", Type: arrow.PrimitiveTypes.Float64},
 }, nil)
 
-var ScaleOutputSchema = arrow.NewSchema([]arrow.Field{
+var scaleOutputSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "value", Type: arrow.PrimitiveTypes.Float64},
 }, nil)
 
-var AccumInputSchema = arrow.NewSchema([]arrow.Field{
+var accumInputSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "value", Type: arrow.PrimitiveTypes.Float64},
 }, nil)
 
-var AccumOutputSchema = arrow.NewSchema([]arrow.Field{
+var accumOutputSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "running_sum", Type: arrow.PrimitiveTypes.Float64},
 	{Name: "exchange_count", Type: arrow.PrimitiveTypes.Int64},
 }, nil)

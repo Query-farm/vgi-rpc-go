@@ -14,7 +14,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 
-	"github.com/Query-farm/vgi-rpc-go/vgirpc"
+	"github.com/Query-farm/vgi-rpc/vgirpc"
 )
 
 func init() {

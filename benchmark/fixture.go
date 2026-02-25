@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/Query-farm/vgi-rpc-go/vgirpc"
+	"github.com/Query-farm/vgi-rpc/vgirpc"
 )
 
 // Parameter structs

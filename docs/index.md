@@ -71,7 +71,7 @@ Client  ──      [close]          ──▸  Server
 ## Installation
 
 ```bash
-go get github.com/Query-farm/vgi-rpc-go/vgirpc
+go get github.com/Query-farm/vgi-rpc/vgirpc
 ```
 
 ## Quick Start
@@ -81,7 +81,7 @@ package main
 
 import (
     "context"
-    "github.com/Query-farm/vgi-rpc-go/vgirpc"
+    "github.com/Query-farm/vgi-rpc/vgirpc"
 )
 
 type GreetParams struct {

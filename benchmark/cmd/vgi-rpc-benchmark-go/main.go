@@ -9,8 +9,8 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/Query-farm/vgi-rpc-go/benchmark"
-	"github.com/Query-farm/vgi-rpc-go/vgirpc"
+	"github.com/Query-farm/vgi-rpc/benchmark"
+	"github.com/Query-farm/vgi-rpc/vgirpc"
 )
 
 func main() {
