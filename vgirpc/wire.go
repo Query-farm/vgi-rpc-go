@@ -28,12 +28,18 @@ const (
 
 // Request represents a parsed RPC request from the wire.
 type Request struct {
-	Method    string
-	Version   string
+	// Method is the RPC method name extracted from batch custom metadata.
+	Method string
+	// Version is the protocol version string (must equal [ProtocolVersion]).
+	Version string
+	// RequestID is a client-supplied identifier echoed in all response batches.
 	RequestID string
-	LogLevel  string
-	Batch     arrow.RecordBatch
-	Metadata  map[string]string
+	// LogLevel is the client-requested minimum log severity (e.g. "INFO").
+	LogLevel string
+	// Batch is the Arrow RecordBatch containing the method parameters (one row).
+	Batch arrow.RecordBatch
+	// Metadata is the full set of custom metadata key-value pairs from the batch.
+	Metadata map[string]string
 }
 
 // ReadRequest reads one complete IPC stream from the reader and extracts

@@ -27,13 +27,24 @@ const (
 	defaultTokenTTL  = 5 * time.Minute
 )
 
-// RegisterStateType registers a state type for gob serialization.
-// Must be called before using HTTP transport with stateful streams.
+// RegisterStateType registers a concrete type for gob encoding so that it can
+// be serialized into HTTP state tokens. Each [ProducerState] and
+// [ExchangeState] implementation (and any types they embed) must be
+// registered before the first HTTP stream request. Typically this is done
+// in a package init() function.
 func RegisterStateType(v interface{}) {
 	gob.Register(v)
 }
 
-// HttpServer serves RPC requests over HTTP.
+// HttpServer serves RPC requests over HTTP. It wraps a [Server] and exposes
+// three URL routes under a configurable prefix (default "/vgi"):
+//
+//	POST /vgi/{method}           — unary RPC call
+//	POST /vgi/{method}/init      — stream initialization (producer or exchange)
+//	POST /vgi/{method}/exchange  — exchange continuation with state token
+//
+// HttpServer implements [http.Handler] and can be used directly with
+// [http.ListenAndServe] or mounted on an existing [http.ServeMux].
 type HttpServer struct {
 	server     *Server
 	signingKey []byte

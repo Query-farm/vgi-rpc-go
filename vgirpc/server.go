@@ -23,8 +23,11 @@ import (
 type MethodType int
 
 const (
+	// MethodUnary identifies a request-response method with a single result.
 	MethodUnary MethodType = iota
+	// MethodProducer identifies a server-driven streaming method.
 	MethodProducer
+	// MethodExchange identifies a bidirectional streaming method.
 	MethodExchange
 )
 

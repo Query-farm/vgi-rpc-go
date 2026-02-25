@@ -11,9 +11,9 @@ import (
 type Status string
 
 const (
-	StatusPending Status = "PENDING"
-	StatusActive  Status = "ACTIVE"
-	StatusClosed  Status = "CLOSED"
+	statusPending Status = "PENDING"
+	statusActive  Status = "ACTIVE"
+	statusClosed  Status = "CLOSED"
 )
 
 // Point is a simple 2D point.
@@ -52,24 +52,24 @@ func (b BoundingBox) ArrowSchema() *arrow.Schema {
 
 // AllTypes demonstrates comprehensive type coverage.
 type AllTypes struct {
-	StrField        string            `arrow:"str_field"`
-	BytesField      []byte            `arrow:"bytes_field"`
-	IntField        int64             `arrow:"int_field"`
-	FloatField      float64           `arrow:"float_field"`
-	BoolField       bool              `arrow:"bool_field"`
-	ListOfInt       []int64           `arrow:"list_of_int"`
-	ListOfStr       []string          `arrow:"list_of_str"`
-	DictField       map[string]int64  `arrow:"dict_field"`
-	EnumField       Status            `arrow:"enum_field"`
-	NestedPoint     Point             `arrow:"nested_point"`
-	OptionalStr     *string           `arrow:"optional_str"`
-	OptionalInt     *int64            `arrow:"optional_int"`
-	OptionalNested  *Point            `arrow:"optional_nested"`
-	ListOfNested    []Point           `arrow:"list_of_nested"`
-	AnnotatedInt32  int32             `arrow:"annotated_int32"`
-	AnnotatedFloat  float32           `arrow:"annotated_float32"`
-	NestedList      [][]int64         `arrow:"nested_list"`
-	DictStrStr      map[string]string `arrow:"dict_str_str"`
+	StrField       string            `arrow:"str_field"`
+	BytesField     []byte            `arrow:"bytes_field"`
+	IntField       int64             `arrow:"int_field"`
+	FloatField     float64           `arrow:"float_field"`
+	BoolField      bool              `arrow:"bool_field"`
+	ListOfInt      []int64           `arrow:"list_of_int"`
+	ListOfStr      []string          `arrow:"list_of_str"`
+	DictField      map[string]int64  `arrow:"dict_field"`
+	EnumField      Status            `arrow:"enum_field"`
+	NestedPoint    Point             `arrow:"nested_point"`
+	OptionalStr    *string           `arrow:"optional_str"`
+	OptionalInt    *int64            `arrow:"optional_int"`
+	OptionalNested *Point            `arrow:"optional_nested"`
+	ListOfNested   []Point           `arrow:"list_of_nested"`
+	AnnotatedInt32 int32             `arrow:"annotated_int32"`
+	AnnotatedFloat float32           `arrow:"annotated_float32"`
+	NestedList     [][]int64         `arrow:"nested_list"`
+	DictStrStr     map[string]string `arrow:"dict_str_str"`
 }
 
 func (a AllTypes) ArrowSchema() *arrow.Schema {
@@ -115,8 +115,8 @@ func (h ConformanceHeader) ArrowSchema() *arrow.Schema {
 	}, nil)
 }
 
-// Counter schema for producer streams.
-var CounterSchema = arrow.NewSchema([]arrow.Field{
+// counterSchema is the Arrow schema for producer stream counter batches.
+var counterSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "index", Type: arrow.PrimitiveTypes.Int64},
 	{Name: "value", Type: arrow.PrimitiveTypes.Int64},
 }, nil)

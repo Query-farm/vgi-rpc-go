@@ -15,12 +15,20 @@ var ErrRpc = &RpcError{}
 
 // RpcError represents an error in the vgi_rpc protocol.
 type RpcError struct {
-	Type      string // e.g. "ValueError", "RuntimeError"
-	Message   string
+	// Type is the error category (e.g. "ValueError", "RuntimeError",
+	// "TypeError") matching Python exception class names.
+	Type string
+	// Message is the human-readable error description.
+	Message string
+	// Traceback is an optional stack trace string, populated automatically
+	// when the error is serialized to the wire.
 	Traceback string
+	// RequestID is the client-supplied request identifier, set when the
+	// error is written to a response batch.
 	RequestID string
 }
 
+// Error returns a string of the form "Type: Message".
 func (e *RpcError) Error() string {
 	return fmt.Sprintf("%s: %s", e.Type, e.Message)
 }

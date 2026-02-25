@@ -7,12 +7,19 @@ import "context"
 
 // CallContext provides request-scoped information and logging to method handlers.
 type CallContext struct {
-	Ctx       context.Context // request-scoped context
+	// Ctx is the request-scoped context, carrying cancellation and deadlines.
+	Ctx context.Context
+	// RequestID is the client-supplied identifier for this request, echoed in
+	// all response metadata.
 	RequestID string
-	ServerID  string
-	Method    string
-	LogLevel  LogLevel // client-requested minimum log level
-	logs      []LogMessage
+	// ServerID is the server identifier set via [Server.SetServerID].
+	ServerID string
+	// Method is the name of the RPC method being invoked.
+	Method string
+	// LogLevel is the client-requested minimum log severity. Log messages
+	// below this level are silently discarded by [CallContext.ClientLog].
+	LogLevel LogLevel
+	logs     []LogMessage
 }
 
 // ClientLog records a log message that will be sent to the client.

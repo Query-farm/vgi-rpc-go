@@ -7,12 +7,19 @@ package vgirpc
 type LogLevel string
 
 const (
+	// LogException is the most severe level, used for unrecoverable errors
+	// that terminate request processing.
 	LogException LogLevel = "EXCEPTION"
-	LogError     LogLevel = "ERROR"
-	LogWarn      LogLevel = "WARN"
-	LogInfo      LogLevel = "INFO"
-	LogDebug     LogLevel = "DEBUG"
-	LogTrace     LogLevel = "TRACE"
+	// LogError indicates a recoverable error condition.
+	LogError LogLevel = "ERROR"
+	// LogWarn indicates a warning that may require attention.
+	LogWarn LogLevel = "WARN"
+	// LogInfo indicates a normal informational message.
+	LogInfo LogLevel = "INFO"
+	// LogDebug indicates a verbose diagnostic message.
+	LogDebug LogLevel = "DEBUG"
+	// LogTrace is the least severe level, used for fine-grained tracing.
+	LogTrace LogLevel = "TRACE"
 )
 
 // logLevelPriority returns a numeric priority for log levels (lower = more severe).

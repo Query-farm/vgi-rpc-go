@@ -30,10 +30,19 @@ type ExchangeState interface {
 // StreamResult is returned by producer/exchange handler functions.
 // It holds the output schema, state, and optional header and input schema.
 type StreamResult struct {
+	// OutputSchema defines the Arrow schema for batches emitted by the stream.
 	OutputSchema *arrow.Schema
-	State        interface{} // ProducerState or ExchangeState
-	InputSchema  *arrow.Schema
-	Header       ArrowSerializable // nil if no header
+	// State holds the stream's mutable state object. It must implement
+	// [ProducerState] for producer methods or [ExchangeState] for exchange
+	// methods. The server calls Produce or Exchange on this object in the
+	// lockstep streaming loop.
+	State interface{}
+	// InputSchema defines the Arrow schema for client-sent input batches.
+	// It is nil for producer methods (which receive empty tick batches).
+	InputSchema *arrow.Schema
+	// Header is an optional [ArrowSerializable] value sent as a separate IPC
+	// stream before the main data stream begins. Set to nil if no header.
+	Header ArrowSerializable
 }
 
 // OutputCollector accumulates output batches during a produce/exchange call.

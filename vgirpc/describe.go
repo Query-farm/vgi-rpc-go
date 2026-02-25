@@ -30,11 +30,15 @@ var describeSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "header_schema_ipc", Type: arrow.BinaryTypes.Binary, Nullable: true},
 }, nil)
 
-// Describe metadata keys.
+// Describe metadata keys used in __describe__ introspection responses.
 const (
-	MetaProtocolName    = "vgi_rpc.protocol_name"
+	// MetaProtocolName identifies the server implementation in describe responses.
+	MetaProtocolName = "vgi_rpc.protocol_name"
+	// MetaDescribeVersion carries the describe schema version for forwards
+	// compatibility.
 	MetaDescribeVersion = "vgi_rpc.describe_version"
-	DescribeVersion     = "2"
+	// DescribeVersion is the current describe schema version string.
+	DescribeVersion = "2"
 )
 
 // serializeSchema serializes an Arrow schema to IPC format bytes.

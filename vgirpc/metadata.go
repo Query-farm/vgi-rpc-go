@@ -6,17 +6,33 @@ package vgirpc
 // Well-known metadata keys used in the vgi_rpc wire protocol.
 // These appear as custom_metadata on Arrow IPC RecordBatch messages.
 const (
-	MetaMethod         = "vgi_rpc.method"
+	// MetaMethod identifies the RPC method name in a request batch.
+	MetaMethod = "vgi_rpc.method"
+	// MetaRequestVersion carries the protocol version in a request batch.
 	MetaRequestVersion = "vgi_rpc.request_version"
-	MetaRequestID      = "vgi_rpc.request_id"
-	MetaLogLevel       = "vgi_rpc.log_level"
-	MetaLogMessage     = "vgi_rpc.log_message"
-	MetaLogExtra       = "vgi_rpc.log_extra"
-	MetaServerID       = "vgi_rpc.server_id"
-	MetaStreamState    = "vgi_rpc.stream_state"
-	MetaShmOffset      = "vgi_rpc.shm_offset"
-	MetaShmLength      = "vgi_rpc.shm_length"
-	MetaLocation       = "vgi_rpc.location"
+	// MetaRequestID carries the client-supplied request identifier, echoed
+	// in all response batches for correlation.
+	MetaRequestID = "vgi_rpc.request_id"
+	// MetaLogLevel carries the log severity level for log and error batches,
+	// and the client-requested minimum level in request batches.
+	MetaLogLevel = "vgi_rpc.log_level"
+	// MetaLogMessage carries the log message text in log and error batches.
+	MetaLogMessage = "vgi_rpc.log_message"
+	// MetaLogExtra carries a JSON object with structured log data (e.g.
+	// exception details, key-value extras).
+	MetaLogExtra = "vgi_rpc.log_extra"
+	// MetaServerID carries the server identifier set via [Server.SetServerID].
+	MetaServerID = "vgi_rpc.server_id"
+	// MetaStreamState carries the HMAC-signed state token for HTTP stateful
+	// exchange streams.
+	MetaStreamState = "vgi_rpc.stream_state"
+	// MetaShmOffset carries the byte offset for shared memory pointers.
+	MetaShmOffset = "vgi_rpc.shm_offset"
+	// MetaShmLength carries the byte length for shared memory pointers.
+	MetaShmLength = "vgi_rpc.shm_length"
+	// MetaLocation carries a URI for external pointer references.
+	MetaLocation = "vgi_rpc.location"
 
+	// ProtocolVersion is the current protocol version string.
 	ProtocolVersion = "1"
 )
