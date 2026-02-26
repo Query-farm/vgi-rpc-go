@@ -1,5 +1,6 @@
 """Run Python conformance tests against the Go conformance worker."""
 import contextlib
+import os
 import subprocess
 import sys
 import time
@@ -9,14 +10,20 @@ from typing import Any
 import httpx
 import pytest
 
-sys.path.insert(0, "/Users/rusty/Development/vgi-rpc")
+_VGI_RPC_PYTHON_PATH = os.environ.get(
+    "VGI_RPC_PYTHON_PATH", "/Users/rusty/Development/vgi-rpc"
+)
+sys.path.insert(0, _VGI_RPC_PYTHON_PATH)
 
 from vgi_rpc.conformance import ConformanceService
 from vgi_rpc.http import http_connect
 from vgi_rpc.log import Message
 from vgi_rpc.rpc import SubprocessTransport, _RpcProxy
 
-GO_WORKER = "/Users/rusty/Development/vgi-rpc-go/conformance-worker"
+GO_WORKER = os.environ.get(
+    "GO_CONFORMANCE_WORKER",
+    "/Users/rusty/Development/vgi-rpc-go/conformance-worker",
+)
 
 
 @pytest.fixture(scope="session")

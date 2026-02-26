@@ -61,6 +61,11 @@ type OutputCollector struct {
 	// stored. The returned batch replaces the original. This is used by the VGI
 	// framework to auto-apply pushdown filters.
 	EmitInterceptor func(batch arrow.RecordBatch) (arrow.RecordBatch, error)
+
+	// ProcessSchema, if non-nil, is used by EmitArrays and EmitMap to build
+	// batches instead of the output schema. Use this when the function emits
+	// all columns but the wire output should be a projection.
+	ProcessSchema *arrow.Schema
 }
 
 // annotatedBatch is a batch with optional custom metadata.
@@ -105,7 +110,11 @@ func (o *OutputCollector) Emit(batch arrow.RecordBatch) error {
 
 // EmitArrays builds a RecordBatch from arrays using the output schema and emits it.
 func (o *OutputCollector) EmitArrays(arrays []arrow.Array, numRows int64) error {
-	batch := array.NewRecordBatch(o.schema, arrays, numRows)
+	s := o.schema
+	if o.ProcessSchema != nil {
+		s = o.ProcessSchema
+	}
+	batch := array.NewRecordBatch(s, arrays, numRows)
 	return o.Emit(batch)
 }
 
@@ -113,10 +122,14 @@ func (o *OutputCollector) EmitArrays(arrays []arrow.Array, numRows int64) error 
 // output schema and emits it. Values must be slices matching the schema types.
 func (o *OutputCollector) EmitMap(data map[string][]interface{}) error {
 	mem := memory.NewGoAllocator()
+	schema := o.schema
+	if o.ProcessSchema != nil {
+		schema = o.ProcessSchema
+	}
 	numRows := int64(0)
-	cols := make([]arrow.Array, o.schema.NumFields())
-	for i := range o.schema.NumFields() {
-		f := o.schema.Field(i)
+	cols := make([]arrow.Array, schema.NumFields())
+	for i := range schema.NumFields() {
+		f := schema.Field(i)
 		vals := data[f.Name]
 		if len(vals) > 0 && int64(len(vals)) > numRows {
 			numRows = int64(len(vals))
@@ -124,7 +137,7 @@ func (o *OutputCollector) EmitMap(data map[string][]interface{}) error {
 		arr := buildArrayFromSlice(mem, f.Type, vals)
 		cols[i] = arr
 	}
-	batch := array.NewRecordBatch(o.schema, cols, numRows)
+	batch := array.NewRecordBatch(schema, cols, numRows)
 	for _, c := range cols {
 		c.Release()
 	}

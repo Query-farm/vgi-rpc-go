@@ -33,6 +33,11 @@ const (
 	// MetaLocation carries a URI for external pointer references.
 	MetaLocation = "vgi_rpc.location"
 
+	// MetaTraceparent carries the W3C traceparent header for distributed tracing.
+	MetaTraceparent = "traceparent"
+	// MetaTracestate carries the W3C tracestate header for distributed tracing.
+	MetaTracestate = "tracestate"
+
 	// ProtocolVersion is the current protocol version string.
 	ProtocolVersion = "1"
 )

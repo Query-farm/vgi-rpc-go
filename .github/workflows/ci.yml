@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,3 +24,64 @@ jobs:
 
       - name: Vet
         run: go vet ./...
+
+      - name: Install staticcheck
+        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+
+      - name: Staticcheck
+        run: staticcheck ./...
+
+  conformance:
+    needs: lint
+    runs-on: ubuntu-latest
+    env:
+      VGI_RPC_PYTHON_PATH: ${{ github.workspace }}/_vgi-rpc-python
+      GO_CONFORMANCE_WORKER: ${{ github.workspace }}/conformance-worker
+      GOCOVERDIR: ${{ github.workspace }}/_covdata
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: Query-farm/vgi-rpc-python
+          path: _vgi-rpc-python
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build conformance worker with coverage
+        run: go build -cover -covermode=atomic -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
+
+      - name: Install Python dependencies
+        run: cd _vgi-rpc-python && uv sync --all-extras
+
+      - name: Create coverage directory
+        run: mkdir -p _covdata
+
+      - name: Run conformance tests
+        run: |
+          cd _vgi-rpc-python && uv run pytest \
+            ${{ github.workspace }}/test_go_conformance.py \
+            -o "addopts=" \
+            -p no:mypy \
+            -p no:ruff \
+            --timeout=120 \
+            -v
+
+      - name: Merge coverage profiles
+        run: go tool covdata textfmt -i=_covdata -o=coverage-go.txt
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage-go.txt
+          flags: go
+          fail_ci_if_error: false

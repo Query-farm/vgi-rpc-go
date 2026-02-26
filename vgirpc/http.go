@@ -12,6 +12,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"reflect"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
+	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -127,7 +129,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readHTTPBody(r)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -140,16 +142,63 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	}
 	defer req.Batch.Release()
 
+	// Hook setup
+	var handlerErr error
+	stats := &CallStatistics{}
+	ctx := r.Context()
+
+	transportMeta := buildHTTPTransportMeta(req.Metadata, r)
+	dispatchInfo := DispatchInfo{
+		Method:            method,
+		MethodType:        DispatchMethodUnary,
+		ServerID:          h.server.serverID,
+		RequestID:         req.RequestID,
+		TransportMetadata: transportMeta,
+	}
+
+	var hookToken HookToken
+	var hookActive bool
+	if h.server.dispatchHook != nil {
+		func() {
+			defer func() {
+				if rv := recover(); rv != nil {
+					log.Printf("vgirpc: dispatch hook start panic: %v", rv)
+				}
+			}()
+			var hookCtx context.Context
+			hookCtx, hookToken = h.server.dispatchHook.OnDispatchStart(ctx, dispatchInfo)
+			if hookCtx != nil {
+				ctx = hookCtx
+			}
+			hookActive = true
+		}()
+	}
+
+	defer func() {
+		if hookActive {
+			func() {
+				defer func() {
+					if rv := recover(); rv != nil {
+						log.Printf("vgirpc: dispatch hook end panic: %v", rv)
+					}
+				}()
+				h.server.dispatchHook.OnDispatchEnd(ctx, hookToken, dispatchInfo, stats, handlerErr)
+			}()
+		}
+	}()
+
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
-		h.writeHttpError(w, http.StatusBadRequest,
-			&RpcError{Type: "TypeError", Message: fmt.Sprintf("parameter deserialization: %v", err)},
-			info.ResultSchema)
+		handlerErr = &RpcError{Type: "TypeError", Message: fmt.Sprintf("parameter deserialization: %v", err)}
+		h.writeHttpError(w, http.StatusBadRequest, handlerErr, info.ResultSchema)
 		return
 	}
 
+	// Record input stats
+	stats.RecordInput(req.Batch.NumRows(), batchBufferSize(req.Batch))
+
 	callCtx := &CallContext{
-		Ctx:       r.Context(),
+		Ctx:       ctx,
 		RequestID: req.RequestID,
 		ServerID:  h.server.serverID,
 		Method:    method,
@@ -165,14 +214,14 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 
 	if info.ResultType == nil {
 		results := info.Handler.Call([]reflect.Value{
-			reflect.ValueOf(r.Context()), reflect.ValueOf(callCtx), params,
+			reflect.ValueOf(ctx), reflect.ValueOf(callCtx), params,
 		})
 		if !results[0].IsNil() {
 			callErr = results[0].Interface().(error)
 		}
 	} else {
 		results := info.Handler.Call([]reflect.Value{
-			reflect.ValueOf(r.Context()), reflect.ValueOf(callCtx), params,
+			reflect.ValueOf(ctx), reflect.ValueOf(callCtx), params,
 		})
 		resultVal = results[0]
 		if !results[1].IsNil() {
@@ -185,6 +234,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	// Write response
 	var buf bytes.Buffer
 	if callErr != nil {
+		handlerErr = callErr
 		ipcW := ipc.NewWriter(&buf, ipc.WithSchema(info.ResultSchema))
 		for _, logMsg := range logs {
 			_ = writeLogBatch(ipcW, info.ResultSchema, logMsg, h.server.serverID, req.RequestID)
@@ -209,11 +259,14 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 
 	resultBatch, err := serializeResult(info.ResultSchema, resultVal.Interface())
 	if err != nil {
-		h.writeHttpError(w, http.StatusInternalServerError,
-			&RpcError{Type: "SerializationError", Message: err.Error()}, info.ResultSchema)
+		handlerErr = &RpcError{Type: "SerializationError", Message: err.Error()}
+		h.writeHttpError(w, http.StatusInternalServerError, handlerErr, info.ResultSchema)
 		return
 	}
 	defer resultBatch.Release()
+
+	// Record output stats
+	stats.RecordOutput(resultBatch.NumRows(), batchBufferSize(resultBatch))
 
 	_ = WriteUnaryResponse(&buf, info.ResultSchema, logs, resultBatch, h.server.serverID, req.RequestID)
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
@@ -242,7 +295,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readHTTPBody(r)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -255,15 +308,63 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	}
 	defer req.Batch.Release()
 
+	// Hook setup
+	var handlerErr error
+	stats := &CallStatistics{}
+	ctx := r.Context()
+
+	transportMeta := buildHTTPTransportMeta(req.Metadata, r)
+	dispatchInfo := DispatchInfo{
+		Method:            method,
+		MethodType:        DispatchMethodStream,
+		ServerID:          h.server.serverID,
+		RequestID:         req.RequestID,
+		TransportMetadata: transportMeta,
+	}
+
+	var hookToken HookToken
+	var hookActive bool
+	if h.server.dispatchHook != nil {
+		func() {
+			defer func() {
+				if rv := recover(); rv != nil {
+					log.Printf("vgirpc: dispatch hook start panic: %v", rv)
+				}
+			}()
+			var hookCtx context.Context
+			hookCtx, hookToken = h.server.dispatchHook.OnDispatchStart(ctx, dispatchInfo)
+			if hookCtx != nil {
+				ctx = hookCtx
+			}
+			hookActive = true
+		}()
+	}
+
+	defer func() {
+		if hookActive {
+			func() {
+				defer func() {
+					if rv := recover(); rv != nil {
+						log.Printf("vgirpc: dispatch hook end panic: %v", rv)
+					}
+				}()
+				h.server.dispatchHook.OnDispatchEnd(ctx, hookToken, dispatchInfo, stats, handlerErr)
+			}()
+		}
+	}()
+
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
-		h.writeHttpError(w, http.StatusBadRequest,
-			&RpcError{Type: "TypeError", Message: err.Error()}, nil)
+		handlerErr = &RpcError{Type: "TypeError", Message: err.Error()}
+		h.writeHttpError(w, http.StatusBadRequest, handlerErr, nil)
 		return
 	}
 
+	// Record input stats for init params
+	stats.RecordInput(req.Batch.NumRows(), batchBufferSize(req.Batch))
+
 	callCtx := &CallContext{
-		Ctx:       r.Context(),
+		Ctx:       ctx,
 		RequestID: req.RequestID,
 		ServerID:  h.server.serverID,
 		Method:    method,
@@ -275,16 +376,16 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 
 	// Call stream handler
 	results := info.Handler.Call([]reflect.Value{
-		reflect.ValueOf(r.Context()), reflect.ValueOf(callCtx), params,
+		reflect.ValueOf(ctx), reflect.ValueOf(callCtx), params,
 	})
 
 	if !results[1].IsNil() {
-		callErr := results[1].Interface().(error)
+		handlerErr = results[1].Interface().(error)
 		statusCode := http.StatusInternalServerError
-		if _, ok := callErr.(*RpcError); ok {
+		if _, ok := handlerErr.(*RpcError); ok {
 			statusCode = http.StatusInternalServerError
 		}
-		h.writeHttpError(w, statusCode, callErr, nil)
+		h.writeHttpError(w, statusCode, handlerErr, nil)
 		return
 	}
 
@@ -314,7 +415,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			_ = writeLogBatch(writer, outputSchema, logMsg, h.server.serverID, "")
 		}
 
-		h.runProduceLoop(r.Context(), writer, outputSchema, state.(ProducerState), info)
+		handlerErr = h.runProduceLoop(ctx, writer, outputSchema, state.(ProducerState), info, stats)
 		_ = writer.Close()
 	} else {
 		// Exchange init — return state token
@@ -364,7 +465,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readHTTPBody(r)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -406,30 +507,80 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Hook setup
+	var handlerErr error
+	stats := &CallStatistics{}
+	ctx := r.Context()
+
+	transportMeta := buildHTTPTransportMeta(nil, r)
+	dispatchInfo := DispatchInfo{
+		Method:            method,
+		MethodType:        DispatchMethodStream,
+		ServerID:          h.server.serverID,
+		TransportMetadata: transportMeta,
+	}
+
+	var hookToken HookToken
+	var hookActive bool
+	if h.server.dispatchHook != nil {
+		func() {
+			defer func() {
+				if rv := recover(); rv != nil {
+					log.Printf("vgirpc: dispatch hook start panic: %v", rv)
+				}
+			}()
+			var hookCtx context.Context
+			hookCtx, hookToken = h.server.dispatchHook.OnDispatchStart(ctx, dispatchInfo)
+			if hookCtx != nil {
+				ctx = hookCtx
+			}
+			hookActive = true
+		}()
+	}
+
+	defer func() {
+		if hookActive {
+			func() {
+				defer func() {
+					if rv := recover(); rv != nil {
+						log.Printf("vgirpc: dispatch hook end panic: %v", rv)
+					}
+				}()
+				h.server.dispatchHook.OnDispatchEnd(ctx, hookToken, dispatchInfo, stats, handlerErr)
+			}()
+		}
+	}()
+
 	isProducer := info.Type == MethodProducer
 	outputSchema := info.OutputSchema
 
 	if isProducer {
-		h.handleProducerContinuation(r.Context(), w, outputSchema, tokenData.State.(ProducerState), info)
+		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats)
 	} else {
-		h.handleExchangeCall(r.Context(), w, inputBatch, outputSchema, tokenData.State.(ExchangeState), info)
+		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, outputSchema, tokenData.State.(ExchangeState), info, stats)
 	}
 }
 
 // handleProducerContinuation runs the produce loop for a continuation request.
+// Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state ProducerState, info *methodInfo) {
+	state ProducerState, info *methodInfo, stats *CallStatistics) error {
 
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-	h.runProduceLoop(ctx, writer, schema, state, info)
+	handlerErr := h.runProduceLoop(ctx, writer, schema, state, info, stats)
 	_ = writer.Close()
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
+	return handlerErr
 }
 
 // handleExchangeCall processes one exchange and returns the result with updated token.
+// Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWriter, inputBatch arrow.RecordBatch,
-	schema *arrow.Schema, state ExchangeState, info *methodInfo) {
+	schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics) error {
+
+	// Record input stats
+	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
 
 	out := newOutputCollector(schema, h.server.serverID, false)
 	callCtx := &CallContext{
@@ -442,8 +593,8 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	var exchangeErr error
 	func() {
 		defer func() {
-			if r := recover(); r != nil {
-				exchangeErr = &RpcError{Type: "RuntimeError", Message: fmt.Sprintf("%v", r)}
+			if rv := recover(); rv != nil {
+				exchangeErr = &RpcError{Type: "RuntimeError", Message: fmt.Sprintf("%v", rv)}
 			}
 		}()
 		if err := state.Exchange(ctx, inputBatch, out, callCtx); err != nil {
@@ -458,14 +609,14 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		_ = writeErrorBatch(writer, schema, exchangeErr, h.server.serverID, "")
 		_ = writer.Close()
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
-		return
+		return exchangeErr
 	}
 
 	if err := out.validate(); err != nil {
 		_ = writeErrorBatch(writer, schema, err, h.server.serverID, "")
 		_ = writer.Close()
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
-		return
+		return err
 	}
 
 	// Serialize updated state into new token
@@ -474,7 +625,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		_ = writeErrorBatch(writer, schema, err, h.server.serverID, "")
 		_ = writer.Close()
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
-		return
+		return err
 	}
 
 	// Flush output batches, merging state token into the data batch metadata
@@ -487,7 +638,8 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 			_ = writer.Write(batchWithMeta)
 			batchWithMeta.Release()
 		} else if isDataBatch {
-			// Data batch — merge state token
+			// Data batch — record output stats and merge state token
+			stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
 			stateMeta := arrow.NewMetadata(
 				[]string{MetaStreamState}, []string{string(newToken)})
 			batchWithMeta := array.NewRecordBatchWithMetadata(
@@ -502,15 +654,17 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 
 	_ = writer.Close()
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
+	return nil
 }
 
 // runProduceLoop runs the producer state machine to completion.
+// Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, schema *arrow.Schema,
-	state ProducerState, info *methodInfo) {
+	state ProducerState, info *methodInfo, stats *CallStatistics) error {
 
 	for {
 		if err := ctx.Err(); err != nil {
-			return
+			return nil
 		}
 		out := newOutputCollector(schema, h.server.serverID, true)
 		callCtx := &CallContext{
@@ -523,8 +677,8 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 		var produceErr error
 		func() {
 			defer func() {
-				if r := recover(); r != nil {
-					produceErr = &RpcError{Type: "RuntimeError", Message: fmt.Sprintf("%v", r)}
+				if rv := recover(); rv != nil {
+					produceErr = &RpcError{Type: "RuntimeError", Message: fmt.Sprintf("%v", rv)}
 				}
 			}()
 			if err := state.Produce(ctx, out, callCtx); err != nil {
@@ -534,13 +688,13 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 
 		if produceErr != nil {
 			_ = writeErrorBatch(writer, schema, produceErr, h.server.serverID, "")
-			return
+			return produceErr
 		}
 
 		if !out.Finished() {
 			if err := out.validate(); err != nil {
 				_ = writeErrorBatch(writer, schema, err, h.server.serverID, "")
-				return
+				return err
 			}
 		}
 
@@ -552,20 +706,39 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 				_ = writer.Write(batchWithMeta)
 				batchWithMeta.Release()
 			} else {
+				// Data batch — record output stats
+				stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
 				_ = writer.Write(ab.batch)
 			}
 			ab.batch.Release()
 		}
 
 		if out.Finished() {
-			return
+			return nil
 		}
 	}
 }
 
+// buildHTTPTransportMeta builds transport metadata from IPC metadata and HTTP headers.
+func buildHTTPTransportMeta(ipcMeta map[string]string, r *http.Request) map[string]string {
+	meta := make(map[string]string, len(ipcMeta)+4)
+	for k, v := range ipcMeta {
+		meta[k] = v
+	}
+	if tp := r.Header.Get("Traceparent"); tp != "" {
+		meta[MetaTraceparent] = tp
+	}
+	if ts := r.Header.Get("Tracestate"); ts != "" {
+		meta[MetaTracestate] = ts
+	}
+	meta["remote_addr"] = r.RemoteAddr
+	meta["user_agent"] = r.UserAgent()
+	return meta
+}
+
 // handleDescribe handles the __describe__ introspection endpoint.
 func (h *HttpServer) handleDescribe(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(r.Body)
+	body, err := readHTTPBody(r)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -651,6 +824,27 @@ func (h *HttpServer) unpackStateToken(token []byte) (*stateTokenData, error) {
 }
 
 // --- Helpers ---
+
+// readHTTPBody reads the request body, decompressing it if the Content-Encoding
+// header indicates zstd compression.
+func readHTTPBody(r *http.Request) ([]byte, error) {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return nil, err
+	}
+	if r.Header.Get("Content-Encoding") == "zstd" {
+		reader, err := zstd.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("zstd decompression init: %w", err)
+		}
+		defer reader.Close()
+		body, err = io.ReadAll(reader)
+		if err != nil {
+			return nil, fmt.Errorf("zstd decompression: %w", err)
+		}
+	}
+	return body, nil
+}
 
 func (h *HttpServer) writeHttpError(w http.ResponseWriter, statusCode int, err error, schema *arrow.Schema) {
 	if schema == nil {

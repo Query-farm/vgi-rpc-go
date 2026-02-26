@@ -4,10 +4,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/Query-farm/vgi-rpc/conformance"
 	"github.com/Query-farm/vgi-rpc/vgirpc"
@@ -29,7 +32,18 @@ func main() {
 		fmt.Printf("PORT:%d\n", port)
 		os.Stdout.Sync()
 
-		if err := http.Serve(listener, httpServer); err != nil {
+		srv := &http.Server{Handler: httpServer}
+
+		// Catch SIGTERM/SIGINT so the process exits cleanly and flushes
+		// coverage data when built with -cover.
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+		go func() {
+			<-sigCh
+			srv.Shutdown(context.Background())
+		}()
+
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "http serve error: %v\n", err)
 			os.Exit(1)
 		}

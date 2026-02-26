@@ -6,3 +6,7 @@ __pycache__/
 site/
 .playwright-mcp/
 docs-*.png
+_covdata/
+coverage-go.txt
+_vgi-rpc-python/
+.pytest_cache/
