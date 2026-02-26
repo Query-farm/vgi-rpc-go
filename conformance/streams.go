@@ -26,6 +26,7 @@ func init() {
 	vgirpc.RegisterStateType(&accumulatingExchangeState{})
 	vgirpc.RegisterStateType(&loggingExchangeState{})
 	vgirpc.RegisterStateType(&failOnExchangeNState{})
+	vgirpc.RegisterStateType(&dynamicProducerState{})
 }
 
 // --- Producer States ---
@@ -151,6 +152,52 @@ func (s *headerProducerState) Produce(_ context.Context, out *vgirpc.OutputColle
 		return out.Finish()
 	}
 	if err := emitCounterBatch(out, int64(s.Current)); err != nil {
+		return err
+	}
+	s.Current++
+	return nil
+}
+
+// dynamicProducerState produces batches with a schema that varies based on boolean flags.
+type dynamicProducerState struct {
+	Count          int
+	IncludeStrings bool
+	IncludeFloats  bool
+	Current        int
+}
+
+func (s *dynamicProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+	if s.Current >= s.Count {
+		return out.Finish()
+	}
+	mem := memory.NewGoAllocator()
+
+	idxBuilder := array.NewInt64Builder(mem)
+	defer idxBuilder.Release()
+	idxBuilder.Append(int64(s.Current))
+	idxArr := idxBuilder.NewArray()
+	defer idxArr.Release()
+
+	arrays := []arrow.Array{idxArr}
+
+	if s.IncludeStrings {
+		lblBuilder := array.NewStringBuilder(mem)
+		defer lblBuilder.Release()
+		lblBuilder.Append(fmt.Sprintf("row-%d", s.Current))
+		lblArr := lblBuilder.NewArray()
+		defer lblArr.Release()
+		arrays = append(arrays, lblArr)
+	}
+	if s.IncludeFloats {
+		scoreBuilder := array.NewFloat64Builder(mem)
+		defer scoreBuilder.Release()
+		scoreBuilder.Append(float64(s.Current) * 1.5)
+		scoreArr := scoreBuilder.NewArray()
+		defer scoreArr.Release()
+		arrays = append(arrays, scoreArr)
+	}
+
+	if err := out.EmitArrays(arrays, 1); err != nil {
 		return err
 	}
 	s.Current++

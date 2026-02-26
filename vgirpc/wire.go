@@ -181,8 +181,8 @@ func writeLogBatch(w *ipc.Writer, schema *arrow.Schema, msg LogMessage, serverID
 }
 
 // writeErrorBatch writes a zero-row batch with EXCEPTION-level metadata.
-func writeErrorBatch(w *ipc.Writer, schema *arrow.Schema, err error, serverID, requestID string) error {
-	extraJSON := buildErrorExtra(err)
+func writeErrorBatch(w *ipc.Writer, schema *arrow.Schema, err error, serverID, requestID string, debug bool) error {
+	extraJSON := buildErrorExtra(err, debug)
 
 	keys := []string{MetaLogLevel, MetaLogMessage, MetaLogExtra}
 	vals := []string{string(LogException), err.Error(), extraJSON}
@@ -226,11 +226,18 @@ func WriteUnaryResponse(w io.Writer, schema *arrow.Schema, logs []LogMessage,
 }
 
 // WriteErrorResponse writes a complete IPC stream containing just an error batch.
+// Stack traces and file paths are included in the response for debugging.
+// Use [Server.SetDebugErrors] to control this behavior when using the built-in
+// server; this function always includes debug details.
 func WriteErrorResponse(w io.Writer, schema *arrow.Schema, err error, serverID, requestID string) error {
+	return writeErrorResponse(w, schema, err, serverID, requestID, true)
+}
+
+func writeErrorResponse(w io.Writer, schema *arrow.Schema, err error, serverID, requestID string, debug bool) error {
 	writer := ipc.NewWriter(w, ipc.WithSchema(schema))
 	defer writer.Close()
 
-	return writeErrorBatch(writer, schema, err, serverID, requestID)
+	return writeErrorBatch(writer, schema, err, serverID, requestID, debug)
 }
 
 // WriteVoidResponse writes a complete IPC stream with logs and a zero-row empty-schema response.

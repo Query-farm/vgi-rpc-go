@@ -6,7 +6,7 @@ package vgirpc
 import (
 	"bytes"
 	"fmt"
-	"os"
+	"log/slog"
 	"reflect"
 	"sort"
 	"strconv"
@@ -17,15 +17,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
-
-func rpcDebugLog(format string, args ...interface{}) {
-	f, err := os.OpenFile("/tmp/vgi-rpc-go.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	fmt.Fprintf(f, format+"\n", args...)
-}
 
 // ArrowSerializable is the interface for Go types that can be serialized
 // to/from Arrow IPC streams. At the method parameter/result level, these are
@@ -204,14 +195,14 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 	// binary, the actual parameters are IPC-serialized inside it. Unwrap the
 	// inner batch and use it for field mapping.
 	if batch.NumCols() == 1 && batch.ColumnName(0) == "request" && batch.Column(0).DataType().ID() == arrow.BINARY {
-		rpcDebugLog("deserializeParams: detected wrapped 'request' column for target=%v", target.Name())
+		slog.Debug("deserializeParams: detected wrapped request column", "target", target.Name())
 		if binCol, ok := batch.Column(0).(*array.Binary); ok && binCol.Len() > 0 && !binCol.IsNull(0) {
 			data := binCol.Value(0)
-			rpcDebugLog("  unwrapping: data len=%d", len(data))
+			slog.Debug("deserializeParams: unwrapping request", "dataLen", len(data))
 			if len(data) > 0 {
 				innerReader, err := ipc.NewReader(bytes.NewReader(data))
 				if err != nil {
-					rpcDebugLog("  unwrap error: %v", err)
+					slog.Debug("deserializeParams: unwrap error", "err", err)
 					return reflect.Value{}, fmt.Errorf("unwrapping request IPC: %w", err)
 				}
 				defer innerReader.Release()
@@ -219,13 +210,10 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 					innerBatch := innerReader.RecordBatch()
 					innerBatch.Retain()
 					defer innerBatch.Release()
-					rpcDebugLog("  unwrapped inner batch: numCols=%d numRows=%d", innerBatch.NumCols(), innerBatch.NumRows())
-					for ci := range innerBatch.NumCols() {
-						rpcDebugLog("    inner col[%d]: name=%q type=%v", ci, innerBatch.ColumnName(int(ci)), innerBatch.Column(int(ci)).DataType())
-					}
+					slog.Debug("deserializeParams: unwrapped inner batch", "numCols", innerBatch.NumCols(), "numRows", innerBatch.NumRows())
 					return deserializeParams(innerBatch, target)
 				}
-				rpcDebugLog("  unwrap: no batch in IPC stream")
+				slog.Debug("deserializeParams: no batch in IPC stream")
 			}
 		}
 	}
@@ -707,7 +695,11 @@ func buildArray(mem memory.Allocator, dt arrow.DataType, value any) (arrow.Array
 	case arrow.BOOL:
 		b := array.NewBooleanBuilder(mem)
 		defer b.Release()
-		b.Append(value.(bool))
+		v, ok := value.(bool)
+		if !ok {
+			return nil, fmt.Errorf("expected bool for BOOL field, got %T", value)
+		}
+		b.Append(v)
 		return b.NewArray(), nil
 
 	case arrow.BINARY:
@@ -721,7 +713,11 @@ func buildArray(mem memory.Allocator, dt arrow.DataType, value any) (arrow.Array
 			}
 			b.Append(data)
 		} else {
-			b.Append(value.([]byte))
+			v, ok := value.([]byte)
+			if !ok {
+				return nil, fmt.Errorf("expected []byte for BINARY field, got %T", value)
+			}
+			b.Append(v)
 		}
 		return b.NewArray(), nil
 

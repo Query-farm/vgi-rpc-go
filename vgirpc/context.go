@@ -6,6 +6,8 @@ package vgirpc
 import "context"
 
 // CallContext provides request-scoped information and logging to method handlers.
+// A CallContext is not safe for concurrent use. If a handler spawns goroutines,
+// they must not call [CallContext.ClientLog] without external synchronization.
 type CallContext struct {
 	// Ctx is the request-scoped context, carrying cancellation and deadlines.
 	Ctx context.Context

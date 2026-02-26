@@ -162,6 +162,12 @@ func RegisterMethods(server *vgirpc.Server) {
 
 	// Exchange streams with headers
 	vgirpc.ExchangeWithHeader(server, "exchange_with_header", scaleOutputSchema, scaleInputSchema, headerSchema, exchangeWithHeader)
+
+	// Rich header and dynamic schema methods
+	richHeaderSchema := RichHeader{}.ArrowSchema()
+	vgirpc.ProducerWithHeader(server, "produce_with_rich_header", counterSchema, richHeaderSchema, produceWithRichHeader)
+	vgirpc.ExchangeWithHeader(server, "exchange_with_rich_header", scaleOutputSchema, scaleInputSchema, richHeaderSchema, exchangeWithRichHeader)
+	vgirpc.DynamicStreamWithHeader(server, "produce_dynamic_schema", richHeaderSchema, produceDynamicSchema)
 }
 
 // --- Producer stream parameter structs ---
@@ -202,6 +208,23 @@ type exchangeErrorOnNthParams struct {
 type exchangeErrorOnInitParams struct{}
 type exchangeWithHeaderParams struct {
 	Factor float64 `vgirpc:"factor"`
+}
+
+// --- Rich header and dynamic schema parameter structs ---
+
+type produceWithRichHeaderParams struct {
+	Seed  int64 `vgirpc:"seed"`
+	Count int64 `vgirpc:"count"`
+}
+type exchangeWithRichHeaderParams struct {
+	Seed   int64   `vgirpc:"seed"`
+	Factor float64 `vgirpc:"factor"`
+}
+type produceDynamicSchemaParams struct {
+	Seed           int64 `vgirpc:"seed"`
+	Count          int64 `vgirpc:"count"`
+	IncludeStrings bool  `vgirpc:"include_strings"`
+	IncludeFloats  bool  `vgirpc:"include_floats"`
 }
 
 // formatFloat formats a float64 matching Python's default str(float) behavior.
@@ -289,7 +312,7 @@ func echoBoundingBox(_ context.Context, ctx *vgirpc.CallContext, p echoBoundingB
 // --- Dataclass as parameter ---
 
 func inspectPoint(_ context.Context, ctx *vgirpc.CallContext, p inspectPointParams) (string, error) {
-	return fmt.Sprintf("Point(%g, %g)", p.Point.X, p.Point.Y), nil
+	return fmt.Sprintf("Point(%s, %s)", formatFloat(p.Point.X), formatFloat(p.Point.Y)), nil
 }
 
 // --- Annotated types ---
@@ -455,5 +478,36 @@ func exchangeWithHeader(_ context.Context, ctx *vgirpc.CallContext, p exchangeWi
 		InputSchema:  scaleInputSchema,
 		State:        &scaleExchangeState{Factor: p.Factor},
 		Header:       ConformanceHeader{TotalExpected: 0, Description: "scale by " + formatFloat(p.Factor)},
+	}, nil
+}
+
+// --- Rich header and dynamic schema handlers ---
+
+func produceWithRichHeader(_ context.Context, ctx *vgirpc.CallContext, p produceWithRichHeaderParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: counterSchema,
+		State:        &headerProducerState{Count: int(p.Count)},
+		Header:       buildRichHeader(int(p.Seed)),
+	}, nil
+}
+
+func exchangeWithRichHeader(_ context.Context, ctx *vgirpc.CallContext, p exchangeWithRichHeaderParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: scaleOutputSchema,
+		InputSchema:  scaleInputSchema,
+		State:        &scaleExchangeState{Factor: p.Factor},
+		Header:       buildRichHeader(int(p.Seed)),
+	}, nil
+}
+
+func produceDynamicSchema(_ context.Context, ctx *vgirpc.CallContext, p produceDynamicSchemaParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: buildDynamicSchema(p.IncludeStrings, p.IncludeFloats),
+		State: &dynamicProducerState{
+			Count:          int(p.Count),
+			IncludeStrings: p.IncludeStrings,
+			IncludeFloats:  p.IncludeFloats,
+		},
+		Header: buildRichHeader(int(p.Seed)),
 	}, nil
 }

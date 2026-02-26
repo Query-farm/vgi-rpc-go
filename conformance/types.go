@@ -4,6 +4,8 @@
 package conformance
 
 import (
+	"fmt"
+
 	"github.com/apache/arrow-go/v18/arrow"
 )
 
@@ -107,6 +109,110 @@ func (h ConformanceHeader) ArrowSchema() *arrow.Schema {
 		{Name: "total_expected", Type: arrow.PrimitiveTypes.Int64},
 		{Name: "description", Type: arrow.BinaryTypes.String},
 	}, nil)
+}
+
+// RichHeader is a complex header type with all supported field types.
+// It mirrors AllTypes but is used as a stream header (ArrowSerializable).
+type RichHeader struct {
+	StrField       string            `arrow:"str_field"`
+	BytesField     []byte            `arrow:"bytes_field"`
+	IntField       int64             `arrow:"int_field"`
+	FloatField     float64           `arrow:"float_field"`
+	BoolField      bool              `arrow:"bool_field"`
+	ListOfInt      []int64           `arrow:"list_of_int"`
+	ListOfStr      []string          `arrow:"list_of_str"`
+	DictField      map[string]int64  `arrow:"dict_field"`
+	EnumField      Status            `arrow:"enum_field"`
+	NestedPoint    Point             `arrow:"nested_point"`
+	OptionalStr    *string           `arrow:"optional_str"`
+	OptionalInt    *int64            `arrow:"optional_int"`
+	OptionalNested *Point            `arrow:"optional_nested"`
+	ListOfNested   []Point           `arrow:"list_of_nested"`
+	NestedList     [][]int64         `arrow:"nested_list"`
+	AnnotatedInt32 int32             `arrow:"annotated_int32"`
+	AnnotatedFloat float32           `arrow:"annotated_float32"`
+	DictStrStr     map[string]string `arrow:"dict_str_str"`
+}
+
+func (r RichHeader) ArrowSchema() *arrow.Schema {
+	pointStruct := arrow.StructOf(
+		arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Float64},
+		arrow.Field{Name: "y", Type: arrow.PrimitiveTypes.Float64},
+	)
+	return arrow.NewSchema([]arrow.Field{
+		{Name: "str_field", Type: arrow.BinaryTypes.String},
+		{Name: "bytes_field", Type: arrow.BinaryTypes.Binary},
+		{Name: "int_field", Type: arrow.PrimitiveTypes.Int64},
+		{Name: "float_field", Type: arrow.PrimitiveTypes.Float64},
+		{Name: "bool_field", Type: &arrow.BooleanType{}},
+		{Name: "list_of_int", Type: arrow.ListOf(arrow.PrimitiveTypes.Int64)},
+		{Name: "list_of_str", Type: arrow.ListOf(arrow.BinaryTypes.String)},
+		{Name: "dict_field", Type: arrow.MapOf(arrow.BinaryTypes.String, arrow.PrimitiveTypes.Int64)},
+		{Name: "enum_field", Type: &arrow.DictionaryType{
+			IndexType: arrow.PrimitiveTypes.Int16,
+			ValueType: arrow.BinaryTypes.String,
+		}},
+		{Name: "nested_point", Type: pointStruct},
+		{Name: "optional_str", Type: arrow.BinaryTypes.String, Nullable: true},
+		{Name: "optional_int", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+		{Name: "optional_nested", Type: pointStruct, Nullable: true},
+		{Name: "list_of_nested", Type: arrow.ListOf(pointStruct)},
+		{Name: "nested_list", Type: arrow.ListOf(arrow.ListOf(arrow.PrimitiveTypes.Int64))},
+		{Name: "annotated_int32", Type: arrow.PrimitiveTypes.Int32},
+		{Name: "annotated_float32", Type: arrow.PrimitiveTypes.Float32},
+		{Name: "dict_str_str", Type: arrow.MapOf(arrow.BinaryTypes.String, arrow.BinaryTypes.String)},
+	}, nil)
+}
+
+var statusCycle = []Status{"pending", "active", "closed"}
+
+func buildRichHeader(seed int) RichHeader {
+	var optionalStr *string
+	if seed%2 == 0 {
+		s := fmt.Sprintf("opt-%d", seed)
+		optionalStr = &s
+	}
+	var optionalInt *int64
+	if seed%2 == 1 {
+		v := int64(seed * 3)
+		optionalInt = &v
+	}
+	var optionalNested *Point
+	if seed%3 == 0 {
+		p := Point{X: float64(seed), Y: 0.0}
+		optionalNested = &p
+	}
+	return RichHeader{
+		StrField:       fmt.Sprintf("seed-%d", seed),
+		BytesField:     []byte{byte(seed % 256), byte((seed + 1) % 256), byte((seed + 2) % 256)},
+		IntField:       int64(seed * 7),
+		FloatField:     float64(seed) * 1.5,
+		BoolField:      seed%2 == 0,
+		ListOfInt:      []int64{int64(seed), int64(seed + 1), int64(seed + 2)},
+		ListOfStr:      []string{fmt.Sprintf("item-%d", seed), fmt.Sprintf("item-%d", seed+1)},
+		DictField:      map[string]int64{"a": int64(seed), "b": int64(seed + 1)},
+		EnumField:      statusCycle[seed%3],
+		NestedPoint:    Point{X: float64(seed), Y: float64(seed * 2)},
+		OptionalStr:    optionalStr,
+		OptionalInt:    optionalInt,
+		OptionalNested: optionalNested,
+		ListOfNested:   []Point{{X: float64(seed), Y: float64(seed + 1)}},
+		NestedList:     [][]int64{{int64(seed), int64(seed + 1)}, {int64(seed + 2)}},
+		AnnotatedInt32: int32(seed % 1000),
+		AnnotatedFloat: float32(seed) / 3.0,
+		DictStrStr:     map[string]string{"key": fmt.Sprintf("val-%d", seed)},
+	}
+}
+
+func buildDynamicSchema(includeStrings, includeFloats bool) *arrow.Schema {
+	fields := []arrow.Field{{Name: "index", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}
+	if includeStrings {
+		fields = append(fields, arrow.Field{Name: "label", Type: arrow.BinaryTypes.String, Nullable: true})
+	}
+	if includeFloats {
+		fields = append(fields, arrow.Field{Name: "score", Type: arrow.PrimitiveTypes.Float64, Nullable: true})
+	}
+	return arrow.NewSchema(fields, nil)
 }
 
 // counterSchema is the Arrow schema for producer stream counter batches.

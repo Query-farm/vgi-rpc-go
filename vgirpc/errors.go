@@ -57,7 +57,9 @@ type errorExtra struct {
 }
 
 // buildErrorExtra creates the JSON string for vgi_rpc.log_extra from an error.
-func buildErrorExtra(err error) string {
+// When debug is false, stack traces and file paths are omitted to avoid leaking
+// implementation details to clients.
+func buildErrorExtra(err error, debug bool) string {
 	errType := fmt.Sprintf("%T", err)
 
 	// Try to get a more specific type name
@@ -65,40 +67,39 @@ func buildErrorExtra(err error) string {
 		errType = rpcErr.Type
 	}
 
-	// Capture Go stack trace
-	buf := make([]byte, 4096)
-	n := runtime.Stack(buf, false)
-	traceback := string(buf[:n])
-
-	// Extract frames from runtime callers
-	var frames []stackFrame
-	pcs := make([]uintptr, 10)
-	n = runtime.Callers(2, pcs)
-	if n > 0 {
-		callersFrames := runtime.CallersFrames(pcs[:n])
-		count := 0
-		for {
-			frame, more := callersFrames.Next()
-			if count >= 5 {
-				break
-			}
-			frames = append(frames, stackFrame{
-				File:     frame.File,
-				Line:     frame.Line,
-				Function: frame.Function,
-			})
-			count++
-			if !more {
-				break
-			}
-		}
-	}
-
 	extra := errorExtra{
 		ExceptionType:    errType,
 		ExceptionMessage: err.Error(),
-		Traceback:        traceback,
-		Frames:           frames,
+	}
+
+	if debug {
+		// Capture Go stack trace
+		buf := make([]byte, 4096)
+		n := runtime.Stack(buf, false)
+		extra.Traceback = string(buf[:n])
+
+		// Extract frames from runtime callers
+		pcs := make([]uintptr, 10)
+		n = runtime.Callers(2, pcs)
+		if n > 0 {
+			callersFrames := runtime.CallersFrames(pcs[:n])
+			count := 0
+			for {
+				frame, more := callersFrames.Next()
+				if count >= 5 {
+					break
+				}
+				extra.Frames = append(extra.Frames, stackFrame{
+					File:     frame.File,
+					Line:     frame.Line,
+					Function: frame.Function,
+				})
+				count++
+				if !more {
+					break
+				}
+			}
+		}
 	}
 
 	data, _ := json.Marshal(extra)

@@ -12,7 +12,7 @@ import (
 	"encoding/gob"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"time"
@@ -24,9 +24,10 @@ import (
 )
 
 const (
-	arrowContentType = "application/vnd.apache.arrow.stream"
-	hmacLen          = 32
-	defaultTokenTTL  = 5 * time.Minute
+	arrowContentType   = "application/vnd.apache.arrow.stream"
+	hmacLen            = 32
+	defaultTokenTTL    = 5 * time.Minute
+	defaultMaxBodySize = 64 << 20 // 64 MB
 )
 
 // RegisterStateType registers a concrete type for gob encoding so that it can
@@ -48,22 +49,26 @@ func RegisterStateType(v interface{}) {
 // HttpServer implements [http.Handler] and can be used directly with
 // [http.ListenAndServe] or mounted on an existing [http.ServeMux].
 type HttpServer struct {
-	server     *Server
-	signingKey []byte
-	tokenTTL   time.Duration
-	prefix     string
-	mux        *http.ServeMux
+	server      *Server
+	signingKey  []byte
+	tokenTTL    time.Duration
+	maxBodySize int64
+	prefix      string
+	mux         *http.ServeMux
 }
 
 // NewHttpServer creates a new HTTP server wrapping an RPC server.
 func NewHttpServer(server *Server) *HttpServer {
 	key := make([]byte, 32)
-	_, _ = rand.Read(key)
+	if _, err := rand.Read(key); err != nil {
+		panic(fmt.Sprintf("vgirpc: failed to generate signing key: %v", err))
+	}
 	h := &HttpServer{
-		server:     server,
-		signingKey: key,
-		tokenTTL:   defaultTokenTTL,
-		prefix:     "/vgi",
+		server:      server,
+		signingKey:  key,
+		tokenTTL:    defaultTokenTTL,
+		maxBodySize: defaultMaxBodySize,
+		prefix:      "/vgi",
 	}
 	h.mux = http.NewServeMux()
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/init", h.prefix), h.handleStreamInit)
@@ -79,10 +84,11 @@ func NewHttpServerWithKey(server *Server, signingKey []byte) *HttpServer {
 		panic("vgirpc: signing key must be at least 16 bytes")
 	}
 	h := &HttpServer{
-		server:     server,
-		signingKey: signingKey,
-		tokenTTL:   defaultTokenTTL,
-		prefix:     "/vgi",
+		server:      server,
+		signingKey:  signingKey,
+		tokenTTL:    defaultTokenTTL,
+		maxBodySize: defaultMaxBodySize,
+		prefix:      "/vgi",
 	}
 	h.mux = http.NewServeMux()
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/init", h.prefix), h.handleStreamInit)
@@ -94,6 +100,13 @@ func NewHttpServerWithKey(server *Server, signingKey []byte) *HttpServer {
 // SetTokenTTL sets the maximum age for state tokens.
 func (h *HttpServer) SetTokenTTL(d time.Duration) {
 	h.tokenTTL = d
+}
+
+// SetMaxBodySize sets the maximum allowed HTTP request body size in bytes.
+// The limit applies to both raw and decompressed bodies. Set to 0 to disable
+// the limit (not recommended for production).
+func (h *HttpServer) SetMaxBodySize(n int64) {
+	h.maxBodySize = n
 }
 
 // ServeHTTP implements http.Handler.
@@ -129,7 +142,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := readHTTPBody(r)
+	body, err := h.readHTTPBody(r)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -142,10 +155,8 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	}
 	defer req.Batch.Release()
 
-	// Hook setup
 	var handlerErr error
 	stats := &CallStatistics{}
-	ctx := r.Context()
 
 	transportMeta := buildHTTPTransportMeta(req.Metadata, r)
 	dispatchInfo := DispatchInfo{
@@ -156,36 +167,8 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		TransportMetadata: transportMeta,
 	}
 
-	var hookToken HookToken
-	var hookActive bool
-	if h.server.dispatchHook != nil {
-		func() {
-			defer func() {
-				if rv := recover(); rv != nil {
-					log.Printf("vgirpc: dispatch hook start panic: %v", rv)
-				}
-			}()
-			var hookCtx context.Context
-			hookCtx, hookToken = h.server.dispatchHook.OnDispatchStart(ctx, dispatchInfo)
-			if hookCtx != nil {
-				ctx = hookCtx
-			}
-			hookActive = true
-		}()
-	}
-
-	defer func() {
-		if hookActive {
-			func() {
-				defer func() {
-					if rv := recover(); rv != nil {
-						log.Printf("vgirpc: dispatch hook end panic: %v", rv)
-					}
-				}()
-				h.server.dispatchHook.OnDispatchEnd(ctx, hookToken, dispatchInfo, stats, handlerErr)
-			}()
-		}
-	}()
+	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
+	defer hookCleanup()
 
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
@@ -239,7 +222,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		for _, logMsg := range logs {
 			_ = writeLogBatch(ipcW, info.ResultSchema, logMsg, h.server.serverID, req.RequestID)
 		}
-		_ = writeErrorBatch(ipcW, info.ResultSchema, callErr, h.server.serverID, req.RequestID)
+		_ = writeErrorBatch(ipcW, info.ResultSchema, callErr, h.server.serverID, req.RequestID, h.server.debugErrors)
 		_ = ipcW.Close()
 		statusCode := http.StatusInternalServerError
 		if rpcErr, ok := callErr.(*RpcError); ok {
@@ -295,7 +278,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := readHTTPBody(r)
+	body, err := h.readHTTPBody(r)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -308,10 +291,8 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	}
 	defer req.Batch.Release()
 
-	// Hook setup
 	var handlerErr error
 	stats := &CallStatistics{}
-	ctx := r.Context()
 
 	transportMeta := buildHTTPTransportMeta(req.Metadata, r)
 	dispatchInfo := DispatchInfo{
@@ -322,36 +303,8 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		TransportMetadata: transportMeta,
 	}
 
-	var hookToken HookToken
-	var hookActive bool
-	if h.server.dispatchHook != nil {
-		func() {
-			defer func() {
-				if rv := recover(); rv != nil {
-					log.Printf("vgirpc: dispatch hook start panic: %v", rv)
-				}
-			}()
-			var hookCtx context.Context
-			hookCtx, hookToken = h.server.dispatchHook.OnDispatchStart(ctx, dispatchInfo)
-			if hookCtx != nil {
-				ctx = hookCtx
-			}
-			hookActive = true
-		}()
-	}
-
-	defer func() {
-		if hookActive {
-			func() {
-				defer func() {
-					if rv := recover(); rv != nil {
-						log.Printf("vgirpc: dispatch hook end panic: %v", rv)
-					}
-				}()
-				h.server.dispatchHook.OnDispatchEnd(ctx, hookToken, dispatchInfo, stats, handlerErr)
-			}()
-		}
-	}()
+	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
+	defer hookCleanup()
 
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
@@ -392,7 +345,25 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	streamResult := results[0].Interface().(*StreamResult)
 	outputSchema := streamResult.OutputSchema
 	state := streamResult.State
-	isProducer := info.Type == MethodProducer
+
+	// Determine mode: for MethodDynamic, check the concrete state type
+	var isProducer bool
+	if info.Type == MethodDynamic {
+		if _, ok := state.(ProducerState); ok {
+			isProducer = true
+		} else if _, ok := state.(ExchangeState); ok {
+			isProducer = false
+		} else {
+			handlerErr = &RpcError{
+				Type:    "RuntimeError",
+				Message: fmt.Sprintf("dynamic stream state %T does not implement ProducerState or ExchangeState", state),
+			}
+			h.writeHttpError(w, http.StatusInternalServerError, handlerErr, nil)
+			return
+		}
+	} else {
+		isProducer = info.Type == MethodProducer
+	}
 
 	var buf bytes.Buffer
 
@@ -418,8 +389,8 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		handlerErr = h.runProduceLoop(ctx, writer, outputSchema, state.(ProducerState), info, stats)
 		_ = writer.Close()
 	} else {
-		// Exchange init — return state token
-		token, err := h.packStateToken(state)
+		// Exchange init — return state token (carry schema for dynamic methods)
+		token, err := h.packStateToken(state, outputSchema)
 		if err != nil {
 			h.writeHttpError(w, http.StatusInternalServerError, err, nil)
 			return
@@ -465,7 +436,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	body, err := readHTTPBody(r)
+	body, err := h.readHTTPBody(r)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -507,10 +478,8 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Hook setup
 	var handlerErr error
 	stats := &CallStatistics{}
-	ctx := r.Context()
 
 	transportMeta := buildHTTPTransportMeta(nil, r)
 	dispatchInfo := DispatchInfo{
@@ -520,39 +489,35 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		TransportMetadata: transportMeta,
 	}
 
-	var hookToken HookToken
-	var hookActive bool
-	if h.server.dispatchHook != nil {
-		func() {
-			defer func() {
-				if rv := recover(); rv != nil {
-					log.Printf("vgirpc: dispatch hook start panic: %v", rv)
-				}
-			}()
-			var hookCtx context.Context
-			hookCtx, hookToken = h.server.dispatchHook.OnDispatchStart(ctx, dispatchInfo)
-			if hookCtx != nil {
-				ctx = hookCtx
-			}
-			hookActive = true
-		}()
+	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
+	defer hookCleanup()
+
+	// Determine mode: for MethodDynamic, check the concrete state type
+	var isProducer bool
+	if info.Type == MethodDynamic {
+		if _, ok := tokenData.State.(ProducerState); ok {
+			isProducer = true
+		} else {
+			isProducer = false
+		}
+	} else {
+		isProducer = info.Type == MethodProducer
 	}
 
-	defer func() {
-		if hookActive {
-			func() {
-				defer func() {
-					if rv := recover(); rv != nil {
-						log.Printf("vgirpc: dispatch hook end panic: %v", rv)
-					}
-				}()
-				h.server.dispatchHook.OnDispatchEnd(ctx, hookToken, dispatchInfo, stats, handlerErr)
-			}()
+	// For dynamic methods, OutputSchema is not set at registration time —
+	// recover it from the serialized schema stored in the state token.
+	var outputSchema *arrow.Schema
+	if info.Type == MethodDynamic && len(tokenData.SchemaIPC) > 0 {
+		var schemaErr error
+		outputSchema, schemaErr = deserializeSchema(tokenData.SchemaIPC)
+		if schemaErr != nil {
+			h.writeHttpError(w, http.StatusBadRequest,
+				&RpcError{Type: "RuntimeError", Message: fmt.Sprintf("failed to recover output schema: %v", schemaErr)}, nil)
+			return
 		}
-	}()
-
-	isProducer := info.Type == MethodProducer
-	outputSchema := info.OutputSchema
+	} else {
+		outputSchema = info.OutputSchema
+	}
 
 	if isProducer {
 		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats)
@@ -606,23 +571,23 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
 
 	if exchangeErr != nil {
-		_ = writeErrorBatch(writer, schema, exchangeErr, h.server.serverID, "")
+		_ = writeErrorBatch(writer, schema, exchangeErr, h.server.serverID, "", h.server.debugErrors)
 		_ = writer.Close()
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return exchangeErr
 	}
 
 	if err := out.validate(); err != nil {
-		_ = writeErrorBatch(writer, schema, err, h.server.serverID, "")
+		_ = writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors)
 		_ = writer.Close()
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return err
 	}
 
-	// Serialize updated state into new token
-	newToken, err := h.packStateToken(state)
+	// Serialize updated state into new token (carry schema for dynamic methods)
+	newToken, err := h.packStateToken(state, schema)
 	if err != nil {
-		_ = writeErrorBatch(writer, schema, err, h.server.serverID, "")
+		_ = writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors)
 		_ = writer.Close()
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return err
@@ -687,13 +652,13 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 		}()
 
 		if produceErr != nil {
-			_ = writeErrorBatch(writer, schema, produceErr, h.server.serverID, "")
+			_ = writeErrorBatch(writer, schema, produceErr, h.server.serverID, "", h.server.debugErrors)
 			return produceErr
 		}
 
 		if !out.Finished() {
 			if err := out.validate(); err != nil {
-				_ = writeErrorBatch(writer, schema, err, h.server.serverID, "")
+				_ = writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors)
 				return err
 			}
 		}
@@ -719,6 +684,46 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 	}
 }
 
+// startDispatchHook runs OnDispatchStart (if a hook is configured) and returns
+// the (possibly enriched) context plus a cleanup function that must be deferred
+// by the caller. The cleanup calls OnDispatchEnd with the current *handlerErr.
+func (h *HttpServer) startDispatchHook(ctx context.Context, info DispatchInfo, stats *CallStatistics, handlerErr *error) (context.Context, func()) {
+	if h.server.dispatchHook == nil {
+		return ctx, func() {}
+	}
+
+	var hookToken HookToken
+	var active bool
+	func() {
+		defer func() {
+			if rv := recover(); rv != nil {
+				slog.Error("dispatch hook start panic", "err", rv)
+			}
+		}()
+		var hookCtx context.Context
+		hookCtx, hookToken = h.server.dispatchHook.OnDispatchStart(ctx, info)
+		if hookCtx != nil {
+			ctx = hookCtx
+		}
+		active = true
+	}()
+
+	cleanup := func() {
+		if !active {
+			return
+		}
+		func() {
+			defer func() {
+				if rv := recover(); rv != nil {
+					slog.Error("dispatch hook end panic", "err", rv)
+				}
+			}()
+			h.server.dispatchHook.OnDispatchEnd(ctx, hookToken, info, stats, *handlerErr)
+		}()
+	}
+	return ctx, cleanup
+}
+
 // buildHTTPTransportMeta builds transport metadata from IPC metadata and HTTP headers.
 func buildHTTPTransportMeta(ipcMeta map[string]string, r *http.Request) map[string]string {
 	meta := make(map[string]string, len(ipcMeta)+4)
@@ -738,7 +743,7 @@ func buildHTTPTransportMeta(ipcMeta map[string]string, r *http.Request) map[stri
 
 // handleDescribe handles the __describe__ introspection endpoint.
 func (h *HttpServer) handleDescribe(w http.ResponseWriter, r *http.Request) {
-	body, err := readHTTPBody(r)
+	body, err := h.readHTTPBody(r)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -771,12 +776,16 @@ func (h *HttpServer) handleDescribe(w http.ResponseWriter, r *http.Request) {
 type stateTokenData struct {
 	CreatedAt int64
 	State     interface{}
+	SchemaIPC []byte // serialized output schema for dynamic methods; nil for static
 }
 
-func (h *HttpServer) packStateToken(state interface{}) ([]byte, error) {
+func (h *HttpServer) packStateToken(state interface{}, outputSchema *arrow.Schema) ([]byte, error) {
 	data := stateTokenData{
 		CreatedAt: time.Now().Unix(),
 		State:     state,
+	}
+	if outputSchema != nil {
+		data.SchemaIPC = serializeSchema(outputSchema)
 	}
 	var payload bytes.Buffer
 	enc := gob.NewEncoder(&payload)
@@ -808,6 +817,12 @@ func (h *HttpServer) unpackStateToken(token []byte) (*stateTokenData, error) {
 		return nil, &RpcError{Type: "RuntimeError", Message: "State token signature verification failed"}
 	}
 
+	// NOTE: gob is not designed for untrusted input and could panic or cause
+	// type confusion with attacker-crafted payloads. This is acceptable here
+	// because the HMAC is verified above — an attacker cannot reach the gob
+	// decoder without knowing the signing key. If the threat model changes
+	// (e.g. shared keys across trust boundaries), consider switching to a
+	// safer serializer (JSON, protobuf).
 	var data stateTokenData
 	dec := gob.NewDecoder(bytes.NewReader(payloadBytes))
 	if err := dec.Decode(&data); err != nil {
@@ -823,24 +838,55 @@ func (h *HttpServer) unpackStateToken(token []byte) (*stateTokenData, error) {
 	return &data, nil
 }
 
+// deserializeSchema recovers an Arrow schema from IPC-serialized bytes.
+func deserializeSchema(data []byte) (*arrow.Schema, error) {
+	reader, err := ipc.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("schema deserialization: %w", err)
+	}
+	defer reader.Release()
+	return reader.Schema(), nil
+}
+
 // --- Helpers ---
 
 // readHTTPBody reads the request body, decompressing it if the Content-Encoding
-// header indicates zstd compression.
-func readHTTPBody(r *http.Request) ([]byte, error) {
-	body, err := io.ReadAll(r.Body)
+// header indicates zstd compression. Both the raw and decompressed body are
+// limited to h.maxBodySize bytes (0 = unlimited).
+func (h *HttpServer) readHTTPBody(r *http.Request) ([]byte, error) {
+	limit := h.maxBodySize
+
+	var body []byte
+	var err error
+	if limit > 0 {
+		body, err = io.ReadAll(io.LimitReader(r.Body, limit+1))
+	} else {
+		body, err = io.ReadAll(r.Body)
+	}
 	if err != nil {
 		return nil, err
 	}
+	if limit > 0 && int64(len(body)) > limit {
+		return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Request body exceeds maximum size of %d bytes", limit)}
+	}
+
 	if r.Header.Get("Content-Encoding") == "zstd" {
 		reader, err := zstd.NewReader(bytes.NewReader(body))
 		if err != nil {
 			return nil, fmt.Errorf("zstd decompression init: %w", err)
 		}
 		defer reader.Close()
-		body, err = io.ReadAll(reader)
+
+		if limit > 0 {
+			body, err = io.ReadAll(io.LimitReader(reader, limit+1))
+		} else {
+			body, err = io.ReadAll(reader)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("zstd decompression: %w", err)
+		}
+		if limit > 0 && int64(len(body)) > limit {
+			return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Decompressed body exceeds maximum size of %d bytes", limit)}
 		}
 	}
 	return body, nil
@@ -851,7 +897,9 @@ func (h *HttpServer) writeHttpError(w http.ResponseWriter, statusCode int, err e
 		schema = arrow.NewSchema(nil, nil)
 	}
 	var buf bytes.Buffer
-	_ = WriteErrorResponse(&buf, schema, err, h.server.serverID, "")
+	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
+	_ = writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors)
+	_ = writer.Close()
 	h.writeArrow(w, statusCode, buf.Bytes())
 }
 

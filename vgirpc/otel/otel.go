@@ -138,11 +138,14 @@ func (h *otelHook) OnDispatchStart(ctx context.Context, info vgirpc.DispatchInfo
 		attribute.String("rpc.vgi_rpc.method_type", info.MethodType),
 		attribute.String("rpc.vgi_rpc.server_id", info.ServerID),
 	}
+	if info.RequestID != "" {
+		attrs = append(attrs, attribute.String("rpc.vgi_rpc.request_id", info.RequestID))
+	}
 	attrs = append(attrs, h.cfg.CustomAttributes...)
 
 	// Add transport metadata attributes (HTTP only)
 	if v, ok := info.TransportMetadata["remote_addr"]; ok && v != "" {
-		attrs = append(attrs, attribute.String("net.peer.ip", v))
+		attrs = append(attrs, attribute.String("client.address", v))
 	}
 	if v, ok := info.TransportMetadata["user_agent"]; ok && v != "" {
 		attrs = append(attrs, attribute.String("user_agent.original", v))

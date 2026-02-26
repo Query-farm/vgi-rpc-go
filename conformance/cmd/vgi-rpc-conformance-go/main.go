@@ -18,6 +18,7 @@ import (
 
 func main() {
 	server := vgirpc.NewServer()
+	server.SetDebugErrors(true)
 	conformance.RegisterMethods(server)
 
 	if len(os.Args) > 1 && os.Args[1] == "--http" {

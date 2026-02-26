@@ -101,7 +101,9 @@ func (o *OutputCollector) Emit(batch arrow.RecordBatch) error {
 	}
 	// Re-wrap with the output schema if schemas differ by pointer
 	if batch.Schema() != o.schema {
+		original := batch
 		batch = array.NewRecordBatch(o.schema, batch.Columns(), batch.NumRows())
+		original.Release()
 	}
 	o.dataBatchIdx = len(o.batches)
 	o.batches = append(o.batches, annotatedBatch{batch: batch})
