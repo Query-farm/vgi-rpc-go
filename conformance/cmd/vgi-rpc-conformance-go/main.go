@@ -48,6 +48,34 @@ func main() {
 			fmt.Fprintf(os.Stderr, "http serve error: %v\n", err)
 			os.Exit(1)
 		}
+	} else if len(os.Args) > 2 && os.Args[1] == "--unix" {
+		path := os.Args[2]
+		os.Remove(path)
+
+		listener, err := net.Listen("unix", path)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to listen on unix socket: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("UNIX:%s\n", path)
+		os.Stdout.Sync()
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+		go func() {
+			<-sigCh
+			listener.Close()
+		}()
+
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				break
+			}
+			server.Serve(conn, conn)
+			conn.Close()
+		}
+		os.Remove(path)
 	} else {
 		server.RunStdio()
 	}
