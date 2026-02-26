@@ -56,6 +56,11 @@ type OutputCollector struct {
 	finished      bool
 	producerMode  bool
 	serverID      string
+
+	// EmitInterceptor, if non-nil, is called on every data batch before it is
+	// stored. The returned batch replaces the original. This is used by the VGI
+	// framework to auto-apply pushdown filters.
+	EmitInterceptor func(batch arrow.RecordBatch) (arrow.RecordBatch, error)
 }
 
 // annotatedBatch is a batch with optional custom metadata.
@@ -77,9 +82,17 @@ func newOutputCollector(schema *arrow.Schema, serverID string, producerMode bool
 // Emit adds a pre-built data batch. Returns an error if a data batch was already emitted.
 // If the batch has a different schema object than the output schema, a new
 // batch is created with the output schema to ensure IPC writer compatibility.
+// If EmitInterceptor is set, it is called on the batch before storing.
 func (o *OutputCollector) Emit(batch arrow.RecordBatch) error {
 	if o.dataBatchIdx >= 0 {
 		return fmt.Errorf("OutputCollector: only one data batch may be emitted per call")
+	}
+	if o.EmitInterceptor != nil {
+		var err error
+		batch, err = o.EmitInterceptor(batch)
+		if err != nil {
+			return err
+		}
 	}
 	// Re-wrap with the output schema if schemas differ by pointer
 	if batch.Schema() != o.schema {

@@ -19,6 +19,15 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
 
+func serverDebugLog(format string, args ...interface{}) {
+	f, err := os.OpenFile("/tmp/vgi-rpc-server.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, format+"\n", args...)
+}
+
 // MethodType identifies how a registered method should be dispatched.
 type MethodType int
 
@@ -29,6 +38,9 @@ const (
 	MethodProducer
 	// MethodExchange identifies a bidirectional streaming method.
 	MethodExchange
+	// MethodDynamic identifies a stream method where the state type (ProducerState
+	// or ExchangeState) is determined at runtime by the handler's return value.
+	MethodDynamic
 )
 
 // methodInfo stores the registration details for one RPC method.
@@ -232,6 +244,33 @@ func ExchangeWithHeader[P any](s *Server, name string, outputSchema, inputSchema
 	}
 }
 
+// DynamicStreamWithHeader registers a stream method where the state type
+// (ProducerState or ExchangeState) is determined at runtime based on the
+// StreamResult returned by the handler. The handler must return a StreamResult
+// whose State field implements either ProducerState or ExchangeState.
+// OutputSchema and InputSchema are taken from the StreamResult at runtime.
+func DynamicStreamWithHeader[P any](s *Server, name string,
+	headerSchema *arrow.Schema, handler func(context.Context, *CallContext, P) (*StreamResult, error)) {
+	var p P
+	paramsType := reflect.TypeOf(p)
+	paramsSchema, err := structToSchema(paramsType)
+	if err != nil {
+		panic(fmt.Sprintf("vgirpc: registering %q: invalid params type %T: %v", name, p, err))
+	}
+
+	s.methods[name] = &methodInfo{
+		Name:         name,
+		Type:         MethodDynamic,
+		ParamsType:   paramsType,
+		ParamsSchema: paramsSchema,
+		ResultSchema: arrow.NewSchema(nil, nil),
+		Handler:      reflect.ValueOf(handler),
+		ParamDefaults: extractDefaults(paramsType),
+		HasHeader:    true,
+		HeaderSchema: headerSchema,
+	}
+}
+
 // RunStdio runs the server loop reading from stdin and writing to stdout.
 func (s *Server) RunStdio() {
 	s.Serve(os.Stdin, os.Stdout)
@@ -298,7 +337,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 	switch info.Type {
 	case MethodUnary:
 		return s.serveUnary(ctx, w, req, info)
-	case MethodProducer, MethodExchange:
+	case MethodProducer, MethodExchange, MethodDynamic:
 		return s.serveStream(ctx, r, w, req, info)
 	default:
 		_ = WriteErrorResponse(w, info.ResultSchema,
@@ -437,6 +476,9 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		// normal streaming protocol.  Then drain the client's input stream
 		// so the transport is clean for the next request.
 		outputSchema := info.OutputSchema
+		if outputSchema == nil {
+			outputSchema = arrow.NewSchema(nil, nil)
+		}
 		outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
 		if err := writeErrorBatch(outputWriter, outputSchema, callErr, s.serverID, req.RequestID); err != nil {
 			log.Printf("vgirpc: failed to write error batch: %v", err)
@@ -460,12 +502,19 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 	outputSchema := streamResult.OutputSchema
 	state := streamResult.State
 
-	// Validate that State implements the expected interface
-	if isProducer := info.Type == MethodProducer; isProducer {
-		if _, ok := state.(ProducerState); !ok {
+	// Validate that State implements the expected interface.
+	// For MethodDynamic, determine mode at runtime from the state type.
+	var isProducer bool
+	if info.Type == MethodDynamic {
+		// Runtime dispatch: check which interface the state implements
+		if _, ok := state.(ProducerState); ok {
+			isProducer = true
+		} else if _, ok := state.(ExchangeState); ok {
+			isProducer = false
+		} else {
 			stateErr := &RpcError{
 				Type:    "RuntimeError",
-				Message: fmt.Sprintf("stream state %T does not implement ProducerState", state),
+				Message: fmt.Sprintf("dynamic stream state %T does not implement ProducerState or ExchangeState", state),
 			}
 			outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
 			_ = writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID)
@@ -478,42 +527,65 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			return nil
 		}
 	} else {
-		if _, ok := state.(ExchangeState); !ok {
-			stateErr := &RpcError{
-				Type:    "RuntimeError",
-				Message: fmt.Sprintf("stream state %T does not implement ExchangeState", state),
-			}
-			outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
-			_ = writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID)
-			_ = outputWriter.Close()
-			if inputReader, err := ipc.NewReader(r); err == nil {
-				for inputReader.Next() {
+		isProducer = info.Type == MethodProducer
+		if isProducer {
+			if _, ok := state.(ProducerState); !ok {
+				stateErr := &RpcError{
+					Type:    "RuntimeError",
+					Message: fmt.Sprintf("stream state %T does not implement ProducerState", state),
 				}
-				inputReader.Release()
+				outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
+				_ = writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID)
+				_ = outputWriter.Close()
+				if inputReader, err := ipc.NewReader(r); err == nil {
+					for inputReader.Next() {
+					}
+					inputReader.Release()
+				}
+				return nil
 			}
-			return nil
+		} else {
+			if _, ok := state.(ExchangeState); !ok {
+				stateErr := &RpcError{
+					Type:    "RuntimeError",
+					Message: fmt.Sprintf("stream state %T does not implement ExchangeState", state),
+				}
+				outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
+				_ = writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID)
+				_ = outputWriter.Close()
+				if inputReader, err := ipc.NewReader(r); err == nil {
+					for inputReader.Next() {
+					}
+					inputReader.Release()
+				}
+				return nil
+			}
 		}
 	}
 
 	// Write header IPC stream if method declares a header type
 	if info.HasHeader && streamResult.Header != nil {
+		serverDebugLog("serveStream[%s]: writing header (type=%T)", info.Name, streamResult.Header)
 		if err := s.writeStreamHeader(w, streamResult.Header, callCtx.drainLogs()); err != nil {
+			serverDebugLog("serveStream[%s]: header write error: %v", info.Name, err)
 			return nil // transport error during header, bail out
 		}
+		serverDebugLog("serveStream[%s]: header written ok", info.Name)
 	}
 
-	// Determine if this is a producer (empty input schema) or exchange
-	isProducer := info.Type == MethodProducer
-
 	// Open input reader for client ticks/data
+	serverDebugLog("serveStream[%s]: opening input reader", info.Name)
 	inputReader, err := ipc.NewReader(r)
 	if err != nil {
+		serverDebugLog("serveStream[%s]: input reader error: %v", info.Name, err)
 		return nil // transport error
 	}
 	defer inputReader.Release()
+	serverDebugLog("serveStream[%s]: input reader opened", info.Name)
 
 	// Open output IPC writer
 	outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
+	serverDebugLog("serveStream[%s]: output writer opened, isProducer=%v", info.Name, isProducer)
 
 	// Write any buffered init logs
 	initLogs := callCtx.drainLogs()
@@ -526,13 +598,17 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 	// Lockstep loop
 	var streamErr error
 
+	serverDebugLog("serveStream[%s]: entering lockstep loop", info.Name)
 	for {
 		// Read one input batch (tick for producer, real data for exchange)
+		serverDebugLog("serveStream[%s]: waiting for input batch", info.Name)
 		if !inputReader.Next() {
 			// Client closed the stream (StopIteration equivalent)
+			serverDebugLog("serveStream[%s]: input reader done (client closed)", info.Name)
 			break
 		}
 		inputBatch := inputReader.RecordBatch()
+		serverDebugLog("serveStream[%s]: got input batch rows=%d cols=%d", info.Name, inputBatch.NumRows(), inputBatch.NumCols())
 
 		// Create OutputCollector for this iteration
 		out := newOutputCollector(outputSchema, s.serverID, isProducer)

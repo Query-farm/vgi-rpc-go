@@ -6,6 +6,7 @@ package vgirpc
 import (
 	"bytes"
 	"fmt"
+	"os"
 	"reflect"
 	"sort"
 	"strconv"
@@ -16,6 +17,15 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
+
+func rpcDebugLog(format string, args ...interface{}) {
+	f, err := os.OpenFile("/tmp/vgi-rpc-go.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, format+"\n", args...)
+}
 
 // ArrowSerializable is the interface for Go types that can be serialized
 // to/from Arrow IPC streams. At the method parameter/result level, these are
@@ -151,6 +161,7 @@ func structToSchema(t reflect.Type) (*arrow.Schema, error) {
 }
 
 // resultSchema builds an Arrow schema for a return type.
+// All results are serialized as a single "result" column.
 func resultSchema(t reflect.Type) (*arrow.Schema, error) {
 	if t == nil {
 		return arrow.NewSchema(nil, nil), nil
@@ -158,6 +169,17 @@ func resultSchema(t reflect.Type) (*arrow.Schema, error) {
 
 	// Check if it implements ArrowSerializable — result is binary
 	if t.Implements(arrowSerializableType) || reflect.PointerTo(t).Implements(arrowSerializableType) {
+		return arrow.NewSchema([]arrow.Field{
+			{Name: "result", Type: arrow.BinaryTypes.Binary, Nullable: false},
+		}, nil), nil
+	}
+
+	// Struct types with vgirpc tags are serialized as IPC bytes in a binary "result" column.
+	derefT := t
+	if derefT.Kind() == reflect.Ptr {
+		derefT = derefT.Elem()
+	}
+	if derefT.Kind() == reflect.Struct {
 		return arrow.NewSchema([]arrow.Field{
 			{Name: "result", Type: arrow.BinaryTypes.Binary, Nullable: false},
 		}, nil), nil
@@ -177,6 +199,37 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 	if target.Kind() == reflect.Ptr {
 		target = target.Elem()
 	}
+
+	// Handle wrapped request: if the batch has a single "request" column of type
+	// binary, the actual parameters are IPC-serialized inside it. Unwrap the
+	// inner batch and use it for field mapping.
+	if batch.NumCols() == 1 && batch.ColumnName(0) == "request" && batch.Column(0).DataType().ID() == arrow.BINARY {
+		rpcDebugLog("deserializeParams: detected wrapped 'request' column for target=%v", target.Name())
+		if binCol, ok := batch.Column(0).(*array.Binary); ok && binCol.Len() > 0 && !binCol.IsNull(0) {
+			data := binCol.Value(0)
+			rpcDebugLog("  unwrapping: data len=%d", len(data))
+			if len(data) > 0 {
+				innerReader, err := ipc.NewReader(bytes.NewReader(data))
+				if err != nil {
+					rpcDebugLog("  unwrap error: %v", err)
+					return reflect.Value{}, fmt.Errorf("unwrapping request IPC: %w", err)
+				}
+				defer innerReader.Release()
+				if innerReader.Next() {
+					innerBatch := innerReader.RecordBatch()
+					innerBatch.Retain()
+					defer innerBatch.Release()
+					rpcDebugLog("  unwrapped inner batch: numCols=%d numRows=%d", innerBatch.NumCols(), innerBatch.NumRows())
+					for ci := range innerBatch.NumCols() {
+						rpcDebugLog("    inner col[%d]: name=%q type=%v", ci, innerBatch.ColumnName(int(ci)), innerBatch.Column(int(ci)).DataType())
+					}
+					return deserializeParams(innerBatch, target)
+				}
+				rpcDebugLog("  unwrap: no batch in IPC stream")
+			}
+		}
+	}
+
 	result := reflect.New(target).Elem()
 
 	for i := range target.NumField() {
@@ -293,7 +346,14 @@ func setFieldFromArrow(field reflect.Value, fieldType reflect.Type, col arrow.Ar
 	case *array.Boolean:
 		setBoolField(field, fieldType, isPtr, c.Value(idx))
 	case *array.Binary:
-		field.SetBytes(c.Value(idx))
+		if isPtr {
+			v := c.Value(idx)
+			ptr := reflect.New(fieldType)
+			ptr.Elem().SetBytes(v)
+			field.Set(ptr)
+		} else {
+			field.SetBytes(c.Value(idx))
+		}
 	case *array.List:
 		return setListField(field, fieldType, isPtr, c, idx, info)
 	case *array.Map:
@@ -352,13 +412,10 @@ func setBoolField(field reflect.Value, fieldType reflect.Type, isPtr bool, val b
 }
 
 func setListField(field reflect.Value, fieldType reflect.Type, isPtr bool, listArr *array.List, idx int, info tagInfo) error {
+	// Note: fieldType is already dereferenced by the caller (setFieldFromArrow)
 	start, end := listArr.ValueOffsets(idx)
 	values := listArr.ListValues()
 	length := int(end - start)
-
-	if isPtr {
-		fieldType = fieldType.Elem()
-	}
 
 	slice := reflect.MakeSlice(fieldType, length, length)
 	for j := 0; j < length; j++ {
@@ -495,6 +552,31 @@ func serializeResult(schema *arrow.Schema, value any) (arrow.RecordBatch, error)
 	}
 
 	field := schema.Field(0)
+
+	// Handle struct values that need IPC serialization into a binary "result" column.
+	// ArrowSerializable structs are handled by buildArray, but plain structs with
+	// vgirpc tags need to be serialized here.
+	if field.Type.ID() == arrow.BINARY {
+		rv := reflect.ValueOf(value)
+		if rv.Kind() == reflect.Ptr {
+			rv = rv.Elem()
+		}
+		if rv.Kind() == reflect.Struct {
+			if _, ok := value.(ArrowSerializable); !ok {
+				data, err := serializeVgirpcStruct(value)
+				if err != nil {
+					return nil, fmt.Errorf("serialize struct result: %w", err)
+				}
+				b := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+				defer b.Release()
+				b.Append(data)
+				arr := b.NewArray()
+				defer arr.Release()
+				return array.NewRecordBatch(schema, []arrow.Array{arr}, 1), nil
+			}
+		}
+	}
+
 	arr, err := buildArray(mem, field.Type, value)
 	if err != nil {
 		return nil, fmt.Errorf("serialize result: %w", err)
@@ -502,6 +584,61 @@ func serializeResult(schema *arrow.Schema, value any) (arrow.RecordBatch, error)
 	defer arr.Release()
 
 	return array.NewRecordBatch(schema, []arrow.Array{arr}, 1), nil
+}
+
+// serializeVgirpcStruct serializes a Go struct with vgirpc tags to Arrow IPC bytes.
+func serializeVgirpcStruct(value any) ([]byte, error) {
+	rv := reflect.ValueOf(value)
+	if rv.Kind() == reflect.Ptr {
+		rv = rv.Elem()
+	}
+	rt := rv.Type()
+
+	schema, err := structToSchema(rt)
+	if err != nil {
+		return nil, err
+	}
+
+	mem := memory.NewGoAllocator()
+	cols := make([]arrow.Array, schema.NumFields())
+
+	fieldIdx := 0
+	for i := range rt.NumField() {
+		f := rt.Field(i)
+		tag := f.Tag.Get("vgirpc")
+		if tag == "" || tag == "-" {
+			continue
+		}
+
+		fieldVal := rv.Field(i).Interface()
+		arr, err := buildArray(mem, schema.Field(fieldIdx).Type, fieldVal)
+		if err != nil {
+			for _, c := range cols[:fieldIdx] {
+				if c != nil {
+					c.Release()
+				}
+			}
+			return nil, fmt.Errorf("field %s: %w", f.Name, err)
+		}
+		cols[fieldIdx] = arr
+		fieldIdx++
+	}
+
+	batch := array.NewRecordBatch(schema, cols, 1)
+	for _, c := range cols {
+		c.Release()
+	}
+	defer batch.Release()
+
+	var buf bytes.Buffer
+	w := ipc.NewWriter(&buf, ipc.WithSchema(schema))
+	if err := w.Write(batch); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // buildArray creates a 1-element Arrow array from a Go value.
@@ -849,12 +986,25 @@ func serializeArrowSerializable(as ArrowSerializable) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// findArrowField finds a struct field with a matching "arrow" tag name.
+// findArrowField finds a struct field with a matching "arrow" or "vgirpc" tag name.
 func findArrowField(rt reflect.Type, rv reflect.Value, arrowName string) (reflect.StructField, any, error) {
+	// Check "arrow" tags first
 	for i := range rt.NumField() {
 		f := rt.Field(i)
 		tag := f.Tag.Get("arrow")
 		if tag == arrowName {
+			return f, rv.Field(i).Interface(), nil
+		}
+	}
+	// Fall back to "vgirpc" tags (for types that use vgirpc tags but implement ArrowSerializable)
+	for i := range rt.NumField() {
+		f := rt.Field(i)
+		tag := f.Tag.Get("vgirpc")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		info := parseTag(tag)
+		if info.Name == arrowName {
 			return f, rv.Field(i).Interface(), nil
 		}
 	}

@@ -97,7 +97,7 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 		switch info.Type {
 		case MethodUnary:
 			methodTypeBuilder.Append("unary")
-		case MethodProducer, MethodExchange:
+		case MethodProducer, MethodExchange, MethodDynamic:
 			methodTypeBuilder.Append("stream")
 		}
 
