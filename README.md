@@ -38,11 +38,13 @@ func main() {
 - **Unary RPCs** with typed parameters and results via struct tags
 - **Producer streams** for server-initiated data flows
 - **Exchange streams** for bidirectional batch processing
+- **Dynamic streams** with runtime-determined producer/exchange mode
 - **Stream headers** for metadata before the first data batch
 - **Client-directed logging** at configurable levels
 - **`context.Context` support** for cancellation and deadlines
-- **HTTP transport** with signed state tokens for stateless exchange
+- **HTTP transport** with signed state tokens and zstd decompression
 - **ArrowSerializable** interface for complex nested types
+- **OpenTelemetry support** via optional `vgirpc/otel` module (tracing + metrics)
 
 ## API Overview
 
@@ -55,6 +57,7 @@ vgirpc.Producer[P](server, name, outputSchema, handler)
 vgirpc.ProducerWithHeader[P](server, name, outputSchema, headerSchema, handler)
 vgirpc.Exchange[P](server, name, outputSchema, inputSchema, handler)
 vgirpc.ExchangeWithHeader[P](server, name, outputSchema, inputSchema, headerSchema, handler)
+vgirpc.DynamicStreamWithHeader[P](server, name, headerSchema, handler)
 ```
 
 ### Transports
@@ -227,9 +230,37 @@ func (p Point) ArrowSchema() *arrow.Schema {
 - At the method parameter/result level (with `vgirpc:"name,binary"` tag), the value is serialized as binary — an embedded IPC stream.
 - When nested inside another `ArrowSerializable`, the value becomes an Arrow struct column.
 
+## Observability
+
+### Dispatch hooks
+
+Register a `DispatchHook` to observe every RPC call (tracing, metrics, logging):
+
+```go
+server.SetDispatchHook(myHook)
+```
+
+### OpenTelemetry
+
+The optional `vgirpc/otel` module provides a ready-made hook with W3C trace propagation, spans, and metrics:
+
+```go
+import vgiotel "github.com/Query-farm/vgi-rpc/vgirpc/otel"
+
+server := vgirpc.NewServer()
+// ... register methods ...
+vgiotel.InstrumentServer(server, vgiotel.DefaultConfig())
+```
+
+Install separately:
+
+```bash
+go get github.com/Query-farm/vgi-rpc/vgirpc/otel
+```
+
 ## HTTP Transport
 
-`HttpServer` wraps a `Server` and serves RPC over HTTP:
+`HttpServer` wraps a `Server` and serves RPC over HTTP. Request bodies may be zstd-compressed (`Content-Encoding: zstd`):
 
 ```go
 httpServer := vgirpc.NewHttpServer(server)

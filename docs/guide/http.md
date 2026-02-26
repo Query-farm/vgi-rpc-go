@@ -20,6 +20,10 @@ All routes use the prefix `/vgi` (configurable):
 
 All request and response bodies use `Content-Type: application/vnd.apache.arrow.stream`.
 
+## Request Compression
+
+The server transparently decompresses request bodies sent with `Content-Encoding: zstd`. The Python vgi-rpc client enables zstd compression by default (level 3), so this is handled automatically.
+
 ## State Tokens
 
 HTTP is stateless, so exchange streams carry an HMAC-signed state token in batch custom metadata (`vgi_rpc.stream_state`). The server serializes the `ExchangeState` via `encoding/gob`, signs it, and returns it to the client. The client sends the token back with each exchange request.

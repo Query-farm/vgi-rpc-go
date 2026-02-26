@@ -14,6 +14,7 @@ These generic functions register RPC methods on a `Server`:
 | `ProducerWithHeader[P](s, name, outputSchema, headerSchema, handler)` | Register a producer with a header |
 | `Exchange[P](s, name, outputSchema, inputSchema, handler)` | Register an exchange stream |
 | `ExchangeWithHeader[P](s, name, outputSchema, inputSchema, headerSchema, handler)` | Register an exchange with a header |
+| `DynamicStreamWithHeader[P](s, name, headerSchema, handler)` | Register a stream where producer/exchange mode is determined at runtime |
 
 Handler signatures:
 
@@ -37,6 +38,9 @@ func NewServer() *Server
 | Method | Description |
 |---|---|
 | `SetServerID(id string)` | Set the server identifier included in response metadata |
+| `SetServiceName(name string)` | Set a logical service name used by observability hooks |
+| `ServiceName() string` | Returns the logical service name |
+| `SetDispatchHook(hook DispatchHook)` | Register a hook called around each RPC dispatch |
 | `RunStdio()` | Run the server loop on stdin/stdout |
 | `Serve(r io.Reader, w io.Writer)` | Run the server on any reader/writer pair |
 | `ServeWithContext(ctx context.Context, r io.Reader, w io.Writer)` | Run the server with a context for cancellation |
@@ -177,6 +181,53 @@ type KV struct {
 }
 ```
 
+## Dispatch Hook
+
+```go
+type DispatchHook interface {
+    OnDispatchStart(ctx context.Context, info DispatchInfo) (context.Context, HookToken)
+    OnDispatchEnd(ctx context.Context, token HookToken, info DispatchInfo, stats *CallStatistics, err error)
+}
+```
+
+### DispatchInfo
+
+```go
+type DispatchInfo struct {
+    Method            string            // RPC method name
+    MethodType        string            // "unary" or "stream"
+    ServerID          string
+    RequestID         string
+    TransportMetadata map[string]string // IPC custom metadata or HTTP headers
+}
+```
+
+### CallStatistics
+
+```go
+type CallStatistics struct {
+    InputBatches  int64
+    OutputBatches int64
+    InputRows     int64
+    OutputRows    int64
+    InputBytes    int64
+    OutputBytes   int64
+}
+```
+
+| Method | Description |
+|---|---|
+| `RecordInput(numRows, bufferBytes int64)` | Record one input batch |
+| `RecordOutput(numRows, bufferBytes int64)` | Record one output batch |
+
+### HookToken
+
+```go
+type HookToken interface{}
+```
+
+Opaque value returned by `OnDispatchStart` and passed to `OnDispatchEnd`.
+
 ## Method Types
 
 ```go
@@ -186,6 +237,7 @@ const (
     MethodUnary    MethodType = iota
     MethodProducer
     MethodExchange
+    MethodDynamic
 )
 ```
 
@@ -216,6 +268,11 @@ const (
 | `MetaLogExtra` | `vgi_rpc.log_extra` |
 | `MetaServerID` | `vgi_rpc.server_id` |
 | `MetaStreamState` | `vgi_rpc.stream_state` |
+| `MetaShmOffset` | `vgi_rpc.shm_offset` |
+| `MetaShmLength` | `vgi_rpc.shm_length` |
+| `MetaLocation` | `vgi_rpc.location` |
+| `MetaTraceparent` | `traceparent` |
+| `MetaTracestate` | `tracestate` |
 | `MetaProtocolName` | `vgi_rpc.protocol_name` |
 | `MetaDescribeVersion` | `vgi_rpc.describe_version` |
 | `ProtocolVersion` | `"1"` |

@@ -26,11 +26,13 @@ Define RPC methods with typed Go structs annotated with `vgirpc` struct tags. Th
 - **Unary RPCs** with typed parameters and results via struct tags
 - **Producer streams** for server-initiated data flows
 - **Exchange streams** for bidirectional batch processing
+- **Dynamic streams** with runtime-determined producer/exchange mode
 - **Stream headers** for metadata before the first data batch
 - **Client-directed logging** at configurable levels
 - **`context.Context` support** for cancellation and deadlines
-- **HTTP transport** with signed state tokens for stateless exchange
+- **HTTP transport** with signed state tokens and zstd decompression
 - **ArrowSerializable** interface for complex nested types
+- **OpenTelemetry support** via optional `vgirpc/otel` module (tracing + metrics)
 
 ## Three Method Types
 

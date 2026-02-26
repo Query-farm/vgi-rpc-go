@@ -85,6 +85,7 @@ nav:
     - ArrowSerializable: guide/arrow-serializable.md
     - HTTP Transport: guide/http.md
     - Error Handling: guide/errors.md
+    - Observability: guide/observability.md
     - Introspection: guide/introspection.md
   - API Reference: api.md
   - Examples: examples.md

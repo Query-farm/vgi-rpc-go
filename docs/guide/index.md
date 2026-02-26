@@ -9,6 +9,7 @@ This guide covers the core concepts of `vgi-rpc-go` — from struct tags and str
 - **[ArrowSerializable](arrow-serializable.md)** — implement custom Arrow schemas for complex types
 - **[HTTP Transport](http.md)** — serve RPC over HTTP with signed state tokens
 - **[Error Handling](errors.md)** — RpcError, ErrRpc sentinel, and standard error types
+- **[Observability](observability.md)** — dispatch hooks and OpenTelemetry instrumentation
 - **[Introspection](introspection.md)** — the `__describe__` endpoint for service discovery
 
 ## Quick Overview
@@ -22,6 +23,7 @@ vgirpc.Producer[P](server, name, outputSchema, handler)
 vgirpc.ProducerWithHeader[P](server, name, outputSchema, headerSchema, handler)
 vgirpc.Exchange[P](server, name, outputSchema, inputSchema, handler)
 vgirpc.ExchangeWithHeader[P](server, name, outputSchema, inputSchema, headerSchema, handler)
+vgirpc.DynamicStreamWithHeader[P](server, name, headerSchema, handler)
 ```
 
 ### Transports

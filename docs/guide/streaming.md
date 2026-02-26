@@ -48,6 +48,30 @@ Each `Exchange` call must emit exactly one data batch. It must NOT call `out.Fin
 
 Register with `vgirpc.Exchange` or `vgirpc.ExchangeWithHeader`.
 
+## Dynamic Streams
+
+A dynamic stream defers the choice between producer and exchange mode to runtime. The handler returns a `*StreamResult` whose `State` field implements either `ProducerState` or `ExchangeState` — the server inspects the concrete type to determine the mode.
+
+```go
+vgirpc.DynamicStreamWithHeader[P](server, "my_method", headerSchema,
+    func(ctx context.Context, callCtx *vgirpc.CallContext, p P) (*vgirpc.StreamResult, error) {
+        if someCondition {
+            return &vgirpc.StreamResult{
+                OutputSchema: outputSchema,
+                State:        &myProducerState{},
+                Header:       myHeader,
+            }, nil
+        }
+        return &vgirpc.StreamResult{
+            OutputSchema: outputSchema,
+            State:        &myExchangeState{},
+            Header:       myHeader,
+        }, nil
+    })
+```
+
+Register with `vgirpc.DynamicStreamWithHeader`. The `OutputSchema` and `InputSchema` are taken from the `StreamResult` at runtime rather than at registration time.
+
 ## OutputCollector
 
 The `OutputCollector` enforces the one-data-batch-per-call rule and supports:
