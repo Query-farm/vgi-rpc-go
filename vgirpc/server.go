@@ -8,25 +8,18 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
+	"os/signal"
 	"reflect"
 	"sort"
 	"strings"
+	"syscall"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
-
-func serverDebugLog(format string, args ...interface{}) {
-	f, err := os.OpenFile("/tmp/vgi-rpc-server.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	fmt.Fprintf(f, format+"\n", args...)
-}
 
 // MethodType identifies how a registered method should be dispatched.
 type MethodType int
@@ -61,8 +54,10 @@ type methodInfo struct {
 
 // Server is the RPC server that dispatches incoming requests to registered methods.
 type Server struct {
-	methods  map[string]*methodInfo
-	serverID string
+	methods      map[string]*methodInfo
+	serverID     string
+	serviceName  string
+	dispatchHook DispatchHook
 }
 
 // NewServer creates a new RPC server.
@@ -75,6 +70,21 @@ func NewServer() *Server {
 // SetServerID sets a server identifier included in response metadata.
 func (s *Server) SetServerID(id string) {
 	s.serverID = id
+}
+
+// SetServiceName sets a logical service name used by observability hooks.
+func (s *Server) SetServiceName(name string) {
+	s.serviceName = name
+}
+
+// ServiceName returns the logical service name, or empty string if not set.
+func (s *Server) ServiceName() string {
+	return s.serviceName
+}
+
+// SetDispatchHook registers a hook that is called around each RPC dispatch.
+func (s *Server) SetDispatchHook(hook DispatchHook) {
+	s.dispatchHook = hook
 }
 
 // Unary registers a unary RPC method with typed parameters and return value.
@@ -272,8 +282,31 @@ func DynamicStreamWithHeader[P any](s *Server, name string,
 }
 
 // RunStdio runs the server loop reading from stdin and writing to stdout.
+// If stdin or stdout is connected to a terminal, a warning is printed to
+// stderr (matching the Python vgi-rpc behaviour).
 func (s *Server) RunStdio() {
+	// Ignore SIGPIPE so writes to closed pipes (stderr logging, stdout IPC)
+	// return errors instead of killing the process. Transport errors are
+	// already handled by isTransportClosed() in the serve loop.
+	signal.Ignore(syscall.SIGPIPE)
+
+	if isTerminal(os.Stdin) || isTerminal(os.Stdout) {
+		fmt.Fprintln(os.Stderr,
+			"WARNING: This process communicates via Arrow IPC on stdin/stdout "+
+				"and is not intended to be run interactively.\n"+
+				"It should be launched as a subprocess by an RPC client "+
+				"(e.g. vgi_rpc.connect()).")
+	}
 	s.Serve(os.Stdin, os.Stdout)
+}
+
+// isTerminal reports whether f is connected to a terminal.
+func isTerminal(f *os.File) bool {
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // Serve runs the server loop on the given reader/writer pair.
@@ -291,7 +324,7 @@ func (s *Server) ServeWithContext(ctx context.Context, r io.Reader, w io.Writer)
 			}
 			// Only log unexpected errors (not broken pipe / connection reset)
 			if !isTransportClosed(err) {
-				log.Printf("vgirpc: serve loop error: %v", err)
+				slog.Error("serve loop error", "err", err)
 			}
 			return
 		}
@@ -333,30 +366,77 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		return nil
 	}
 
+	// Build dispatch info and stats for hooks
+	dispatchInfo := DispatchInfo{
+		Method:            req.Method,
+		MethodType:        methodTypeString(info.Type),
+		ServerID:          s.serverID,
+		RequestID:         req.RequestID,
+		TransportMetadata: req.Metadata,
+	}
+
+	var hookToken HookToken
+	var hookActive bool
+	stats := &CallStatistics{}
+
+	if s.dispatchHook != nil {
+		func() {
+			defer func() {
+				if rv := recover(); rv != nil {
+					slog.Error("dispatch hook start panic", "err", rv)
+				}
+			}()
+			var hookCtx context.Context
+			hookCtx, hookToken = s.dispatchHook.OnDispatchStart(ctx, dispatchInfo)
+			if hookCtx != nil {
+				ctx = hookCtx
+			}
+			hookActive = true
+		}()
+	}
+
 	// Dispatch based on method type
+	var handlerErr error
+	var transportErr error
 	switch info.Type {
 	case MethodUnary:
-		return s.serveUnary(ctx, w, req, info)
+		handlerErr, transportErr = s.serveUnary(ctx, w, req, info, stats)
 	case MethodProducer, MethodExchange, MethodDynamic:
-		return s.serveStream(ctx, r, w, req, info)
+		handlerErr, transportErr = s.serveStream(ctx, r, w, req, info, stats)
 	default:
 		_ = WriteErrorResponse(w, info.ResultSchema,
 			fmt.Errorf("method type %d not yet implemented", info.Type),
 			s.serverID, req.RequestID)
-		return nil
 	}
+
+	// Hook end (panic-safe)
+	if hookActive {
+		func() {
+			defer func() {
+				if rv := recover(); rv != nil {
+					slog.Error("dispatch hook end panic", "err", rv)
+				}
+			}()
+			s.dispatchHook.OnDispatchEnd(ctx, hookToken, dispatchInfo, stats, handlerErr)
+		}()
+	}
+
+	return transportErr
 }
 
 // serveUnary dispatches a unary method call.
-func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info *methodInfo) error {
+// Returns handlerErr (application error reported to hook) and transportErr (I/O error for serve loop).
+func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info *methodInfo, stats *CallStatistics) (handlerErr, transportErr error) {
 	// Deserialize parameters
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
-		_ = WriteErrorResponse(w, info.ResultSchema,
-			&RpcError{Type: "TypeError", Message: fmt.Sprintf("parameter deserialization: %v", err)},
-			s.serverID, req.RequestID)
-		return nil
+		handlerErr = &RpcError{Type: "TypeError", Message: fmt.Sprintf("parameter deserialization: %v", err)}
+		_ = WriteErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID)
+		return handlerErr, nil
 	}
+
+	// Record input stats
+	stats.RecordInput(req.Batch.NumRows(), batchBufferSize(req.Batch))
 
 	// Build call context
 	callCtx := &CallContext{
@@ -405,47 +485,51 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 		ipcW := ipc.NewWriter(w, ipc.WithSchema(info.ResultSchema))
 		for _, logMsg := range logs {
 			if err := writeLogBatch(ipcW, info.ResultSchema, logMsg, s.serverID, req.RequestID); err != nil {
-				log.Printf("vgirpc: failed to write log batch: %v", err)
+				slog.Error("failed to write log batch", "err", err)
 			}
 		}
 		if err := writeErrorBatch(ipcW, info.ResultSchema, callErr, s.serverID, req.RequestID); err != nil {
-			log.Printf("vgirpc: failed to write error batch: %v", err)
+			slog.Error("failed to write error batch", "err", err)
 		}
 		if err := ipcW.Close(); err != nil {
-			log.Printf("vgirpc: failed to close IPC writer: %v", err)
+			slog.Error("failed to close IPC writer", "err", err)
 		}
-		return nil
+		return callErr, nil
 	}
 
 	// Handle void result
 	if info.ResultType == nil {
-		return WriteVoidResponse(w, logs, s.serverID, req.RequestID)
+		return nil, WriteVoidResponse(w, logs, s.serverID, req.RequestID)
 	}
 
 	// Serialize result
 	resultBatch, err := serializeResult(info.ResultSchema, resultVal.Interface())
 	if err != nil {
-		_ = WriteErrorResponse(w, info.ResultSchema,
-			&RpcError{Type: "SerializationError", Message: fmt.Sprintf("result serialization: %v", err)},
-			s.serverID, req.RequestID)
-		return nil
+		handlerErr = &RpcError{Type: "SerializationError", Message: fmt.Sprintf("result serialization: %v", err)}
+		_ = WriteErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID)
+		return handlerErr, nil
 	}
 	defer resultBatch.Release()
 
-	return WriteUnaryResponse(w, info.ResultSchema, logs, resultBatch, s.serverID, req.RequestID)
+	// Record output stats
+	stats.RecordOutput(resultBatch.NumRows(), batchBufferSize(resultBatch))
+
+	return nil, WriteUnaryResponse(w, info.ResultSchema, logs, resultBatch, s.serverID, req.RequestID)
 }
 
 // serveStream dispatches a producer or exchange stream method.
-func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req *Request, info *methodInfo) error {
+// Returns handlerErr (application error reported to hook) and transportErr (I/O error for serve loop).
+func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req *Request, info *methodInfo, stats *CallStatistics) (handlerErr, transportErr error) {
 	// Deserialize parameters
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
-		emptySchema := arrow.NewSchema(nil, nil)
-		_ = WriteErrorResponse(w, emptySchema, &RpcError{
+		handlerErr = &RpcError{
 			Type:    "TypeError",
 			Message: fmt.Sprintf("parameter deserialization: %v", err),
-		}, s.serverID, req.RequestID)
-		return nil
+		}
+		emptySchema := arrow.NewSchema(nil, nil)
+		_ = WriteErrorResponse(w, emptySchema, handlerErr, s.serverID, req.RequestID)
+		return handlerErr, nil
 	}
 
 	// Build call context for init
@@ -481,10 +565,10 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		}
 		outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
 		if err := writeErrorBatch(outputWriter, outputSchema, callErr, s.serverID, req.RequestID); err != nil {
-			log.Printf("vgirpc: failed to write error batch: %v", err)
+			slog.Error("failed to write error batch", "err", err)
 		}
 		if err := outputWriter.Close(); err != nil {
-			log.Printf("vgirpc: failed to close output writer: %v", err)
+			slog.Error("failed to close output writer", "err", err)
 		}
 
 		// Drain the client's input (ticks / exchange batches).
@@ -495,7 +579,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			}
 			inputReader.Release()
 		}
-		return nil
+		return callErr, nil
 	}
 
 	streamResult := results[0].Interface().(*StreamResult)
@@ -524,7 +608,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				}
 				inputReader.Release()
 			}
-			return nil
+			return stateErr, nil
 		}
 	} else {
 		isProducer = info.Type == MethodProducer
@@ -542,7 +626,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					}
 					inputReader.Release()
 				}
-				return nil
+				return stateErr, nil
 			}
 		} else {
 			if _, ok := state.(ExchangeState); !ok {
@@ -558,57 +642,60 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					}
 					inputReader.Release()
 				}
-				return nil
+				return stateErr, nil
 			}
 		}
 	}
 
 	// Write header IPC stream if method declares a header type
 	if info.HasHeader && streamResult.Header != nil {
-		serverDebugLog("serveStream[%s]: writing header (type=%T)", info.Name, streamResult.Header)
+		slog.Debug("stream: writing header", "method", info.Name, "type", fmt.Sprintf("%T", streamResult.Header))
 		if err := s.writeStreamHeader(w, streamResult.Header, callCtx.drainLogs()); err != nil {
-			serverDebugLog("serveStream[%s]: header write error: %v", info.Name, err)
-			return nil // transport error during header, bail out
+			slog.Debug("stream: header write error", "method", info.Name, "err", err)
+			return nil, nil // transport error during header, bail out
 		}
-		serverDebugLog("serveStream[%s]: header written ok", info.Name)
+		slog.Debug("stream: header written", "method", info.Name)
 	}
 
 	// Open input reader for client ticks/data
-	serverDebugLog("serveStream[%s]: opening input reader", info.Name)
+	slog.Debug("stream: opening input reader", "method", info.Name)
 	inputReader, err := ipc.NewReader(r)
 	if err != nil {
-		serverDebugLog("serveStream[%s]: input reader error: %v", info.Name, err)
-		return nil // transport error
+		slog.Debug("stream: input reader error", "method", info.Name, "err", err)
+		return nil, nil // transport error
 	}
 	defer inputReader.Release()
-	serverDebugLog("serveStream[%s]: input reader opened", info.Name)
+	slog.Debug("stream: input reader opened", "method", info.Name)
 
 	// Open output IPC writer
 	outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
-	serverDebugLog("serveStream[%s]: output writer opened, isProducer=%v", info.Name, isProducer)
+	slog.Debug("stream: output writer opened", "method", info.Name, "is_producer", isProducer)
 
 	// Write any buffered init logs
 	initLogs := callCtx.drainLogs()
 	for _, logMsg := range initLogs {
 		if err := writeLogBatch(outputWriter, outputSchema, logMsg, s.serverID, req.RequestID); err != nil {
-			log.Printf("vgirpc: failed to write init log batch: %v", err)
+			slog.Error("failed to write init log batch", "err", err)
 		}
 	}
 
 	// Lockstep loop
 	var streamErr error
 
-	serverDebugLog("serveStream[%s]: entering lockstep loop", info.Name)
+	slog.Debug("stream: entering lockstep loop", "method", info.Name)
 	for {
 		// Read one input batch (tick for producer, real data for exchange)
-		serverDebugLog("serveStream[%s]: waiting for input batch", info.Name)
+		slog.Debug("stream: waiting for input batch", "method", info.Name)
 		if !inputReader.Next() {
 			// Client closed the stream (StopIteration equivalent)
-			serverDebugLog("serveStream[%s]: input reader done (client closed)", info.Name)
+			slog.Debug("stream: input reader done", "method", info.Name)
 			break
 		}
 		inputBatch := inputReader.RecordBatch()
-		serverDebugLog("serveStream[%s]: got input batch rows=%d cols=%d", info.Name, inputBatch.NumRows(), inputBatch.NumCols())
+		slog.Debug("stream: got input batch", "method", info.Name, "rows", inputBatch.NumRows(), "cols", inputBatch.NumCols())
+
+		// Record input stats per streaming batch
+		stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
 
 		// Create OutputCollector for this iteration
 		out := newOutputCollector(outputSchema, s.serverID, isProducer)
@@ -649,7 +736,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		if streamErr != nil {
 			// Write error batch to output stream
 			if err := writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID); err != nil {
-				log.Printf("vgirpc: failed to write stream error batch: %v", err)
+				slog.Error("failed to write stream error batch", "err", err)
 			}
 			break
 		}
@@ -657,8 +744,9 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		// Validate (unless finished)
 		if !out.Finished() {
 			if err := out.validate(); err != nil {
+				streamErr = err
 				if writeErr := writeErrorBatch(outputWriter, outputSchema, err, s.serverID, req.RequestID); writeErr != nil {
-					log.Printf("vgirpc: failed to write validation error batch: %v", writeErr)
+					slog.Error("failed to write validation error batch", "err", writeErr)
 				}
 				break
 			}
@@ -673,6 +761,8 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				writeErr = outputWriter.Write(batchWithMeta)
 				batchWithMeta.Release()
 			} else {
+				// Data batch — record output stats
+				stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
 				writeErr = outputWriter.Write(ab.batch)
 			}
 			ab.batch.Release()
@@ -681,9 +771,13 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				for _, remaining := range out.batches[i+1:] {
 					remaining.batch.Release()
 				}
-				streamErr = fmt.Errorf("writing output batch: %w", writeErr)
+				transportErr = fmt.Errorf("writing output batch: %w", writeErr)
 				break
 			}
+		}
+
+		if transportErr != nil {
+			break
 		}
 
 		if out.Finished() {
@@ -694,7 +788,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 
 	// Close output writer (sends EOS)
 	if err := outputWriter.Close(); err != nil {
-		log.Printf("vgirpc: failed to close output writer: %v", err)
+		slog.Error("failed to close output writer", "err", err)
 	}
 
 	// Drain remaining input so transport is clean for next request
@@ -702,7 +796,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		// discard
 	}
 
-	return nil
+	return streamErr, transportErr
 }
 
 // writeStreamHeader writes a stream header as a separate complete IPC stream.

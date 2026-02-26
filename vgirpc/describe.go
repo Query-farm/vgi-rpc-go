@@ -6,7 +6,7 @@ package vgirpc
 import (
 	"bytes"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"sort"
 	"strconv"
 
@@ -126,7 +126,7 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 			}
 			ptJSON, err := json.Marshal(paramTypes)
 			if err != nil {
-				log.Printf("vgirpc: failed to marshal param types JSON: %v", err)
+				slog.Error("failed to marshal param types JSON", "err", err)
 				paramTypesBuilder.AppendNull()
 			} else {
 				paramTypesBuilder.Append(string(ptJSON))
@@ -143,7 +143,7 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 			}
 			pdJSON, err := json.Marshal(typed)
 			if err != nil {
-				log.Printf("vgirpc: failed to marshal param defaults JSON: %v", err)
+				slog.Error("failed to marshal param defaults JSON", "err", err)
 				paramDefaultsBuilder.AppendNull()
 			} else {
 				paramDefaultsBuilder.Append(string(pdJSON))
