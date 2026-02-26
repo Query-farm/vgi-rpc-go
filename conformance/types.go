@@ -10,12 +10,6 @@ import (
 // Status is a string-backed enum matching the Python Status enum.
 type Status string
 
-const (
-	statusPending Status = "PENDING"
-	statusActive  Status = "ACTIVE"
-	statusClosed  Status = "CLOSED"
-)
-
 // Point is a simple 2D point.
 type Point struct {
 	X float64 `arrow:"x"`
