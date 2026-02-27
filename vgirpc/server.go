@@ -73,7 +73,8 @@ func (s *Server) SetServerID(id string) {
 	s.serverID = id
 }
 
-// SetServiceName sets a logical service name used by observability hooks.
+// SetServiceName sets a logical service name used by observability hooks
+// and as the default protocol name on HTTP pages.
 func (s *Server) SetServiceName(name string) {
 	s.serviceName = name
 }
@@ -81,6 +82,11 @@ func (s *Server) SetServiceName(name string) {
 // ServiceName returns the logical service name, or empty string if not set.
 func (s *Server) ServiceName() string {
 	return s.serviceName
+}
+
+// ServerID returns the server identifier, or empty string if not set.
+func (s *Server) ServerID() string {
+	return s.serverID
 }
 
 // SetDispatchHook registers a hook that is called around each RPC dispatch.

@@ -41,11 +41,13 @@ func RegisterStateType(v interface{}) {
 }
 
 // HttpServer serves RPC requests over HTTP. It wraps a [Server] and exposes
-// three URL routes under a configurable prefix (default "/vgi"):
+// URL routes under a configurable prefix (default "/vgi"):
 //
 //	POST /vgi/{method}           — unary RPC call
 //	POST /vgi/{method}/init      — stream initialization (producer or exchange)
 //	POST /vgi/{method}/exchange  — exchange continuation with state token
+//	GET  /vgi                    — landing page (HTML)
+//	GET  /vgi/describe           — API reference page (HTML)
 //
 // HttpServer implements [http.Handler] and can be used directly with
 // [http.ListenAndServe] or mounted on an existing [http.ServeMux].
@@ -57,6 +59,18 @@ type HttpServer struct {
 	prefix      string
 	mux         *http.ServeMux
 	zstdEncoder *zstd.Encoder // non-nil when response compression is enabled
+
+	// Pre-rendered HTML pages (built by initPages)
+	landingHTML  []byte
+	describeHTML []byte
+	notFoundHTML []byte
+
+	// Page configuration
+	protocolName      string
+	repoURL           string
+	enableLandingPage  bool
+	enableDescribePage bool
+	enableNotFoundPage bool
 }
 
 // NewHttpServer creates a new HTTP server wrapping an RPC server.
@@ -71,11 +85,12 @@ func NewHttpServer(server *Server) *HttpServer {
 		tokenTTL:    defaultTokenTTL,
 		maxBodySize: defaultMaxBodySize,
 		prefix:      "/vgi",
+
+		enableLandingPage:  true,
+		enableDescribePage: true,
+		enableNotFoundPage: true,
 	}
-	h.mux = http.NewServeMux()
-	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/init", h.prefix), h.handleStreamInit)
-	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/exchange", h.prefix), h.handleStreamExchange)
-	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}", h.prefix), h.handleUnary)
+	h.initRoutes()
 	return h
 }
 
@@ -91,12 +106,88 @@ func NewHttpServerWithKey(server *Server, signingKey []byte) *HttpServer {
 		tokenTTL:    defaultTokenTTL,
 		maxBodySize: defaultMaxBodySize,
 		prefix:      "/vgi",
+
+		enableLandingPage:  true,
+		enableDescribePage: true,
+		enableNotFoundPage: true,
 	}
+	h.initRoutes()
+	return h
+}
+
+// SetProtocolName sets the protocol name displayed on HTML pages.
+// If not set, the server's service name is used, falling back to "vgi-rpc Service".
+func (h *HttpServer) SetProtocolName(name string) {
+	h.protocolName = name
+}
+
+// SetRepoURL sets a source repository URL shown on the landing and describe pages.
+func (h *HttpServer) SetRepoURL(url string) {
+	h.repoURL = url
+}
+
+// SetEnableLandingPage controls whether GET requests to the prefix serve an
+// HTML landing page. Enabled by default.
+func (h *HttpServer) SetEnableLandingPage(enabled bool) {
+	h.enableLandingPage = enabled
+}
+
+// SetEnableDescribePage controls whether GET {prefix}/describe serves an
+// HTML API reference page. Enabled by default.
+func (h *HttpServer) SetEnableDescribePage(enabled bool) {
+	h.enableDescribePage = enabled
+}
+
+// SetEnableNotFoundPage controls whether unmatched routes return a friendly
+// HTML 404 page. Enabled by default.
+func (h *HttpServer) SetEnableNotFoundPage(enabled bool) {
+	h.enableNotFoundPage = enabled
+}
+
+// initRoutes registers POST routes for RPC and builds the mux. Call once
+// from the constructor. HTML GET routes are added lazily by initPages.
+func (h *HttpServer) initRoutes() {
 	h.mux = http.NewServeMux()
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/init", h.prefix), h.handleStreamInit)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/exchange", h.prefix), h.handleStreamExchange)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}", h.prefix), h.handleUnary)
-	return h
+}
+
+// InitPages pre-renders the HTML pages and registers GET routes. This must be
+// called after all methods are registered on the server and after any
+// Set* configuration calls (SetProtocolName, SetRepoURL, etc.).
+//
+// If not called explicitly, pages are initialized automatically on the first
+// HTTP request.
+func (h *HttpServer) InitPages() {
+	name := h.protocolName
+	if name == "" {
+		name = h.server.serviceName
+	}
+	if name == "" {
+		name = "vgi-rpc Service"
+	}
+
+	serverID := h.server.serverID
+
+	if h.enableDescribePage {
+		h.describeHTML = buildDescribeHTML(h.server, h.prefix, name, h.repoURL)
+		h.mux.HandleFunc(fmt.Sprintf("GET %s/describe", h.prefix), h.handleDescribePage)
+	}
+
+	if h.enableLandingPage {
+		describePath := ""
+		if h.enableDescribePage {
+			describePath = h.prefix + "/describe"
+		}
+		h.landingHTML = buildLandingHTML(h.prefix, name, serverID, describePath, h.repoURL)
+		h.mux.HandleFunc(fmt.Sprintf("GET %s", h.prefix), h.handleLandingPage)
+	}
+
+	if h.enableNotFoundPage {
+		h.notFoundHTML = buildNotFoundHTML(h.prefix, name)
+		h.mux.HandleFunc("/", h.handleNotFound)
+	}
 }
 
 // SetTokenTTL sets the maximum age for state tokens.
@@ -129,6 +220,11 @@ func (h *HttpServer) SetCompressionLevel(level int) {
 
 // ServeHTTP implements http.Handler.
 func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Auto-initialize pages on first request if not done explicitly.
+	if h.landingHTML == nil && h.describeHTML == nil && h.notFoundHTML == nil {
+		h.InitPages()
+	}
+
 	if h.zstdEncoder != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "zstd") {
 		cw := &compressResponseWriter{ResponseWriter: w, encoder: h.zstdEncoder}
 		defer cw.finish()
