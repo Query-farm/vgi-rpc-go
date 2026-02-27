@@ -24,8 +24,9 @@ const (
 	// MetaServerID carries the server identifier set via [Server.SetServerID].
 	MetaServerID = "vgi_rpc.server_id"
 	// MetaStreamState carries the HMAC-signed state token for HTTP stateful
-	// exchange streams.
-	MetaStreamState = "vgi_rpc.stream_state"
+	// exchange streams. The "#b64" suffix signals that the value is
+	// base64-encoded binary data, ensuring UTF-8 validity in Arrow IPC metadata.
+	MetaStreamState = "vgi_rpc.stream_state#b64"
 	// MetaShmOffset carries the byte offset for shared memory pointers.
 	MetaShmOffset = "vgi_rpc.shm_offset"
 	// MetaShmLength carries the byte length for shared memory pointers.

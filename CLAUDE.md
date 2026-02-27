@@ -11,11 +11,7 @@ make test      # build conformance worker, run Python conformance tests
 make coverage  # run tests with Go coverage instrumentation
 ```
 
-The Python venv at `/Users/rusty/Development/vgi-rpc/.venv` must be activated before running `make test` or `make coverage`:
-
-```bash
-source /Users/rusty/Development/vgi-rpc/.venv/bin/activate
-```
+The Makefile uses the Python venv at `/Users/rusty/Development/vgi-rpc/.venv` directly — no activation needed.
 
 ## Testing Policy
 

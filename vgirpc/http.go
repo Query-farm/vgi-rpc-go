@@ -9,6 +9,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/gob"
 	"fmt"
 	"io"
@@ -951,10 +952,19 @@ func (h *HttpServer) packStateToken(state interface{}, outputSchema *arrow.Schem
 	mac.Write(payloadBytes)
 	sig := mac.Sum(nil)
 
-	return append(payloadBytes, sig...), nil
+	raw := append(payloadBytes, sig...)
+	encoded := make([]byte, base64.StdEncoding.EncodedLen(len(raw)))
+	base64.StdEncoding.Encode(encoded, raw)
+	return encoded, nil
 }
 
 func (h *HttpServer) unpackStateToken(token []byte) (*stateTokenData, error) {
+	raw, err := base64.StdEncoding.DecodeString(string(token))
+	if err != nil {
+		return nil, &RpcError{Type: "RuntimeError", Message: "Malformed state token"}
+	}
+	token = raw
+
 	if len(token) < hmacLen {
 		return nil, &RpcError{Type: "RuntimeError", Message: "Malformed state token"}
 	}
