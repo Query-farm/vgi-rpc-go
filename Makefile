@@ -6,6 +6,7 @@ GO_CONFORMANCE_WORKER ?= $(CURDIR)/conformance-worker
 PYTHON ?= $(VGI_RPC_PYTHON_PATH)/.venv/bin/python
 export VGI_RPC_PYTHON_PATH GO_CONFORMANCE_WORKER
 
+GOBIN := $(shell go env GOPATH)/bin
 COVDIR := $(CURDIR)/_covdata
 
 .PHONY: build lint test coverage docs clean
@@ -30,7 +31,7 @@ benchmark-worker:
 lint:
 	go build ./...
 	go vet ./...
-	staticcheck ./...
+	$(GOBIN)/staticcheck ./...
 	cd vgirpc/otel && go vet ./...
 
 # --- Test ------------------------------------------------------------------

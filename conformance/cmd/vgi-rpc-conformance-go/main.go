@@ -23,6 +23,7 @@ func main() {
 
 	if len(os.Args) > 1 && os.Args[1] == "--http" {
 		httpServer := vgirpc.NewHttpServer(server)
+		httpServer.SetCompressionLevel(3)
 
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
