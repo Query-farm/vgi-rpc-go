@@ -160,6 +160,7 @@ func RegisterMethods(server *vgirpc.Server) {
 	vgirpc.Exchange(server, "exchange_with_logs", scaleOutputSchema, scaleInputSchema, exchangeWithLogs)
 	vgirpc.Exchange(server, "exchange_error_on_nth", scaleOutputSchema, scaleInputSchema, exchangeErrorOnNth)
 	vgirpc.Exchange(server, "exchange_error_on_init", scaleOutputSchema, scaleInputSchema, exchangeErrorOnInit)
+	vgirpc.Exchange(server, "exchange_cast_compatible", scaleOutputSchema, scaleInputSchema, exchangeCastCompatible)
 
 	// Zero-column exchange
 	emptySchema := arrow.NewSchema([]arrow.Field{}, nil)
@@ -211,6 +212,7 @@ type exchangeErrorOnNthParams struct {
 	FailOn int64 `vgirpc:"fail_on"`
 }
 type exchangeErrorOnInitParams struct{}
+type exchangeCastCompatibleParams struct{}
 type exchangeZeroColumnsParams struct{}
 type exchangeWithHeaderParams struct {
 	Factor float64 `vgirpc:"factor"`
@@ -476,6 +478,14 @@ func exchangeErrorOnNth(_ context.Context, ctx *vgirpc.CallContext, p exchangeEr
 
 func exchangeErrorOnInit(_ context.Context, ctx *vgirpc.CallContext, _ exchangeErrorOnInitParams) (*vgirpc.StreamResult, error) {
 	return nil, &vgirpc.RpcError{Type: "RuntimeError", Message: "intentional exchange init error"}
+}
+
+func exchangeCastCompatible(_ context.Context, ctx *vgirpc.CallContext, _ exchangeCastCompatibleParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: scaleOutputSchema,
+		InputSchema:  scaleInputSchema,
+		State:        &scaleExchangeState{Factor: 1.0},
+	}, nil
 }
 
 func exchangeZeroColumns(_ context.Context, ctx *vgirpc.CallContext, _ exchangeZeroColumnsParams) (*vgirpc.StreamResult, error) {

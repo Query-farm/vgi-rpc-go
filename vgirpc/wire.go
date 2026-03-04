@@ -258,6 +258,18 @@ func castRecordBatch(batch arrow.RecordBatch, targetSchema *arrow.Schema) (arrow
 		}
 	}
 
+	// Verify field names match
+	for i := range batch.NumCols() {
+		srcName := batch.Schema().Field(int(i)).Name
+		targetName := targetSchema.Field(int(i)).Name
+		if srcName != targetName {
+			return nil, &RpcError{
+				Type:    "TypeError",
+				Message: fmt.Sprintf("Input schema mismatch: expected field %q, got %q", targetName, srcName),
+			}
+		}
+	}
+
 	ctx := compute.WithAllocator(context.Background(), memory.NewGoAllocator())
 	cols := make([]arrow.Array, batch.NumCols())
 	for i := range batch.NumCols() {
