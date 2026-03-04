@@ -3,8 +3,9 @@
 Runs identical RPC benchmarks against both the Python and Go subprocess workers
 using pytest-benchmark. The Go worker must be pre-built at ./benchmark-worker.
 
+Requires: pip install "vgi-rpc" pytest pytest-benchmark
+
 Run with:
-    source /Users/rusty/Development/vgi-rpc/.venv/bin/activate
     python -m pytest test_benchmark_comparison.py --benchmark-enable --benchmark-only \
         -o "addopts=" --timeout=300 -v
 """
@@ -13,16 +14,12 @@ from __future__ import annotations
 
 import contextlib
 import os
-import sys
 from collections.abc import Callable, Iterator
 from enum import Enum
 from typing import Any, Protocol
 
 import pyarrow as pa
 import pytest
-
-# Add the vgi-rpc package to the path
-sys.path.insert(0, "/Users/rusty/Development/vgi-rpc")
 
 from pytest_benchmark.fixture import BenchmarkFixture
 from vgi_rpc.rpc import (

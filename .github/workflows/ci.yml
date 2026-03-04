@@ -35,16 +35,9 @@ jobs:
     needs: lint
     runs-on: ubuntu-latest
     env:
-      VGI_RPC_PYTHON_PATH: ${{ github.workspace }}/_vgi-rpc-python
-      GO_CONFORMANCE_WORKER: ${{ github.workspace }}/conformance-worker
       GOCOVERDIR: ${{ github.workspace }}/_covdata
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/checkout@v4
-        with:
-          repository: Query-farm/vgi-rpc-python
-          path: _vgi-rpc-python
 
       - uses: actions/setup-go@v5
         with:
@@ -54,27 +47,17 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-
       - name: Build conformance worker with coverage
         run: go build -cover -covermode=atomic -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
 
       - name: Install Python dependencies
-        run: cd _vgi-rpc-python && uv sync --all-extras
+        run: pip install "vgi-rpc[http,cli]>=0.1.13" pytest pytest-timeout
 
       - name: Create coverage directory
         run: mkdir -p _covdata
 
       - name: Run conformance tests
-        run: |
-          cd _vgi-rpc-python && uv run pytest \
-            ${{ github.workspace }}/test_go_conformance.py \
-            -o "addopts=" \
-            -p no:mypy \
-            -p no:ruff \
-            --timeout=120 \
-            -v
+        run: timeout 120 python -m pytest test_go_conformance.py -x -v
 
       - name: Merge coverage profiles
         run: go tool covdata textfmt -i=_covdata -o=coverage-go.txt

@@ -1,10 +1,9 @@
 # Development Makefile for vgi-rpc-go
 
 # Configurable paths — override with env vars or on the command line.
-VGI_RPC_PYTHON_PATH ?= /Users/rusty/Development/vgi-rpc
 GO_CONFORMANCE_WORKER ?= $(CURDIR)/conformance-worker
-PYTHON ?= $(VGI_RPC_PYTHON_PATH)/.venv/bin/python
-export VGI_RPC_PYTHON_PATH GO_CONFORMANCE_WORKER
+PYTHON ?= python3
+export GO_CONFORMANCE_WORKER
 
 GOBIN := $(shell go env GOPATH)/bin
 COVDIR := $(CURDIR)/_covdata

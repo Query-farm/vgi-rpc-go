@@ -3,19 +3,14 @@ import contextlib
 import os
 import socket
 import subprocess
-import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
-
-_VGI_RPC_PYTHON_PATH = os.environ.get(
-    "VGI_RPC_PYTHON_PATH", "/Users/rusty/Development/vgi-rpc"
-)
-sys.path.insert(0, _VGI_RPC_PYTHON_PATH)
 
 from vgi_rpc.conformance import ConformanceService
 from vgi_rpc.http import http_connect
@@ -24,7 +19,7 @@ from vgi_rpc.rpc import SubprocessTransport, _RpcProxy, unix_connect
 
 GO_WORKER = os.environ.get(
     "GO_CONFORMANCE_WORKER",
-    "/Users/rusty/Development/vgi-rpc-go/conformance-worker",
+    str(Path(__file__).parent / "conformance-worker"),
 )
 
 
@@ -33,6 +28,18 @@ def go_transport() -> Iterator[SubprocessTransport]:
     transport = SubprocessTransport([GO_WORKER])
     yield transport
     transport.close()
+
+
+def _wait_for_http(port: int, timeout: float = 5.0) -> None:
+    """Poll until the HTTP server is accepting connections."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            _ = httpx.get(f"http://127.0.0.1:{port}/", timeout=5.0)
+            return
+        except (httpx.ConnectError, httpx.ConnectTimeout):
+            time.sleep(0.1)
+    raise TimeoutError(f"HTTP server on port {port} did not start within {timeout}s")
 
 
 @pytest.fixture(scope="session")
@@ -49,16 +56,7 @@ def go_http_port() -> Iterator[int]:
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         port = int(line.split(":", 1)[1])
 
-        # Wait for server to be ready
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            try:
-                httpx.get(f"http://127.0.0.1:{port}/", timeout=1.0)
-                break
-            except (httpx.ConnectError, httpx.ConnectTimeout):
-                time.sleep(0.1)
-            except httpx.HTTPStatusError:
-                break  # Server is up, just returned an error status
+        _wait_for_http(port)
 
         yield port
     finally:
@@ -157,8 +155,8 @@ def conformance_conn(
     return factory
 
 
-# Import all tests from the conformance test module
-from tests.test_conformance import *  # noqa: F401,F403,E402
+# Import all tests from the conformance test module (PyPI package)
+from vgi_rpc.conformance._pytest_suite import *  # noqa: F401,F403,E402
 
 
 from vgi_rpc.rpc import AnnotatedBatch, RpcError  # noqa: E402

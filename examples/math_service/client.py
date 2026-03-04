@@ -3,19 +3,18 @@
 Demonstrates all four RPC method types (unary, producer, exchange) across
 both subprocess (stdio) and HTTP transports.
 
-Requires the vgi_rpc package (activate the venv first):
-    source /Users/rusty/Development/vgi-rpc/.venv/bin/activate
+Requires: pip install "vgi-rpc[http]"
+
+Run with:
     python examples/math_service/client.py
 """
 
 from __future__ import annotations
 
 import subprocess
-import sys
 import time
+from pathlib import Path
 from typing import Protocol
-
-sys.path.insert(0, "/Users/rusty/Development/vgi-rpc")
 
 from vgi_rpc.http import http_connect
 from vgi_rpc.rpc import AnnotatedBatch, RpcConnection, Stream, StreamState, SubprocessTransport
@@ -135,11 +134,12 @@ def demo_http() -> None:
 
 if __name__ == "__main__":
     # Build the server binary
+    repo_root = Path(__file__).resolve().parent.parent.parent
     print("Building math-service binary...")
     subprocess.run(
-        ["go", "build", "-o", BINARY, "./examples/math_service/"],
+        ["go", "build", "-o", str(repo_root / BINARY), "./examples/math_service/"],
         check=True,
-        cwd="/Users/rusty/Development/vgi-rpc-go",
+        cwd=str(repo_root),
     )
     print("Build complete.")
 
