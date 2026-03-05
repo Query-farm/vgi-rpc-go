@@ -70,6 +70,11 @@ type HttpServer struct {
 	producerBatchLimit int              // max data batches per producer response; 0 = unlimited
 	authenticateFunc   AuthenticateFunc // optional auth callback; nil = anonymous
 
+	// OAuth Protected Resource Metadata (RFC 9728)
+	oauthMetadata     *OAuthResourceMetadata
+	oauthMetadataJSON []byte // pre-rendered JSON
+	wwwAuthenticate   string // pre-built WWW-Authenticate header value
+
 	// Pre-rendered HTML pages (built by initPages)
 	landingHTML  []byte
 	describeHTML []byte
@@ -161,6 +166,19 @@ func (h *HttpServer) initRoutes() {
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/init", h.prefix), h.handleStreamInit)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/exchange", h.prefix), h.handleStreamExchange)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}", h.prefix), h.handleUnary)
+	h.mux.HandleFunc(fmt.Sprintf("GET %s", wellKnownURL(h.prefix)), h.handleOAuthWellKnown)
+}
+
+// handleOAuthWellKnown serves the OAuth Protected Resource Metadata document.
+func (h *HttpServer) handleOAuthWellKnown(w http.ResponseWriter, r *http.Request) {
+	if h.oauthMetadata == nil {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(h.oauthMetadataJSON)
 }
 
 // InitPages pre-renders the HTML pages and registers GET routes. This must be
@@ -252,6 +270,26 @@ func (h *HttpServer) SetAuthenticate(fn AuthenticateFunc) {
 	h.authenticateFunc = fn
 }
 
+// SetOAuthResourceMetadata configures OAuth Protected Resource Metadata
+// (RFC 9728). When set, the server exposes a well-known endpoint and includes
+// a WWW-Authenticate header on 401 responses.
+func (h *HttpServer) SetOAuthResourceMetadata(m *OAuthResourceMetadata) {
+	if err := m.Validate(); err != nil {
+		panic(fmt.Sprintf("vgirpc: %v", err))
+	}
+	data, err := m.ToJSON()
+	if err != nil {
+		panic(fmt.Sprintf("vgirpc: failed to marshal oauth metadata: %v", err))
+	}
+	metaURL, err := resourceMetadataURLFromResource(m.Resource)
+	if err != nil {
+		panic(fmt.Sprintf("vgirpc: %v", err))
+	}
+	h.oauthMetadata = m
+	h.oauthMetadataJSON = data
+	h.wwwAuthenticate = buildWWWAuthenticate(metaURL)
+}
+
 // authenticate runs the registered AuthenticateFunc (if any) and writes
 // an error response on failure. Returns nil when auth fails (caller should
 // return immediately).
@@ -263,6 +301,9 @@ func (h *HttpServer) authenticate(w http.ResponseWriter, r *http.Request) *AuthC
 	if err != nil {
 		if rpcErr, ok := err.(*RpcError); ok &&
 			(rpcErr.Type == "ValueError" || rpcErr.Type == "PermissionError") {
+			if h.wwwAuthenticate != "" {
+				w.Header().Set("WWW-Authenticate", h.wwwAuthenticate)
+			}
 			http.Error(w, rpcErr.Message, http.StatusUnauthorized)
 		} else {
 			slog.Error("authenticate callback error", "err", err, "remote_addr", r.RemoteAddr)
