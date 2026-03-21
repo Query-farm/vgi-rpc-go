@@ -683,6 +683,198 @@ func TestResolveExternalLocation_SHA256Absent(t *testing.T) {
 	}
 }
 
+func TestSHA256_RoundtripWithCompression(t *testing.T) {
+	// SHA-256 is of raw IPC bytes (pre-compression), verified after fetch (post-decompression)
+	storage := newMockStorage()
+	config := &ExternalLocationConfig{
+		Storage:                   storage,
+		ExternalizeThresholdBytes: 10,
+		Compression:              &Compression{Algorithm: "zstd", Level: 3},
+		URLValidator:             nil,
+	}
+	batch := makeBatch(100)
+	defer batch.Release()
+
+	extBatch, extMeta, err := MaybeExternalizeBatch(batch, arrow.Metadata{}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extBatch.Release()
+
+	// Verify SHA-256 is present
+	sha256Val, ok := metaGet(extMeta, MetaLocationSHA256)
+	if !ok {
+		t.Fatal("expected SHA-256 on compressed externalized batch")
+	}
+	if len(sha256Val) != 64 {
+		t.Fatalf("expected 64-char hex, got %d", len(sha256Val))
+	}
+
+	// Serve compressed data with Content-Encoding: zstd
+	locationURL, _ := metaGet(extMeta, MetaLocation)
+	compressedData := storage.data[locationURL]
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Encoding", "zstd")
+		w.Write(compressedData)
+	}))
+	defer server.Close()
+
+	// Resolve from test server
+	pointer, meta := MakeExternalLocationBatch(testSchema, server.URL+"/data", sha256Val)
+	defer pointer.Release()
+
+	resolveConfig := &ExternalLocationConfig{URLValidator: nil}
+	resolved, _, err := ResolveExternalLocation(pointer, meta, resolveConfig)
+	if err != nil {
+		t.Fatalf("round-trip with compression failed: %v", err)
+	}
+	defer resolved.Release()
+
+	if resolved.NumRows() != 100 {
+		t.Fatalf("expected 100 rows, got %d", resolved.NumRows())
+	}
+}
+
+func TestSHA256_IsPreCompression(t *testing.T) {
+	// SHA-256 should be of raw IPC bytes, NOT compressed bytes
+	storage := newMockStorage()
+	config := &ExternalLocationConfig{
+		Storage:                   storage,
+		ExternalizeThresholdBytes: 10,
+		Compression:              &Compression{Algorithm: "zstd", Level: 3},
+	}
+	batch := makeBatch(100)
+	defer batch.Release()
+
+	_, extMeta, err := MaybeExternalizeBatch(batch, arrow.Metadata{}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sha256Val, _ := metaGet(extMeta, MetaLocationSHA256)
+	locationURL, _ := metaGet(extMeta, MetaLocation)
+	compressedData := storage.data[locationURL]
+
+	// SHA-256 should NOT match the compressed bytes
+	compressedHash := sha256.Sum256(compressedData)
+	compressedHex := hex.EncodeToString(compressedHash[:])
+	if sha256Val == compressedHex {
+		t.Fatal("SHA-256 should be of raw IPC, not compressed bytes")
+	}
+
+	// Decompress and verify SHA-256 matches the raw IPC
+	decoder, err := zstd.NewReader(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawIPC, err := decoder.DecodeAll(compressedData, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawHash := sha256.Sum256(rawIPC)
+	rawHex := hex.EncodeToString(rawHash[:])
+	if sha256Val != rawHex {
+		t.Fatalf("SHA-256 mismatch: metadata=%s, raw IPC=%s", sha256Val, rawHex)
+	}
+}
+
+func TestSHA256_FullExternalizeServeResolve(t *testing.T) {
+	// Full round-trip: externalize → mock HTTP serve → resolve with checksum verification
+	storage := newMockStorage()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for url, data := range storage.data {
+			if strings.HasSuffix(url, r.URL.Path) {
+				w.Write(data)
+				return
+			}
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	testStorage := &redirectStorage{inner: storage, serverURL: server.URL}
+	config := &ExternalLocationConfig{
+		Storage:                   testStorage,
+		ExternalizeThresholdBytes: 10,
+		URLValidator:              nil,
+	}
+
+	batch := makeBatch(50)
+	defer batch.Release()
+
+	extBatch, extMeta, err := MaybeExternalizeBatch(batch, arrow.Metadata{}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extBatch.Release()
+
+	// Verify SHA-256 is present
+	_, hasSHA := metaGet(extMeta, MetaLocationSHA256)
+	if !hasSHA {
+		t.Fatal("missing SHA-256 on pointer batch")
+	}
+
+	// Resolve — should verify checksum automatically
+	resolved, _, err := ResolveExternalLocation(extBatch, extMeta, config)
+	if err != nil {
+		t.Fatalf("full round-trip failed: %v", err)
+	}
+	defer resolved.Release()
+
+	if resolved.NumRows() != 50 {
+		t.Fatalf("expected 50 rows, got %d", resolved.NumRows())
+	}
+}
+
+func TestSHA256_MismatchOnFullRoundtrip(t *testing.T) {
+	// Full round-trip with tampered SHA-256 should fail
+	storage := newMockStorage()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for url, data := range storage.data {
+			if strings.HasSuffix(url, r.URL.Path) {
+				w.Write(data)
+				return
+			}
+		}
+		w.WriteHeader(404)
+	}))
+	defer server.Close()
+
+	testStorage := &redirectStorage{inner: storage, serverURL: server.URL}
+	config := &ExternalLocationConfig{
+		Storage:                   testStorage,
+		ExternalizeThresholdBytes: 10,
+		URLValidator:              nil,
+	}
+
+	batch := makeBatch(50)
+	defer batch.Release()
+
+	extBatch, extMeta, err := MaybeExternalizeBatch(batch, arrow.Metadata{}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extBatch.Release()
+
+	// Tamper with the SHA-256
+	locationURL, _ := metaGet(extMeta, MetaLocation)
+	tamperedMeta := arrow.NewMetadata(
+		[]string{MetaLocation, MetaLocationSHA256},
+		[]string{locationURL, "0000000000000000000000000000000000000000000000000000000000000000"},
+	)
+
+	_, _, err = ResolveExternalLocation(extBatch, tamperedMeta, config)
+	if err == nil {
+		t.Fatal("expected checksum mismatch error")
+	}
+	if !strings.Contains(err.Error(), "SHA-256 checksum mismatch") {
+		t.Fatalf("expected SHA-256 mismatch error, got: %v", err)
+	}
+}
+
 // Ensure interfaces are satisfied
 var _ ExternalStorage = (*mockStorage)(nil)
 var _ ExternalStorage = (*redirectStorage)(nil)
