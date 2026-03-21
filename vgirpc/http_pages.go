@@ -248,11 +248,7 @@ func buildMethodCard(w *strings.Builder, info *methodInfo) {
 	fmt.Fprintf(w, `<span class="method-name">%s</span>`, html.EscapeString(info.Name))
 	fmt.Fprintf(w, `<span class="badge %s">%s</span>`, badgeClass, badgeLabel)
 
-	if info.Type == MethodExchange {
-		w.WriteString(`<span class="badge badge-exchange">exchange</span>`)
-	} else if info.Type == MethodProducer {
-		w.WriteString(`<span class="badge badge-producer">producer</span>`)
-	}
+	// Only unary/stream/header badges — match Python reference
 	if info.HasHeader {
 		w.WriteString(`<span class="badge badge-header">header</span>`)
 	}
@@ -277,7 +273,7 @@ func buildMethodCard(w *strings.Builder, info *methodInfo) {
 		}
 
 		w.WriteString(`<div class="section-label">Parameters</div>`)
-		w.WriteString(`<table><tr><th>Name</th><th>Type</th><th>Default</th></tr>`)
+		w.WriteString(`<table><tr><th>Name</th><th>Type</th><th>Default</th><th>Description</th></tr>`)
 		for i := range info.ParamsSchema.NumFields() {
 			f := info.ParamsSchema.Field(i)
 			defaultStr := "&mdash;"
@@ -287,7 +283,7 @@ func buildMethodCard(w *strings.Builder, info *methodInfo) {
 					defaultStr = html.EscapeString(string(b))
 				}
 			}
-			fmt.Fprintf(w, `<tr><td><code>%s</code></td><td><code>%s</code></td><td>%s</td></tr>`,
+			fmt.Fprintf(w, `<tr><td><code>%s</code></td><td><code>%s</code></td><td>%s</td><td>&mdash;</td></tr>`,
 				html.EscapeString(f.Name),
 				html.EscapeString(paramTypes[f.Name]),
 				defaultStr,

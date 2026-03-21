@@ -252,7 +252,7 @@ func coerceDefaultValue(val string, schema *arrow.Schema, fieldName string) any 
 func arrowTypeToString(dt arrow.DataType) string {
 	switch dt.ID() {
 	case arrow.STRING:
-		return "string"
+		return "str"
 	case arrow.INT64:
 		return "int"
 	case arrow.INT32:
