@@ -21,7 +21,7 @@ The describe response includes:
 
 ## Schema Version
 
-The describe schema version is tracked by `vgirpc.DescribeVersion` (currently `"2"`). The response metadata also includes:
+The describe schema version is tracked by `vgirpc.DescribeVersion` (currently `"3"`). The response metadata also includes:
 
 | Metadata key | Value |
 |---|---|

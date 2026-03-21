@@ -28,6 +28,8 @@ var describeSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "param_defaults_json", Type: arrow.BinaryTypes.String, Nullable: true},
 	{Name: "has_header", Type: &arrow.BooleanType{}},
 	{Name: "header_schema_ipc", Type: arrow.BinaryTypes.Binary, Nullable: true},
+	{Name: "is_exchange", Type: &arrow.BooleanType{}, Nullable: true},
+	{Name: "param_docs_json", Type: arrow.BinaryTypes.String, Nullable: true},
 }, nil)
 
 // Describe metadata keys used in __describe__ introspection responses.
@@ -38,7 +40,7 @@ const (
 	// compatibility.
 	MetaDescribeVersion = "vgi_rpc.describe_version"
 	// DescribeVersion is the current describe schema version string.
-	DescribeVersion = "2"
+	DescribeVersion = "3"
 )
 
 // serializeSchema serializes an Arrow schema to IPC format bytes.
@@ -88,6 +90,12 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 
 	headerSchemaBuilder := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
 	defer headerSchemaBuilder.Release()
+
+	isExchangeBuilder := array.NewBooleanBuilder(mem)
+	defer isExchangeBuilder.Release()
+
+	paramDocsBuilder := array.NewStringBuilder(mem)
+	defer paramDocsBuilder.Release()
 
 	for _, name := range names {
 		info := s.methods[name]
@@ -161,9 +169,22 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 		} else {
 			headerSchemaBuilder.AppendNull()
 		}
+
+		// is_exchange (nullable) — true for exchange, false for producer, null for unary/dynamic
+		switch info.Type {
+		case MethodExchange:
+			isExchangeBuilder.Append(true)
+		case MethodProducer:
+			isExchangeBuilder.Append(false)
+		default:
+			isExchangeBuilder.AppendNull()
+		}
+
+		// param_docs_json — Go has no docstring source, always null
+		paramDocsBuilder.AppendNull()
 	}
 
-	cols := make([]arrow.Array, 10)
+	cols := make([]arrow.Array, 12)
 	cols[0] = nameBuilder.NewArray()
 	cols[1] = methodTypeBuilder.NewArray()
 	cols[2] = docBuilder.NewArray()
@@ -174,6 +195,8 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 	cols[7] = paramDefaultsBuilder.NewArray()
 	cols[8] = hasHeaderBuilder.NewArray()
 	cols[9] = headerSchemaBuilder.NewArray()
+	cols[10] = isExchangeBuilder.NewArray()
+	cols[11] = paramDocsBuilder.NewArray()
 	for _, c := range cols {
 		defer c.Release()
 	}

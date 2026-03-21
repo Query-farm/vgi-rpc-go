@@ -276,7 +276,7 @@ const (
 | `MetaProtocolName` | `vgi_rpc.protocol_name` |
 | `MetaDescribeVersion` | `vgi_rpc.describe_version` |
 | `ProtocolVersion` | `"1"` |
-| `DescribeVersion` | `"2"` |
+| `DescribeVersion` | `"3"` |
 
 ## Wire Functions
 
