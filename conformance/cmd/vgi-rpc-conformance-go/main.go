@@ -14,6 +14,12 @@ import (
 
 	"github.com/Query-farm/vgi-rpc/conformance"
 	"github.com/Query-farm/vgi-rpc/vgirpc"
+	vgiotel "github.com/Query-farm/vgi-rpc/vgirpc/otel"
+
+	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func main() {
@@ -22,6 +28,57 @@ func main() {
 	conformance.RegisterMethods(server)
 
 	if len(os.Args) > 1 && os.Args[1] == "--http" {
+		// Parse optional --otel-export flag
+		var otelExportPath string
+		for i := 2; i < len(os.Args)-1; i++ {
+			if os.Args[i] == "--otel-export" {
+				otelExportPath = os.Args[i+1]
+				break
+			}
+		}
+
+		var otelFile *os.File
+		var tp *sdktrace.TracerProvider
+		var mp *sdkmetric.MeterProvider
+
+		if otelExportPath != "" {
+			var err error
+			otelFile, err = os.Create(otelExportPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to open otel export file: %v\n", err)
+				os.Exit(1)
+			}
+
+			traceExp, err := stdouttrace.New(stdouttrace.WithWriter(otelFile))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to create trace exporter: %v\n", err)
+				os.Exit(1)
+			}
+
+			metricExp, err := stdoutmetric.New(stdoutmetric.WithWriter(otelFile))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "failed to create metric exporter: %v\n", err)
+				os.Exit(1)
+			}
+
+			tp = sdktrace.NewTracerProvider(
+				sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(traceExp)),
+			)
+
+			mp = sdkmetric.NewMeterProvider(
+				sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp)),
+			)
+
+			vgiotel.InstrumentServer(server, vgiotel.OtelConfig{
+				TracerProvider:   tp,
+				MeterProvider:    mp,
+				EnableTracing:    true,
+				EnableMetrics:    true,
+				RecordExceptions: true,
+				ServiceName:      "conformance-go",
+			})
+		}
+
 		httpServer := vgirpc.NewHttpServer(server)
 		httpServer.SetCompressionLevel(3)
 
@@ -42,7 +99,17 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 		go func() {
 			<-sigCh
-			srv.Shutdown(context.Background())
+			shutdownCtx := context.Background()
+			if tp != nil {
+				tp.Shutdown(shutdownCtx)
+			}
+			if mp != nil {
+				mp.Shutdown(shutdownCtx)
+			}
+			if otelFile != nil {
+				otelFile.Close()
+			}
+			srv.Shutdown(shutdownCtx)
 		}()
 
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
