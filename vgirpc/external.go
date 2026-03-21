@@ -5,6 +5,8 @@ package vgirpc
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"math"
@@ -146,8 +148,9 @@ func IsExternalLocationBatch(batch arrow.RecordBatch, meta arrow.Metadata) bool 
 }
 
 // MakeExternalLocationBatch creates a zero-row pointer batch with the
-// given schema and external location URL in metadata.
-func MakeExternalLocationBatch(schema *arrow.Schema, locationURL string) (arrow.RecordBatch, arrow.Metadata) {
+// given schema and external location URL in metadata. If sha256Hex is
+// non-empty, it is included as MetaLocationSHA256 for integrity verification.
+func MakeExternalLocationBatch(schema *arrow.Schema, locationURL string, sha256Hex ...string) (arrow.RecordBatch, arrow.Metadata) {
 	mem := memory.NewGoAllocator()
 
 	// Build zero-row arrays for each field
@@ -163,10 +166,14 @@ func MakeExternalLocationBatch(schema *arrow.Schema, locationURL string) (arrow.
 		c.Release()
 	}
 
-	meta := arrow.NewMetadata(
-		[]string{MetaLocation},
-		[]string{locationURL},
-	)
+	keys := []string{MetaLocation}
+	vals := []string{locationURL}
+	if len(sha256Hex) > 0 && sha256Hex[0] != "" {
+		keys = append(keys, MetaLocationSHA256)
+		vals = append(vals, sha256Hex[0])
+	}
+
+	meta := arrow.NewMetadata(keys, vals)
 	return batch, meta
 }
 
@@ -217,6 +224,10 @@ func MaybeExternalizeBatch(
 		return batch, meta, fmt.Errorf("serializing batch for external storage: %w", err)
 	}
 
+	// Compute SHA-256 of raw IPC bytes (before compression)
+	hash := sha256.Sum256(ipcData)
+	sha256Hex := hex.EncodeToString(hash[:])
+
 	// Optionally compress
 	contentEncoding := ""
 	if config.Compression != nil && config.Compression.Algorithm == "zstd" {
@@ -239,8 +250,8 @@ func MaybeExternalizeBatch(
 		return batch, meta, fmt.Errorf("uploading to external storage: %w", err)
 	}
 
-	// Create pointer batch
-	pointerBatch, pointerMeta := MakeExternalLocationBatch(batch.Schema(), locationURL)
+	// Create pointer batch with SHA-256 checksum
+	pointerBatch, pointerMeta := MakeExternalLocationBatch(batch.Schema(), locationURL, sha256Hex)
 	return pointerBatch, pointerMeta, nil
 }
 
@@ -303,6 +314,15 @@ func ResolveExternalLocation(
 	}
 	if fetchErr != nil {
 		return batch, meta, fmt.Errorf("fetching external data after %d attempts: %w", maxAttempts, fetchErr)
+	}
+
+	// Verify SHA-256 checksum if present in pointer metadata
+	if expectedSHA, ok := metaGet(meta, MetaLocationSHA256); ok {
+		hash := sha256.Sum256(fetchedData)
+		actualSHA := hex.EncodeToString(hash[:])
+		if actualSHA != expectedSHA {
+			return batch, meta, fmt.Errorf("SHA-256 checksum mismatch: expected %s, got %s", expectedSHA, actualSHA)
+		}
 	}
 
 	// Parse IPC stream

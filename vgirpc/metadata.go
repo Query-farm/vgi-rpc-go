@@ -33,6 +33,9 @@ const (
 	MetaShmLength = "vgi_rpc.shm_length"
 	// MetaLocation carries a URI for external pointer references.
 	MetaLocation = "vgi_rpc.location"
+	// MetaLocationSHA256 carries a hex-encoded SHA-256 checksum of the raw
+	// (pre-compression) IPC bytes for integrity verification.
+	MetaLocationSHA256 = "vgi_rpc.location.sha256"
 
 	// MetaTraceparent carries the W3C traceparent header for distributed tracing.
 	MetaTraceparent = "traceparent"

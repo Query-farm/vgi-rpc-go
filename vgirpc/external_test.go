@@ -5,6 +5,8 @@ package vgirpc
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -555,6 +557,130 @@ func (r *redirectStorage) Upload(data []byte, schema *arrow.Schema, contentEncod
 	// Replace https://mock.storage/ with test server URL
 	path := strings.TrimPrefix(url, "https://mock.storage")
 	return r.serverURL + path, nil
+}
+
+// ===========================================================================
+// SHA-256 checksum tests
+// ===========================================================================
+
+func TestMaybeExternalizeBatch_SHA256Present(t *testing.T) {
+	storage := newMockStorage()
+	config := &ExternalLocationConfig{
+		Storage:                   storage,
+		ExternalizeThresholdBytes: 10,
+	}
+	batch := makeBatch(100)
+	defer batch.Release()
+
+	_, extMeta, err := MaybeExternalizeBatch(batch, arrow.Metadata{}, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sha256Val, ok := metaGet(extMeta, MetaLocationSHA256)
+	if !ok {
+		t.Fatal("expected MetaLocationSHA256 key on pointer batch")
+	}
+	if len(sha256Val) != 64 {
+		t.Fatalf("expected 64-char hex SHA-256, got %d chars: %q", len(sha256Val), sha256Val)
+	}
+
+	// Verify it matches the raw IPC bytes that were uploaded (no compression)
+	locationURL, _ := metaGet(extMeta, MetaLocation)
+	uploaded := storage.data[locationURL]
+	hash := sha256.Sum256(uploaded)
+	expectedHex := hex.EncodeToString(hash[:])
+	if sha256Val != expectedHex {
+		t.Fatalf("SHA-256 mismatch: metadata=%s, computed=%s", sha256Val, expectedHex)
+	}
+}
+
+func TestResolveExternalLocation_SHA256Match(t *testing.T) {
+	// Create a batch, serialize to IPC, compute SHA-256, serve it
+	dataBatch := makeBatch(10)
+	defer dataBatch.Release()
+	ipcBytes := serializeTestIPC(dataBatch)
+
+	hash := sha256.Sum256(ipcBytes)
+	sha256Hex := hex.EncodeToString(hash[:])
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(ipcBytes)
+	}))
+	defer server.Close()
+
+	pointer, meta := MakeExternalLocationBatch(testSchema, server.URL+"/data", sha256Hex)
+	defer pointer.Release()
+
+	config := &ExternalLocationConfig{URLValidator: nil}
+	resolved, _, err := ResolveExternalLocation(pointer, meta, config)
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	defer resolved.Release()
+
+	if resolved.NumRows() != 10 {
+		t.Fatalf("expected 10 rows, got %d", resolved.NumRows())
+	}
+}
+
+func TestResolveExternalLocation_SHA256Mismatch(t *testing.T) {
+	dataBatch := makeBatch(10)
+	defer dataBatch.Release()
+	ipcBytes := serializeTestIPC(dataBatch)
+
+	// Use a wrong SHA-256
+	wrongSHA := "0000000000000000000000000000000000000000000000000000000000000000"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(ipcBytes)
+	}))
+	defer server.Close()
+
+	pointer, meta := MakeExternalLocationBatch(testSchema, server.URL+"/data", wrongSHA)
+	defer pointer.Release()
+
+	config := &ExternalLocationConfig{URLValidator: nil}
+	_, _, err := ResolveExternalLocation(pointer, meta, config)
+	if err == nil {
+		t.Fatal("expected checksum mismatch error")
+	}
+	if !strings.Contains(err.Error(), "SHA-256 checksum mismatch") {
+		t.Fatalf("expected SHA-256 mismatch error, got: %v", err)
+	}
+}
+
+func TestResolveExternalLocation_SHA256Absent(t *testing.T) {
+	// Old-style pointer batch without SHA-256 metadata should still work
+	dataBatch := makeBatch(10)
+	defer dataBatch.Release()
+	ipcBytes := serializeTestIPC(dataBatch)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(ipcBytes)
+	}))
+	defer server.Close()
+
+	// No sha256Hex argument — old-style pointer
+	pointer, meta := MakeExternalLocationBatch(testSchema, server.URL+"/data")
+	defer pointer.Release()
+
+	// Confirm no SHA-256 in metadata
+	_, hasSHA := metaGet(meta, MetaLocationSHA256)
+	if hasSHA {
+		t.Fatal("expected no MetaLocationSHA256 on old-style pointer batch")
+	}
+
+	config := &ExternalLocationConfig{URLValidator: nil}
+	resolved, _, err := ResolveExternalLocation(pointer, meta, config)
+	if err != nil {
+		t.Fatalf("expected no error for absent SHA-256, got: %v", err)
+	}
+	defer resolved.Release()
+
+	if resolved.NumRows() != 10 {
+		t.Fatalf("expected 10 rows, got %d", resolved.NumRows())
+	}
 }
 
 // Ensure interfaces are satisfied
