@@ -1,6 +1,6 @@
 module github.com/Query-farm/vgi-rpc/vgirpc/jwtauth
 
-go 1.24.0
+go 1.25.0
 
 require (
 	github.com/MicahParks/keyfunc/v3 v3.3.5
