@@ -86,6 +86,8 @@ type HttpServer struct {
 	enableLandingPage  bool
 	enableDescribePage bool
 	enableNotFoundPage bool
+
+	corsOrigins string // CORS allowed origins; empty = disabled
 }
 
 // NewHttpServer creates a new HTTP server wrapping an RPC server.
@@ -157,6 +159,22 @@ func (h *HttpServer) SetEnableDescribePage(enabled bool) {
 // HTML 404 page. Enabled by default.
 func (h *HttpServer) SetEnableNotFoundPage(enabled bool) {
 	h.enableNotFoundPage = enabled
+}
+
+// SetCorsOrigins sets the allowed origins for CORS. Pass "*" to allow all
+// origins, or a specific origin string like "https://example.com". An empty
+// string (the default) disables CORS headers.
+func (h *HttpServer) SetCorsOrigins(origins string) {
+	h.corsOrigins = origins
+}
+
+// addCorsHeaders adds CORS response headers when cors is enabled.
+func (h *HttpServer) addCorsHeaders(w http.ResponseWriter) {
+	if h.corsOrigins != "" {
+		w.Header().Set("Access-Control-Allow-Origin", h.corsOrigins)
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+	}
 }
 
 // initRoutes registers POST routes for RPC and builds the mux. Call once
@@ -324,6 +342,16 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.landingHTML == nil && h.describeHTML == nil && h.notFoundHTML == nil {
 		h.InitPages()
 	}
+
+	// CORS preflight — respond before auth or dispatch.
+	if r.Method == http.MethodOptions {
+		h.addCorsHeaders(w)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	// Add CORS headers to all non-OPTIONS responses.
+	h.addCorsHeaders(w)
 
 	if h.zstdEncoder != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "zstd") {
 		cw := &compressResponseWriter{ResponseWriter: w, encoder: h.zstdEncoder}
