@@ -28,6 +28,7 @@ import (
 
 const (
 	arrowContentType   = "application/vnd.apache.arrow.stream"
+	rpcErrorHeader     = "X-VGI-RPC-Error"
 	hmacLen            = 32
 	defaultTokenTTL    = 5 * time.Minute
 	defaultMaxBodySize = 64 << 20 // 64 MB
@@ -190,7 +191,7 @@ func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, isOptions bool) {
 		w.Header().Set("Access-Control-Allow-Origin", h.corsOrigins)
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding")
+		w.Header().Set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error")
 		if isOptions && h.corsMaxAge != "" {
 			w.Header().Set("Access-Control-Max-Age", h.corsMaxAge)
 		}
@@ -1303,6 +1304,10 @@ func (h *HttpServer) writeHttpError(w http.ResponseWriter, statusCode int, err e
 
 func (h *HttpServer) writeArrow(w http.ResponseWriter, statusCode int, data []byte) {
 	w.Header().Set("Content-Type", arrowContentType)
+	if statusCode == http.StatusInternalServerError {
+		w.Header().Set(rpcErrorHeader, "true")
+		statusCode = http.StatusOK
+	}
 	w.WriteHeader(statusCode)
 	_, _ = w.Write(data)
 }

@@ -31,8 +31,8 @@ func TestCorsPreflightBypassesAuth(t *testing.T) {
 	if got := w.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type, Authorization" {
 		t.Fatalf("expected Access-Control-Allow-Headers=Content-Type, Authorization, got %q", got)
 	}
-	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding" {
-		t.Fatalf("expected Access-Control-Expose-Headers=WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, got %q", got)
+	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error" {
+		t.Fatalf("expected Access-Control-Expose-Headers=WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, got %q", got)
 	}
 }
 
@@ -49,8 +49,8 @@ func TestCorsHeadersOnPost(t *testing.T) {
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://example.com" {
 		t.Fatalf("expected Access-Control-Allow-Origin=https://example.com, got %q", got)
 	}
-	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding" {
-		t.Fatalf("expected Access-Control-Expose-Headers=WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, got %q", got)
+	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error" {
+		t.Fatalf("expected Access-Control-Expose-Headers=WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, got %q", got)
 	}
 }
 
@@ -64,8 +64,8 @@ func TestCorsExposeHeadersOnPreflight(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding" {
-		t.Fatalf("expected Access-Control-Expose-Headers=WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, got %q", got)
+	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error" {
+		t.Fatalf("expected Access-Control-Expose-Headers=WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, got %q", got)
 	}
 }
 
