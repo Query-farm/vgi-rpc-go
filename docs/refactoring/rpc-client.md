@@ -69,6 +69,27 @@ Notes:
 - Retry and circuit-breaking policy should not be hard-wired into core `rpc.Client`.
 - The core package should allow transport hooks and middleware-like integration points without forcing a single resiliency strategy.
 
+### Logging and request correlation
+
+The client should support request-scoped logging and request ID propagation.
+
+Recommended helpers:
+
+```go
+func WithLogger(logger *slog.Logger) ClientOption
+func ContextWithRequestID(ctx context.Context, id string) context.Context
+```
+
+Notes:
+
+- protocol log batches received from the server should be handled at the client runtime level, not inside `Consumer.Init(...)` or `Consumer.Consume(...)`
+- the natural default sink for those log batches is `slog.Logger`
+- when no logger is configured, the client may discard protocol log batches
+- `X-Request-ID` from HTTP responses should be captured by the client runtime
+- the effective request ID should be injected into the active context so that downstream code can correlate follow-up calls
+- when a context already carries a request ID, the client should reuse it for outgoing requests
+- request ID should be passed per call through `context.Context`, not through client-global options
+
 ## Shared Request Model
 
 The client should use the same `Request` transport envelope as the server-side core model.
@@ -89,6 +110,18 @@ Client-side usage:
 
 - when passed into `Unary(...)`, `Consume(...)`, `Exchange(...)`, or `Cancel(...)`, `Request` is the outbound transport envelope
 - when passed into `Consumer.Consume(...)`, `Request` is the inbound continuation envelope for the current step
+
+Request ID rules:
+
+- if `Request.Context()` already contains a request ID, client runtime should propagate it into:
+  - `Request.RequestID`
+  - outgoing transport metadata `vgi_rpc.request_id`
+- if `Request.RequestID` is already set explicitly, runtime should treat it as the effective request ID for that call when the context does not already provide one
+- if the HTTP response carries `X-Request-ID`, client runtime should:
+  - preserve it as the effective request ID for the current call
+  - inject it into the active request context
+  - expose it through `RequestIDFromContext(...)`
+- within one `Consume(...)` or `Exchange(...)` call, the effective request ID should be reused for follow-up `POST /{method}/exchange` rounds and for `Cancel(...)` if runtime issues it internally
 
 ## Introspection Types
 
@@ -273,6 +306,8 @@ Notes:
 Rules:
 
 - Protocol log batches should be handled by runtime and not mixed into user-facing data readers.
+- Client runtime should map protocol log batches to the configured logger, preferably `slog.Logger`.
+- `Consumer.Init(...)` and `Consumer.Consume(...)` should not be responsible for decoding protocol log batches.
 - Protocol error batches should be surfaced as ordinary Go `error` returns.
 - HTTP `X-VGI-RPC-Error: true` remains a transport-level implementation detail of the HTTP binding.
 
@@ -320,3 +355,19 @@ Rules:
 - `Request` is intentionally dual-use, so implementation must keep inbound and outbound runtime construction strict.
 - `ResponseWriter` is reused on the client side for symmetry, but only a subset of operations is valid there.
 - The exact ordering guarantees for `Consumer.Consume(...)` remain to be fixed precisely during implementation.
+
+## Client Logging and Request Correlation
+
+Protocol log batches are a runtime concern, not part of the `Consumer` contract.
+
+Rules:
+
+- runtime must decode protocol log batches before user code sees `Response.Reader()` or `Request.Reader()`
+- `Consumer.Init(...)` and `Consumer.Consume(...)` should never be responsible for parsing protocol log batches
+- when a logger is configured through `WithLogger(...)`, runtime should map protocol log entries into that `slog.Logger`
+- when no logger is configured, runtime may discard protocol log batches
+- log records emitted by runtime should include the effective request ID when available
+- when the current context already carries structured logging fields, runtime may derive a child logger instead of logging only to the root client logger
+- request ID should be supplied per call through `context.Context`, typically via `ContextWithRequestID(...)`
+- when a request context already carries a request ID, runtime should propagate it to outgoing transport metadata and HTTP request correlation headers
+- when an HTTP response carries `X-Request-ID`, runtime should preserve it as the effective request ID for that call and reuse it for follow-up `POST /{method}/exchange` rounds
