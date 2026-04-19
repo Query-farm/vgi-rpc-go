@@ -27,6 +27,10 @@ const (
 	// exchange streams. The "#b64" suffix signals that the value is
 	// base64-encoded binary data, ensuring UTF-8 validity in Arrow IPC metadata.
 	MetaStreamState = "vgi_rpc.stream_state#b64"
+	// MetaCancel signals client-initiated cancellation of a streaming RPC.
+	// When present on an input batch the server ends the stream cleanly
+	// without invoking Produce/Exchange (optionally running StreamCanceller.OnCancel).
+	MetaCancel = "vgi_rpc.cancel"
 	// MetaShmOffset carries the byte offset for shared memory pointers.
 	MetaShmOffset = "vgi_rpc.shm_offset"
 	// MetaShmLength carries the byte length for shared memory pointers.

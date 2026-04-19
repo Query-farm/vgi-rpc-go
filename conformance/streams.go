@@ -6,6 +6,7 @@ package conformance
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/Query-farm/vgi-rpc/vgirpc"
 	"github.com/apache/arrow-go/v18/arrow"
@@ -28,6 +29,70 @@ func init() {
 	vgirpc.RegisterStateType(&failOnExchangeNState{})
 	vgirpc.RegisterStateType(&dynamicProducerState{})
 	vgirpc.RegisterStateType(&zeroColumnExchangeState{})
+	vgirpc.RegisterStateType(&cancellableProducerState{})
+	vgirpc.RegisterStateType(&cancellableExchangeState{})
+}
+
+// --- Cancel probe (process-wide counters for cancel conformance tests) ---
+
+var cancelProbeMu sync.Mutex
+var cancelProduceCalls int64
+var cancelExchangeCalls int64
+var cancelOnCancelCalls int64
+
+func resetCancelProbe() {
+	cancelProbeMu.Lock()
+	defer cancelProbeMu.Unlock()
+	cancelProduceCalls = 0
+	cancelExchangeCalls = 0
+	cancelOnCancelCalls = 0
+}
+
+func readCancelProbe() (int64, int64, int64) {
+	cancelProbeMu.Lock()
+	defer cancelProbeMu.Unlock()
+	return cancelProduceCalls, cancelExchangeCalls, cancelOnCancelCalls
+}
+
+// cancellableProducerState is an infinite producer that records cancel
+// observations for the cancel conformance tests.
+type cancellableProducerState struct {
+	Current int
+}
+
+func (s *cancellableProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+	cancelProbeMu.Lock()
+	cancelProduceCalls++
+	cancelProbeMu.Unlock()
+	if err := emitCounterBatch(out, int64(s.Current)); err != nil {
+		return err
+	}
+	s.Current++
+	return nil
+}
+
+func (s *cancellableProducerState) OnCancel(_ context.Context, callCtx *vgirpc.CallContext) error {
+	cancelProbeMu.Lock()
+	cancelOnCancelCalls++
+	cancelProbeMu.Unlock()
+	return nil
+}
+
+// cancellableExchangeState is an echo exchange that records cancel observations.
+type cancellableExchangeState struct{}
+
+func (s *cancellableExchangeState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+	cancelProbeMu.Lock()
+	cancelExchangeCalls++
+	cancelProbeMu.Unlock()
+	return out.Emit(input)
+}
+
+func (s *cancellableExchangeState) OnCancel(_ context.Context, callCtx *vgirpc.CallContext) error {
+	cancelProbeMu.Lock()
+	cancelOnCancelCalls++
+	cancelProbeMu.Unlock()
+	return nil
 }
 
 // --- Producer States ---

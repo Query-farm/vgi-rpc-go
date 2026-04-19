@@ -27,6 +27,17 @@ type ExchangeState interface {
 	Exchange(ctx context.Context, input arrow.RecordBatch, out *OutputCollector, callCtx *CallContext) error
 }
 
+// StreamCanceller is an optional interface stream state objects may implement
+// to be notified when the client signals cancellation by writing a batch
+// carrying the [MetaCancel] metadata key. The server invokes OnCancel once,
+// before breaking out of the streaming loop, and no further Produce or
+// Exchange calls are made on the state. Errors returned from OnCancel are
+// logged but do not propagate to the client (the transport is already being
+// torn down). Use this hook to release resources held by the state.
+type StreamCanceller interface {
+	OnCancel(ctx context.Context, callCtx *CallContext) error
+}
+
 // StreamResult is returned by producer/exchange handler functions.
 // It holds the output schema, state, and optional header and input schema.
 type StreamResult struct {

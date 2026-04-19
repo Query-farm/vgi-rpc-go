@@ -744,6 +744,41 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		inputBatch := inputReader.RecordBatch()
 		slog.Debug("stream: got input batch", "method", info.Name, "rows", inputBatch.NumRows(), "cols", inputBatch.NumCols())
 
+		// Client cancellation signal: a batch carrying vgi_rpc.cancel metadata
+		// ends the stream without invoking Produce/Exchange. Invoke the
+		// optional StreamCanceller hook before breaking so the state object
+		// can release resources.
+		if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
+			if _, cancelled := bwm.Metadata().GetValue(MetaCancel); cancelled {
+				slog.Debug("stream: cancel received", "method", info.Name)
+				if canceller, ok := state.(StreamCanceller); ok {
+					cancelCtx := &CallContext{
+						Ctx:               ctx,
+						RequestID:         req.RequestID,
+						ServerID:          s.serverID,
+						Method:            req.Method,
+						LogLevel:          LogLevel(req.LogLevel),
+						Auth:              Anonymous(),
+						TransportMetadata: req.Metadata,
+					}
+					if cancelCtx.LogLevel == "" {
+						cancelCtx.LogLevel = LogTrace
+					}
+					func() {
+						defer func() {
+							if rv := recover(); rv != nil {
+								slog.Debug("stream: OnCancel panic", "method", info.Name, "panic", rv)
+							}
+						}()
+						if err := canceller.OnCancel(ctx, cancelCtx); err != nil {
+							slog.Debug("stream: OnCancel error", "method", info.Name, "err", err)
+						}
+					}()
+				}
+				break
+			}
+		}
+
 		// Resolve external input batches (exchange streams may receive pointer batches)
 		if s.externalConfig != nil {
 			var inputMeta arrow.Metadata

@@ -81,6 +81,11 @@ func main() {
 
 		httpServer := vgirpc.NewHttpServer(server)
 		httpServer.SetCompressionLevel(3)
+		// Emit one batch per HTTP response so infinite producers (e.g.
+		// ``cancellable_producer``) return promptly and the client can follow
+		// continuation tokens or cancel mid-stream. Matches the Python
+		// reference server's default.
+		httpServer.SetProducerBatchLimit(1)
 
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {

@@ -174,6 +174,12 @@ func RegisterMethods(server *vgirpc.Server) {
 	vgirpc.ProducerWithHeader(server, "produce_with_rich_header", counterSchema, richHeaderSchema, produceWithRichHeader)
 	vgirpc.ExchangeWithHeader(server, "exchange_with_rich_header", scaleOutputSchema, scaleInputSchema, richHeaderSchema, exchangeWithRichHeader)
 	vgirpc.DynamicStreamWithHeader(server, "produce_dynamic_schema", richHeaderSchema, produceDynamicSchema)
+
+	// Cancellation methods
+	vgirpc.Producer(server, "cancellable_producer", counterSchema, cancellableProducer)
+	vgirpc.Exchange(server, "cancellable_exchange", scaleOutputSchema, scaleInputSchema, cancellableExchange)
+	vgirpc.Unary(server, "cancel_probe_counters", cancelProbeCountersHandler)
+	vgirpc.UnaryVoid(server, "reset_cancel_probe", resetCancelProbeHandler)
 }
 
 // --- Producer stream parameter structs ---
@@ -535,4 +541,36 @@ func produceDynamicSchema(_ context.Context, ctx *vgirpc.CallContext, p produceD
 		},
 		Header: buildRichHeader(int(p.Seed)),
 	}, nil
+}
+
+// --- Cancellation handlers ---
+
+type cancellableProducerParams struct{}
+type cancellableExchangeParams struct{}
+type cancelProbeCountersParams struct{}
+type resetCancelProbeParams struct{}
+
+func cancellableProducer(_ context.Context, ctx *vgirpc.CallContext, _ cancellableProducerParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: counterSchema,
+		State:        &cancellableProducerState{},
+	}, nil
+}
+
+func cancellableExchange(_ context.Context, ctx *vgirpc.CallContext, _ cancellableExchangeParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: scaleOutputSchema,
+		InputSchema:  scaleInputSchema,
+		State:        &cancellableExchangeState{},
+	}, nil
+}
+
+func cancelProbeCountersHandler(_ context.Context, _ *vgirpc.CallContext, _ cancelProbeCountersParams) ([]int64, error) {
+	p, e, c := readCancelProbe()
+	return []int64{p, e, c}, nil
+}
+
+func resetCancelProbeHandler(_ context.Context, _ *vgirpc.CallContext, _ resetCancelProbeParams) error {
+	resetCancelProbe()
+	return nil
 }

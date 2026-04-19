@@ -891,8 +891,24 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	}
 	inputBatch := inputReader.RecordBatch()
 
-	// Cast compatible input types if schema doesn't match exactly
-	if info.InputSchema != nil && !inputBatch.Schema().Equal(info.InputSchema) {
+	// Extract state token and cancel signal from custom metadata BEFORE
+	// attempting any schema cast: cancel batches carry an empty schema that
+	// would fail the cast, but the server must observe them regardless.
+	var tokenBytes []byte
+	var cancelled bool
+	if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
+		meta := bwm.Metadata()
+		if v, found := meta.GetValue(MetaStreamState); found {
+			tokenBytes = []byte(v)
+		}
+		if _, found := meta.GetValue(MetaCancel); found {
+			cancelled = true
+		}
+	}
+
+	// Cast compatible input types if schema doesn't match exactly.
+	// Skip the cast when cancelled: the cancel batch is always empty schema.
+	if !cancelled && info.InputSchema != nil && !inputBatch.Schema().Equal(info.InputSchema) {
 		castBatch, castErr := castRecordBatch(inputBatch, info.InputSchema)
 		if castErr != nil {
 			h.writeHttpError(w, http.StatusBadRequest, castErr, nil)
@@ -900,15 +916,6 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		}
 		defer castBatch.Release()
 		inputBatch = castBatch
-	}
-
-	// Extract state token from custom metadata
-	var tokenBytes []byte
-	if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
-		meta := bwm.Metadata()
-		if v, found := meta.GetValue(MetaStreamState); found {
-			tokenBytes = []byte(v)
-		}
 	}
 
 	if tokenBytes == nil {
@@ -974,11 +981,48 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		outputSchema = info.OutputSchema
 	}
 
+	if cancelled {
+		handlerErr = h.handleStreamCancel(ctx, w, outputSchema, tokenData.State, info, auth, transportMeta)
+		return
+	}
+
 	if isProducer {
 		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta)
 	} else {
 		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta)
 	}
+}
+
+// handleStreamCancel processes a client-initiated cancel exchange. It invokes
+// the optional StreamCanceller hook on the state and writes an empty IPC
+// stream (no state token) so the client knows the stream is finished.
+func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
+	state interface{}, info *methodInfo, auth *AuthContext, transportMeta map[string]string) error {
+	if canceller, ok := state.(StreamCanceller); ok {
+		callCtx := &CallContext{
+			Ctx:               ctx,
+			ServerID:          h.server.serverID,
+			Method:            info.Name,
+			LogLevel:          LogTrace,
+			Auth:              auth,
+			TransportMetadata: transportMeta,
+		}
+		func() {
+			defer func() {
+				if rv := recover(); rv != nil {
+					slog.Debug("stream cancel: OnCancel panic", "method", info.Name, "panic", rv)
+				}
+			}()
+			if err := canceller.OnCancel(ctx, callCtx); err != nil {
+				slog.Debug("stream cancel: OnCancel error", "method", info.Name, "err", err)
+			}
+		}()
+	}
+	var buf bytes.Buffer
+	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
+	_ = writer.Close()
+	h.writeArrow(w, http.StatusOK, buf.Bytes())
+	return nil
 }
 
 // handleProducerContinuation runs the produce loop for a continuation request.
