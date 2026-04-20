@@ -53,6 +53,21 @@ type OAuthPkceConfig struct {
 	AllowedReturnOrigins []string
 }
 
+// pkceScopeFromMetadata derives the OAuth scope string used by the PKCE
+// middleware. It prefers the space-joined scopes_supported advertised in the
+// resource metadata so that authorization requests match what the server
+// publishes, falls back to the caller-provided configScope, and finally to
+// "openid email" when neither is set.
+func pkceScopeFromMetadata(meta *OAuthResourceMetadata, configScope string) string {
+	if meta != nil && len(meta.ScopesSupported) > 0 {
+		return strings.Join(meta.ScopesSupported, " ")
+	}
+	if configScope != "" {
+		return configScope
+	}
+	return "openid email"
+}
+
 // oauthPkceState holds internal runtime state for the OAuth PKCE flow.
 type oauthPkceState struct {
 	sessionKey           []byte

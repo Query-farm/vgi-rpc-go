@@ -392,11 +392,10 @@ func (h *HttpServer) SetOAuthPkce(config OAuthPkceConfig) {
 	// Build OIDC discovery for first authorization server
 	oidcDiscovery := createOIDCDiscovery(h.oauthMetadata.AuthorizationServers[0])
 
-	// Scope
-	scope := config.Scope
-	if scope == "" {
-		scope = "openid email"
-	}
+	// Scope — prefer the resource metadata's advertised scopes so that
+	// authorization requests match what the server publishes. Fall back to
+	// the caller-provided config.Scope, and finally to "openid email".
+	scope := pkceScopeFromMetadata(h.oauthMetadata, config.Scope)
 
 	// Build allowed origins map
 	allowedOrigins := make(map[string]bool)
