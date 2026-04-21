@@ -589,10 +589,12 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		LogLevel:          LogLevel(req.LogLevel),
 		Auth:              auth,
 		TransportMetadata: transportMeta,
+		Cookies:           buildHTTPCookies(r),
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
 	}
+	callCtx.enableCookieSink()
 
 	// Call handler
 	var resultVal reflect.Value
@@ -616,6 +618,8 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logs := callCtx.drainLogs()
+	responseCookies := callCtx.drainCookies()
+	applyResponseCookies(w, responseCookies)
 
 	// Write response
 	var buf bytes.Buffer
@@ -733,6 +737,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		LogLevel:          LogLevel(req.LogLevel),
 		Auth:              auth,
 		TransportMetadata: transportMeta,
+		Cookies:           buildHTTPCookies(r),
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
@@ -797,7 +802,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			_ = writeLogBatch(writer, outputSchema, logMsg, h.server.serverID, "")
 		}
 
-		finished, err := h.runProduceLoop(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, transportMeta)
+		finished, err := h.runProduceLoop(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, transportMeta, callCtx.Cookies)
 		handlerErr = err
 		if err == nil && !finished {
 			// Batch limit reached — append continuation token
@@ -980,15 +985,17 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		outputSchema = info.OutputSchema
 	}
 
+	cookies := buildHTTPCookies(r)
+
 	if cancelled {
-		handlerErr = h.handleStreamCancel(ctx, w, outputSchema, tokenData.State, info, auth, transportMeta)
+		handlerErr = h.handleStreamCancel(ctx, w, outputSchema, tokenData.State, info, auth, transportMeta, cookies)
 		return
 	}
 
 	if isProducer {
-		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta)
+		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta, cookies)
 	} else {
-		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta)
+		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta, cookies)
 	}
 }
 
@@ -996,7 +1003,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 // the optional StreamCanceller hook on the state and writes an empty IPC
 // stream (no state token) so the client knows the stream is finished.
 func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state interface{}, info *methodInfo, auth *AuthContext, transportMeta map[string]string) error {
+	state interface{}, info *methodInfo, auth *AuthContext, transportMeta map[string]string, cookies map[string]string) error {
 	if canceller, ok := state.(StreamCanceller); ok {
 		callCtx := &CallContext{
 			Ctx:               ctx,
@@ -1005,6 +1012,7 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 			LogLevel:          LogTrace,
 			Auth:              auth,
 			TransportMetadata: transportMeta,
+			Cookies:           cookies,
 		}
 		func() {
 			defer func() {
@@ -1027,11 +1035,11 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 // handleProducerContinuation runs the produce loop for a continuation request.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string) error {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string) error {
 
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta)
+	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies)
 	if err == nil && !finished {
 		// Batch limit reached — append continuation token
 		token, tokenErr := h.packStateToken(state, schema)
@@ -1056,7 +1064,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 // handleExchangeCall processes one exchange and returns the result with updated token.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWriter, inputBatch arrow.RecordBatch,
-	schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string) error {
+	schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string) error {
 
 	// Record input stats
 	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
@@ -1069,6 +1077,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		LogLevel:          LogTrace,
 		Auth:              auth,
 		TransportMetadata: transportMeta,
+		Cookies:           cookies,
 	}
 
 	var exchangeErr error
@@ -1143,7 +1152,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 // (false, nil) when the batch limit was reached (caller should emit a
 // continuation token), or (false, err) on error.
 func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string) (bool, error) {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string) (bool, error) {
 
 	dataBatches := 0
 	for {
@@ -1158,6 +1167,7 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 			LogLevel:          LogTrace,
 			Auth:              auth,
 			TransportMetadata: transportMeta,
+			Cookies:           cookies,
 		}
 
 		var produceErr error
@@ -1266,6 +1276,47 @@ func buildHTTPTransportMeta(ipcMeta map[string]string, r *http.Request) map[stri
 	meta["remote_addr"] = r.RemoteAddr
 	meta["user_agent"] = r.UserAgent()
 	return meta
+}
+
+// buildHTTPCookies extracts the incoming request cookies into a map.
+// Returns nil if the request has no cookies.
+func buildHTTPCookies(r *http.Request) map[string]string {
+	c := r.Cookies()
+	if len(c) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(c))
+	for _, ck := range c {
+		out[ck.Name] = ck.Value
+	}
+	return out
+}
+
+// applyResponseCookies writes queued CookieSpec entries as Set-Cookie
+// headers on the response.  Must be called before w.WriteHeader.
+func applyResponseCookies(w http.ResponseWriter, cookies []CookieSpec) {
+	for _, c := range cookies {
+		hc := &http.Cookie{
+			Name:        c.Name,
+			Path:        c.Path,
+			Domain:      c.Domain,
+			Secure:      c.Secure,
+			HttpOnly:    c.HttpOnly,
+			SameSite:    c.SameSite,
+			Partitioned: c.Partitioned,
+		}
+		if c.Delete {
+			hc.Value = ""
+			hc.MaxAge = -1
+		} else {
+			hc.Value = c.Value
+			hc.MaxAge = c.MaxAge
+			if !c.Expires.IsZero() {
+				hc.Expires = c.Expires
+			}
+		}
+		http.SetCookie(w, hc)
+	}
 }
 
 // handleDescribe handles the __describe__ introspection endpoint.
