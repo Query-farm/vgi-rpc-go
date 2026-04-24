@@ -8,6 +8,8 @@ import (
 	"errors"
 	"net/http"
 	"time"
+
+	"github.com/apache/arrow-go/v18/arrow"
 )
 
 // CallContext provides request-scoped information and logging to method handlers.
@@ -32,6 +34,11 @@ type CallContext struct {
 	// TransportMetadata holds transport-level key/value pairs such as
 	// remote_addr, user_agent, and IPC custom metadata.
 	TransportMetadata map[string]string
+	// InputMetadata carries per-tick / per-batch Arrow custom metadata attached
+	// to the input batch that triggered this Produce/Exchange call. Zero-valued
+	// when the input batch has no metadata. Used to surface signals like
+	// DuckDB's dynamic filter ticks (`vgi_pushdown_filters`) to the handler.
+	InputMetadata arrow.Metadata
 	// Cookies holds the incoming HTTP request cookies.  Empty for non-HTTP
 	// transports (pipe, subprocess, Unix socket).
 	Cookies           map[string]string

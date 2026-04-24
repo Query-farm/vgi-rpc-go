@@ -826,6 +826,9 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		if iterCtx.LogLevel == "" {
 			iterCtx.LogLevel = LogTrace
 		}
+		if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
+			iterCtx.InputMetadata = bwm.Metadata()
+		}
 
 		// Dispatch to state
 		func() {
