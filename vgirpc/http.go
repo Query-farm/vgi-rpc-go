@@ -120,9 +120,9 @@ func NewHttpServer(server *Server) *HttpServer {
 
 // NewHttpServerWithKey creates a new HTTP server with a caller-provided signing key.
 // The key must be at least 16 bytes long.
-func NewHttpServerWithKey(server *Server, signingKey []byte) *HttpServer {
+func NewHttpServerWithKey(server *Server, signingKey []byte) (*HttpServer, error) {
 	if len(signingKey) < 16 {
-		panic("vgirpc: signing key must be at least 16 bytes")
+		return nil, fmt.Errorf("vgirpc: signing key must be at least 16 bytes")
 	}
 	h := &HttpServer{
 		server:      server,
@@ -137,7 +137,7 @@ func NewHttpServerWithKey(server *Server, signingKey []byte) *HttpServer {
 		enableNotFoundPage: true,
 	}
 	h.initRoutes()
-	return h
+	return h, nil
 }
 
 // SetProtocolName sets the protocol name displayed on HTML pages.
@@ -302,16 +302,17 @@ func (h *HttpServer) SetMaxBodySize(n int64) {
 // given level (1–11). When enabled, responses are compressed if the client
 // sends an Accept-Encoding header containing "zstd". Pass 0 to disable
 // response compression (the default).
-func (h *HttpServer) SetCompressionLevel(level int) {
+func (h *HttpServer) SetCompressionLevel(level int) error {
 	if level <= 0 {
 		h.zstdEncoder = nil
-		return
+		return nil
 	}
 	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevel(level)))
 	if err != nil {
-		panic(fmt.Sprintf("vgirpc: failed to create zstd encoder: %v", err))
+		return fmt.Errorf("vgirpc: failed to create zstd encoder: %w", err)
 	}
 	h.zstdEncoder = enc
+	return nil
 }
 
 // SetRehydrateFunc sets a callback that reconstructs non-serializable fields
@@ -341,21 +342,22 @@ func (h *HttpServer) SetAuthenticate(fn AuthenticateFunc) {
 // SetOAuthResourceMetadata configures OAuth Protected Resource Metadata
 // (RFC 9728). When set, the server exposes a well-known endpoint and includes
 // a WWW-Authenticate header on 401 responses.
-func (h *HttpServer) SetOAuthResourceMetadata(m *OAuthResourceMetadata) {
+func (h *HttpServer) SetOAuthResourceMetadata(m *OAuthResourceMetadata) error {
 	if err := m.Validate(); err != nil {
-		panic(fmt.Sprintf("vgirpc: %v", err))
+		return fmt.Errorf("vgirpc: %w", err)
 	}
 	data, err := m.ToJSON()
 	if err != nil {
-		panic(fmt.Sprintf("vgirpc: failed to marshal oauth metadata: %v", err))
+		return fmt.Errorf("vgirpc: failed to marshal oauth metadata: %w", err)
 	}
 	metaURL, err := resourceMetadataURLFromResource(m.Resource)
 	if err != nil {
-		panic(fmt.Sprintf("vgirpc: %v", err))
+		return fmt.Errorf("vgirpc: %w", err)
 	}
 	h.oauthMetadata = m
 	h.oauthMetadataJSON = data
 	h.wwwAuthenticate = buildWWWAuthenticate(metaURL, m)
+	return nil
 }
 
 // SetOAuthPkce enables browser-based OAuth PKCE login. When both authenticate
@@ -363,19 +365,20 @@ func (h *HttpServer) SetOAuthResourceMetadata(m *OAuthResourceMetadata) {
 // requests that fail authentication are redirected to the authorization
 // server's login page instead of returning a 401.
 //
-// Panics if authenticateFunc or oauthMetadata are not set, or if ClientID is empty.
-func (h *HttpServer) SetOAuthPkce(config OAuthPkceConfig) {
+// Returns an error if authenticateFunc or oauthMetadata are not set, if
+// ClientID is empty, or if the resource URL is invalid.
+func (h *HttpServer) SetOAuthPkce(config OAuthPkceConfig) error {
 	if h.authenticateFunc == nil {
-		panic("vgirpc: SetOAuthPkce requires SetAuthenticate to be called first")
+		return fmt.Errorf("vgirpc: SetOAuthPkce requires SetAuthenticate to be called first")
 	}
 	if h.oauthMetadata == nil {
-		panic("vgirpc: SetOAuthPkce requires SetOAuthResourceMetadata to be called first")
+		return fmt.Errorf("vgirpc: SetOAuthPkce requires SetOAuthResourceMetadata to be called first")
 	}
 	if h.oauthMetadata.ClientID == "" {
-		panic("vgirpc: SetOAuthPkce requires OAuthResourceMetadata.ClientID to be set")
+		return fmt.Errorf("vgirpc: SetOAuthPkce requires OAuthResourceMetadata.ClientID to be set")
 	}
 	if len(h.oauthMetadata.AuthorizationServers) == 0 {
-		panic("vgirpc: SetOAuthPkce requires at least one authorization server")
+		return fmt.Errorf("vgirpc: SetOAuthPkce requires at least one authorization server")
 	}
 
 	// Derive session key from signing key
@@ -384,7 +387,7 @@ func (h *HttpServer) SetOAuthPkce(config OAuthPkceConfig) {
 	// Parse resource URL for scheme/host → secureCookie, redirectURI
 	resourceURL, err := url.Parse(h.oauthMetadata.Resource)
 	if err != nil {
-		panic(fmt.Sprintf("vgirpc: invalid resource URL: %v", err))
+		return fmt.Errorf("vgirpc: invalid resource URL: %w", err)
 	}
 	secureCookie := resourceURL.Scheme == "https"
 	redirectURI := fmt.Sprintf("%s://%s%s/_oauth/callback", resourceURL.Scheme, resourceURL.Host, h.prefix)
@@ -424,6 +427,7 @@ func (h *HttpServer) SetOAuthPkce(config OAuthPkceConfig) {
 		allowedReturnOrigins: allowedOrigins,
 		userInfoHTML:         userInfoHTML,
 	}
+	return nil
 }
 
 // authenticate runs the registered AuthenticateFunc (if any) and writes

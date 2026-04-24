@@ -157,7 +157,7 @@ type MtlsAuthenticateXfccConfig struct {
 // Warning: The reverse proxy MUST strip client-supplied
 // x-forwarded-client-cert headers before forwarding. These factories trust
 // the header unconditionally.
-func MtlsAuthenticateXfcc(cfg MtlsAuthenticateXfccConfig) AuthenticateFunc {
+func MtlsAuthenticateXfcc(cfg MtlsAuthenticateXfccConfig) (AuthenticateFunc, error) {
 	if cfg.Domain == "" {
 		cfg.Domain = "mtls"
 	}
@@ -165,7 +165,7 @@ func MtlsAuthenticateXfcc(cfg MtlsAuthenticateXfccConfig) AuthenticateFunc {
 		cfg.SelectElement = "first"
 	}
 	if cfg.SelectElement != "first" && cfg.SelectElement != "last" {
-		panic(fmt.Sprintf("vgirpc: MtlsAuthenticateXfcc SelectElement must be \"first\" or \"last\", got %q", cfg.SelectElement))
+		return nil, fmt.Errorf("vgirpc: MtlsAuthenticateXfcc SelectElement must be \"first\" or \"last\", got %q", cfg.SelectElement)
 	}
 	return func(r *http.Request) (*AuthContext, error) {
 		headerValue := r.Header.Get("X-Forwarded-Client-Cert")
@@ -215,7 +215,7 @@ func MtlsAuthenticateXfcc(cfg MtlsAuthenticateXfccConfig) AuthenticateFunc {
 			Principal:     principal,
 			Claims:        claims,
 		}, nil
-	}
+	}, nil
 }
 
 // parseCertFromHeader extracts and parses a PEM certificate from a request header.
@@ -298,9 +298,9 @@ type MtlsAuthenticateConfig struct {
 // Warning: The reverse proxy MUST strip client-supplied certificate headers
 // before forwarding. Failure to do so allows clients to forge certificate
 // identity.
-func MtlsAuthenticate(cfg MtlsAuthenticateConfig) AuthenticateFunc {
+func MtlsAuthenticate(cfg MtlsAuthenticateConfig) (AuthenticateFunc, error) {
 	if cfg.Validate == nil {
-		panic("vgirpc: MtlsAuthenticate requires a Validate callback")
+		return nil, fmt.Errorf("vgirpc: MtlsAuthenticate requires a Validate callback")
 	}
 	if cfg.Header == "" {
 		cfg.Header = "X-SSL-Client-Cert"
@@ -316,7 +316,7 @@ func MtlsAuthenticate(cfg MtlsAuthenticateConfig) AuthenticateFunc {
 			}
 		}
 		return cfg.Validate(cert)
-	}
+	}, nil
 }
 
 // MtlsAuthenticateFingerprintConfig configures [MtlsAuthenticateFingerprint].
@@ -340,7 +340,7 @@ type MtlsAuthenticateFingerprintConfig struct {
 // Fingerprints must be lowercase hex without colons.
 //
 // It panics if Algorithm is not one of "sha256", "sha1", "sha384", or "sha512".
-func MtlsAuthenticateFingerprint(cfg MtlsAuthenticateFingerprintConfig) AuthenticateFunc {
+func MtlsAuthenticateFingerprint(cfg MtlsAuthenticateFingerprintConfig) (AuthenticateFunc, error) {
 	if cfg.Algorithm == "" {
 		cfg.Algorithm = "sha256"
 	}
@@ -355,7 +355,7 @@ func MtlsAuthenticateFingerprint(cfg MtlsAuthenticateFingerprintConfig) Authenti
 	case "sha512":
 		hashFunc = crypto.SHA512
 	default:
-		panic(fmt.Sprintf("vgirpc: unsupported hash algorithm: %s", cfg.Algorithm))
+		return nil, fmt.Errorf("vgirpc: unsupported hash algorithm: %s", cfg.Algorithm)
 	}
 	return MtlsAuthenticate(MtlsAuthenticateConfig{
 		Header:      cfg.Header,
@@ -395,7 +395,7 @@ type MtlsAuthenticateSubjectConfig struct {
 // MtlsAuthenticateSubject returns an [AuthenticateFunc] that extracts the
 // Subject Common Name as principal and populates claims with the full
 // subject DN, serial number (hex), and not_valid_after (RFC 3339).
-func MtlsAuthenticateSubject(cfg MtlsAuthenticateSubjectConfig) AuthenticateFunc {
+func MtlsAuthenticateSubject(cfg MtlsAuthenticateSubjectConfig) (AuthenticateFunc, error) {
 	if cfg.Domain == "" {
 		cfg.Domain = "mtls"
 	}

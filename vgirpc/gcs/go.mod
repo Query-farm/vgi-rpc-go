@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	cloud.google.com/go/storage v1.52.0
 	github.com/Query-farm/vgi-rpc v0.0.0
-	github.com/apache/arrow-go/v18 v18.2.0
+	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/google/uuid v1.6.0
 )
 
@@ -75,5 +75,3 @@ require (
 )
 
 replace github.com/Query-farm/vgi-rpc => ../../
-
-replace github.com/apache/arrow-go/v18 => github.com/rustyconover/arrow-go/v18 v18.0.0-20260220022719-2d45cbd918a4

@@ -175,7 +175,7 @@ Two header conventions are supported:
 Generic factory with full control over certificate validation. Parses a URL-encoded PEM certificate from a proxy header and delegates to a user-supplied `Validate` callback:
 
 ```go
-httpServer.SetAuthenticate(vgirpc.MtlsAuthenticate(vgirpc.MtlsAuthenticateConfig{
+auth, err := vgirpc.MtlsAuthenticate(vgirpc.MtlsAuthenticateConfig{
     Validate: func(cert *x509.Certificate) (*vgirpc.AuthContext, error) {
         cn := cert.Subject.CommonName
         if cn == "" {
@@ -190,7 +190,11 @@ httpServer.SetAuthenticate(vgirpc.MtlsAuthenticate(vgirpc.MtlsAuthenticateConfig
     },
     // Header: "X-SSL-Client-Cert",  // default
     // CheckExpiry: false,            // default
-}))
+})
+if err != nil {
+    log.Fatal(err)
+}
+httpServer.SetAuthenticate(auth)
 ```
 
 Common header names by proxy:
@@ -206,13 +210,17 @@ Common header names by proxy:
 Convenience factory that looks up certificates by SHA-256 fingerprint (lowercase hex, no colons):
 
 ```go
-httpServer.SetAuthenticate(vgirpc.MtlsAuthenticateFingerprint(vgirpc.MtlsAuthenticateFingerprintConfig{
+auth, err := vgirpc.MtlsAuthenticateFingerprint(vgirpc.MtlsAuthenticateFingerprintConfig{
     Fingerprints: map[string]*vgirpc.AuthContext{
         "a1b2c3d4...": {Domain: "mtls", Authenticated: true, Principal: "service-a"},
         "f6e5d4c3...": {Domain: "mtls", Authenticated: true, Principal: "service-b"},
     },
     // Algorithm: "sha256",  // default; also "sha1", "sha384", "sha512"
-}))
+})
+if err != nil {
+    log.Fatal(err)
+}
+httpServer.SetAuthenticate(auth)
 ```
 
 Get a fingerprint with: `openssl x509 -fingerprint -sha256 -noout -in cert.pem | sed 's/.*=//; s/://g' | tr '[:upper:]' '[:lower:]'`
@@ -222,13 +230,17 @@ Get a fingerprint with: `openssl x509 -fingerprint -sha256 -noout -in cert.pem |
 Extracts the Subject Common Name as principal and populates claims with certificate metadata:
 
 ```go
-httpServer.SetAuthenticate(vgirpc.MtlsAuthenticateSubject(vgirpc.MtlsAuthenticateSubjectConfig{
+auth, err := vgirpc.MtlsAuthenticateSubject(vgirpc.MtlsAuthenticateSubjectConfig{
     AllowedSubjects: map[string]struct{}{
         "frontend":    {},
         "batch-worker": {},
     },
     CheckExpiry: true,
-}))
+})
+if err != nil {
+    log.Fatal(err)
+}
+httpServer.SetAuthenticate(auth)
 ```
 
 The returned `AuthContext.Claims` contains:
@@ -245,10 +257,14 @@ Parses the Envoy `x-forwarded-client-cert` header. No certificate parsing needed
 
 ```go
 // Default: extract CN from Subject field
-httpServer.SetAuthenticate(vgirpc.MtlsAuthenticateXfcc(vgirpc.MtlsAuthenticateXfccConfig{}))
+auth, err := vgirpc.MtlsAuthenticateXfcc(vgirpc.MtlsAuthenticateXfccConfig{})
+if err != nil {
+    log.Fatal(err)
+}
+httpServer.SetAuthenticate(auth)
 
 // Custom validation (e.g. SPIFFE ID)
-httpServer.SetAuthenticate(vgirpc.MtlsAuthenticateXfcc(vgirpc.MtlsAuthenticateXfccConfig{
+auth, err = vgirpc.MtlsAuthenticateXfcc(vgirpc.MtlsAuthenticateXfccConfig{
     Validate: func(elem vgirpc.XfccElement) (*vgirpc.AuthContext, error) {
         if elem.URI == "" || !strings.HasPrefix(elem.URI, "spiffe://") {
             return nil, &vgirpc.RpcError{Type: "ValueError", Message: "Missing SPIFFE ID"}
@@ -260,7 +276,11 @@ httpServer.SetAuthenticate(vgirpc.MtlsAuthenticateXfcc(vgirpc.MtlsAuthenticateXf
         }, nil
     },
     SelectElement: "first", // "first" (original client) or "last" (nearest proxy)
-}))
+})
+if err != nil {
+    log.Fatal(err)
+}
+httpServer.SetAuthenticate(auth)
 ```
 
 #### Combining mTLS with other authenticators
@@ -268,9 +288,12 @@ httpServer.SetAuthenticate(vgirpc.MtlsAuthenticateXfcc(vgirpc.MtlsAuthenticateXf
 Use `ChainAuthenticate` to accept mTLS or bearer tokens:
 
 ```go
-mtlsAuth := vgirpc.MtlsAuthenticateSubject(vgirpc.MtlsAuthenticateSubjectConfig{
+mtlsAuth, err := vgirpc.MtlsAuthenticateSubject(vgirpc.MtlsAuthenticateSubjectConfig{
     AllowedSubjects: map[string]struct{}{"backend-svc": {}},
 })
+if err != nil {
+    log.Fatal(err)
+}
 apiKeyAuth := vgirpc.BearerAuthenticateStatic(map[string]*vgirpc.AuthContext{
     "sk-ci-bot": {Domain: "apikey", Authenticated: true, Principal: "ci-bot"},
 })
@@ -297,13 +320,15 @@ vgi-rpc-go can expose [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728.html) OA
 ### Setting up metadata
 
 ```go
-httpServer.SetOAuthResourceMetadata(&vgirpc.OAuthResourceMetadata{
+if err := httpServer.SetOAuthResourceMetadata(&vgirpc.OAuthResourceMetadata{
     Resource:             "https://api.example.com/vgi",
     AuthorizationServers: []string{"https://auth.example.com"},
     ScopesSupported:      []string{"read", "write"},
     ClientID:             "my-app-client-id",
     UseIDTokenAsBearer:   true,
-})
+}); err != nil {
+    log.Fatal(err)
+}
 ```
 
 This configures two things:

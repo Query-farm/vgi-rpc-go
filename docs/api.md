@@ -49,7 +49,7 @@ func NewServer() *Server
 
 ```go
 func NewHttpServer(server *Server) *HttpServer
-func NewHttpServerWithKey(server *Server, signingKey []byte) *HttpServer
+func NewHttpServerWithKey(server *Server, signingKey []byte) (*HttpServer, error)
 func RegisterStateType(v interface{})
 ```
 

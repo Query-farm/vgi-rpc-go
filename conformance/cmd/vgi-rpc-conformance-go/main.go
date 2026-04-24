@@ -80,7 +80,10 @@ func main() {
 		}
 
 		httpServer := vgirpc.NewHttpServer(server)
-		httpServer.SetCompressionLevel(3)
+		if err := httpServer.SetCompressionLevel(3); err != nil {
+			fmt.Fprintf(os.Stderr, "failed to set compression level: %v\n", err)
+			os.Exit(1)
+		}
 		// Emit one batch per HTTP response so infinite producers (e.g.
 		// ``cancellable_producer``) return promptly and the client can follow
 		// continuation tokens or cancel mid-stream. Matches the Python

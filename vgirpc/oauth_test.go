@@ -88,10 +88,12 @@ func newTestHttpServer(t *testing.T) *HttpServer {
 
 func TestWellKnownEndpoint(t *testing.T) {
 	h := newTestHttpServer(t)
-	h.SetOAuthResourceMetadata(&OAuthResourceMetadata{
+	if err := h.SetOAuthResourceMetadata(&OAuthResourceMetadata{
 		Resource:             "https://api.example.com/vgi",
 		AuthorizationServers: []string{"https://auth.example.com"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	h.InitPages()
 
 	req := httptest.NewRequest("GET", "/.well-known/oauth-protected-resource", nil)
@@ -135,10 +137,12 @@ func TestWellKnownEndpoint_BypassesAuth(t *testing.T) {
 	h.SetAuthenticate(func(r *http.Request) (*AuthContext, error) {
 		return nil, &RpcError{Type: "ValueError", Message: "unauthorized"}
 	})
-	h.SetOAuthResourceMetadata(&OAuthResourceMetadata{
+	if err := h.SetOAuthResourceMetadata(&OAuthResourceMetadata{
 		Resource:             "https://api.example.com/vgi",
 		AuthorizationServers: []string{"https://auth.example.com"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	h.InitPages()
 
 	req := httptest.NewRequest("GET", "/.well-known/oauth-protected-resource", nil)
@@ -155,10 +159,12 @@ func TestWWWAuthenticateHeader(t *testing.T) {
 	h.SetAuthenticate(func(r *http.Request) (*AuthContext, error) {
 		return nil, &RpcError{Type: "ValueError", Message: "unauthorized"}
 	})
-	h.SetOAuthResourceMetadata(&OAuthResourceMetadata{
+	if err := h.SetOAuthResourceMetadata(&OAuthResourceMetadata{
 		Resource:             "https://api.example.com/vgi",
 		AuthorizationServers: []string{"https://auth.example.com"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	h.InitPages()
 
 	req := httptest.NewRequest("POST", "/test_method", nil)

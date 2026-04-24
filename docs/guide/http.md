@@ -42,7 +42,10 @@ HTTP is stateless, so exchange streams carry an HMAC-signed state token in batch
 By default, `NewHttpServer` generates a random 32-byte signing key. For multi-instance deployments, use `NewHttpServerWithKey` with a shared key:
 
 ```go
-httpServer := vgirpc.NewHttpServerWithKey(server, sharedKey)
+httpServer, err := vgirpc.NewHttpServerWithKey(server, sharedKey)
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ## Token TTL
