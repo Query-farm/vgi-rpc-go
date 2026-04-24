@@ -342,6 +342,15 @@ func setFieldFromArrow(field reflect.Value, fieldType reflect.Type, col arrow.Ar
 		} else {
 			field.SetBytes(c.Value(idx))
 		}
+	case *array.LargeBinary:
+		if isPtr {
+			v := c.Value(idx)
+			ptr := reflect.New(fieldType)
+			ptr.Elem().SetBytes(v)
+			field.Set(ptr)
+		} else {
+			field.SetBytes(c.Value(idx))
+		}
 	case *array.List:
 		return setListField(field, fieldType, isPtr, c, idx, info)
 	case *array.Map:
