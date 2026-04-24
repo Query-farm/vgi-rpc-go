@@ -11,7 +11,7 @@ require (
 
 require (
 	github.com/andybalholm/brotli v1.2.0 // indirect
-	github.com/apache/arrow-go/v18 v18.2.0 // indirect
+	github.com/apache/arrow-go/v18 v18.5.2 // indirect
 	github.com/apache/thrift v0.22.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -37,7 +37,4 @@ require (
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 )
 
-replace (
-	github.com/Query-farm/vgi-rpc => ../..
-	github.com/apache/arrow-go/v18 => github.com/rustyconover/arrow-go/v18 v18.0.0-20260220022719-2d45cbd918a4
-)
+replace github.com/Query-farm/vgi-rpc => ../..
