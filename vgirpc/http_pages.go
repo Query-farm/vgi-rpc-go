@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strings"
@@ -345,17 +346,23 @@ func buildMethodCard(w *strings.Builder, info *methodInfo) {
 func (h *HttpServer) handleLandingPage(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(h.landingHTML)
+	if _, err := w.Write(h.landingHTML); err != nil {
+		slog.Debug("http: response write failed", "page", "landing", "err", err)
+	}
 }
 
 func (h *HttpServer) handleDescribePage(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(h.describeHTML)
+	if _, err := w.Write(h.describeHTML); err != nil {
+		slog.Debug("http: response write failed", "page", "describe", "err", err)
+	}
 }
 
 func (h *HttpServer) handleNotFound(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusNotFound)
-	_, _ = w.Write(h.notFoundHTML)
+	if _, err := w.Write(h.notFoundHTML); err != nil {
+		slog.Debug("http: response write failed", "page", "404", "err", err)
+	}
 }

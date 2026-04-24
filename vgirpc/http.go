@@ -220,7 +220,9 @@ func (h *HttpServer) handleOAuthWellKnown(w http.ResponseWriter, r *http.Request
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "public, max-age=60")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(h.oauthMetadataJSON)
+	if _, err := w.Write(h.oauthMetadataJSON); err != nil {
+		slog.Debug("http: response write failed", "err", err)
+	}
 }
 
 // InitPages pre-renders the HTML pages and registers GET routes. This must be
@@ -506,10 +508,14 @@ func (cw *compressResponseWriter) finish() {
 		compressed := cw.encoder.EncodeAll(data, make([]byte, 0, len(data)))
 		cw.ResponseWriter.Header().Set("Content-Encoding", "zstd")
 		cw.ResponseWriter.WriteHeader(cw.statusCode)
-		_, _ = cw.ResponseWriter.Write(compressed)
+		if _, err := cw.ResponseWriter.Write(compressed); err != nil {
+			slog.Debug("http: response write failed", "err", err)
+		}
 	} else {
 		cw.ResponseWriter.WriteHeader(cw.statusCode)
-		_, _ = cw.ResponseWriter.Write(data)
+		if _, err := cw.ResponseWriter.Write(data); err != nil {
+			slog.Debug("http: response write failed", "err", err)
+		}
 	}
 }
 
@@ -631,10 +637,10 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		handlerErr = callErr
 		ipcW := ipc.NewWriter(&buf, ipc.WithSchema(info.ResultSchema))
 		for _, logMsg := range logs {
-			_ = writeLogBatch(ipcW, info.ResultSchema, logMsg, h.server.serverID, req.RequestID)
+			h.logIPCWriteErr("log-batch", info.Name, writeLogBatch(ipcW, info.ResultSchema, logMsg, h.server.serverID, req.RequestID))
 		}
-		_ = writeErrorBatch(ipcW, info.ResultSchema, callErr, h.server.serverID, req.RequestID, h.server.debugErrors)
-		_ = ipcW.Close()
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(ipcW, info.ResultSchema, callErr, h.server.serverID, req.RequestID, h.server.debugErrors))
+		h.logIPCWriteErr("close", info.Name, ipcW.Close())
 		statusCode := http.StatusInternalServerError
 		if rpcErr, ok := callErr.(*RpcError); ok {
 			if rpcErr.Type == "TypeError" || rpcErr.Type == "ValueError" {
@@ -646,7 +652,10 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if info.ResultType == nil {
-		_ = WriteVoidResponse(&buf, logs, h.server.serverID, req.RequestID)
+		if err := WriteVoidResponse(&buf, logs, h.server.serverID, req.RequestID); err != nil {
+			h.logIPCWriteErr("void-response", info.Name, err)
+			handlerErr = err
+		}
 		h.writeArrow(w, http.StatusOK, buf.Bytes())
 		return
 	}
@@ -662,7 +671,10 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	// Record output stats
 	stats.RecordOutput(resultBatch.NumRows(), batchBufferSize(resultBatch))
 
-	_ = WriteUnaryResponse(&buf, info.ResultSchema, logs, resultBatch, h.server.serverID, req.RequestID)
+	if err := WriteUnaryResponse(&buf, info.ResultSchema, logs, resultBatch, h.server.serverID, req.RequestID); err != nil {
+		h.logIPCWriteErr("unary-response", info.Name, err)
+		handlerErr = err
+	}
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
 }
 
@@ -803,7 +815,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		// Write any buffered init logs
 		initLogs := callCtx.drainLogs()
 		for _, logMsg := range initLogs {
-			_ = writeLogBatch(writer, outputSchema, logMsg, h.server.serverID, "")
+			h.logIPCWriteErr("log-batch", info.Name, writeLogBatch(writer, outputSchema, logMsg, h.server.serverID, ""))
 		}
 
 		finished, err := h.runProduceLoop(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, transportMeta, callCtx.Cookies)
@@ -819,12 +831,20 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 				zeroBatch := emptyBatch(outputSchema)
 				batchWithMeta := array.NewRecordBatchWithMetadata(
 					outputSchema, zeroBatch.Columns(), zeroBatch.NumRows(), stateMeta)
-				_ = writer.Write(batchWithMeta)
+				if werr := writer.Write(batchWithMeta); werr != nil {
+					h.logIPCWriteErr("state-token-batch", info.Name, werr)
+					handlerErr = werr
+				}
 				batchWithMeta.Release()
 				zeroBatch.Release()
 			}
 		}
-		_ = writer.Close()
+		if cerr := writer.Close(); cerr != nil {
+			h.logIPCWriteErr("close", info.Name, cerr)
+			if handlerErr == nil {
+				handlerErr = cerr
+			}
+		}
 	} else {
 		// Exchange init — return state token (carry schema for dynamic methods)
 		token, err := h.packStateToken(state, outputSchema)
@@ -838,7 +858,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		// Write any buffered init logs
 		initLogs := callCtx.drainLogs()
 		for _, logMsg := range initLogs {
-			_ = writeLogBatch(writer, outputSchema, logMsg, h.server.serverID, "")
+			h.logIPCWriteErr("log-batch", info.Name, writeLogBatch(writer, outputSchema, logMsg, h.server.serverID, ""))
 		}
 
 		// Write zero-row batch with state token
@@ -847,10 +867,18 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		zeroBatch := emptyBatch(outputSchema)
 		batchWithMeta := array.NewRecordBatchWithMetadata(
 			outputSchema, zeroBatch.Columns(), zeroBatch.NumRows(), stateMeta)
-		_ = writer.Write(batchWithMeta)
+		if werr := writer.Write(batchWithMeta); werr != nil {
+			h.logIPCWriteErr("state-token-batch", info.Name, werr)
+			handlerErr = werr
+		}
 		batchWithMeta.Release()
 		zeroBatch.Release()
-		_ = writer.Close()
+		if cerr := writer.Close(); cerr != nil {
+			h.logIPCWriteErr("close", info.Name, cerr)
+			if handlerErr == nil {
+				handlerErr = cerr
+			}
+		}
 	}
 
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
@@ -1031,7 +1059,7 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 	}
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-	_ = writer.Close()
+	h.logIPCWriteErr("close", info.Name, writer.Close())
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
 	return nil
 }
@@ -1055,12 +1083,20 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 			zeroBatch := emptyBatch(schema)
 			batchWithMeta := array.NewRecordBatchWithMetadata(
 				schema, zeroBatch.Columns(), zeroBatch.NumRows(), stateMeta)
-			_ = writer.Write(batchWithMeta)
+			if werr := writer.Write(batchWithMeta); werr != nil {
+				h.logIPCWriteErr("state-token-batch", info.Name, werr)
+				err = werr
+			}
 			batchWithMeta.Release()
 			zeroBatch.Release()
 		}
 	}
-	_ = writer.Close()
+	if cerr := writer.Close(); cerr != nil {
+		h.logIPCWriteErr("close", info.Name, cerr)
+		if err == nil {
+			err = cerr
+		}
+	}
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
 	return err
 }
@@ -1100,15 +1136,15 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
 
 	if exchangeErr != nil {
-		_ = writeErrorBatch(writer, schema, exchangeErr, h.server.serverID, "", h.server.debugErrors)
-		_ = writer.Close()
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, exchangeErr, h.server.serverID, "", h.server.debugErrors))
+		h.logIPCWriteErr("close", info.Name, writer.Close())
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return exchangeErr
 	}
 
 	if err := out.validate(); err != nil {
-		_ = writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors)
-		_ = writer.Close()
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
+		h.logIPCWriteErr("close", info.Name, writer.Close())
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return err
 	}
@@ -1116,20 +1152,26 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	// Serialize updated state into new token (carry schema for dynamic methods)
 	newToken, err := h.packStateToken(state, schema)
 	if err != nil {
-		_ = writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors)
-		_ = writer.Close()
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
+		h.logIPCWriteErr("close", info.Name, writer.Close())
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return err
 	}
 
 	// Flush output batches, merging state token into the data batch metadata
+	var writeErr error
 	for i, ab := range out.batches {
 		isDataBatch := (i == out.dataBatchIdx)
 		if ab.meta != nil {
 			// Log batch — write as-is
 			batchWithMeta := array.NewRecordBatchWithMetadata(
 				schema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
-			_ = writer.Write(batchWithMeta)
+			if werr := writer.Write(batchWithMeta); werr != nil {
+				h.logIPCWriteErr("log-batch", info.Name, werr)
+				if writeErr == nil {
+					writeErr = werr
+				}
+			}
 			batchWithMeta.Release()
 		} else if isDataBatch {
 			// Data batch — record output stats and merge state token
@@ -1138,17 +1180,32 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 				[]string{MetaStreamState}, []string{string(newToken)})
 			batchWithMeta := array.NewRecordBatchWithMetadata(
 				schema, ab.batch.Columns(), ab.batch.NumRows(), stateMeta)
-			_ = writer.Write(batchWithMeta)
+			if werr := writer.Write(batchWithMeta); werr != nil {
+				h.logIPCWriteErr("data-batch", info.Name, werr)
+				if writeErr == nil {
+					writeErr = werr
+				}
+			}
 			batchWithMeta.Release()
 		} else {
-			_ = writer.Write(ab.batch)
+			if werr := writer.Write(ab.batch); werr != nil {
+				h.logIPCWriteErr("batch", info.Name, werr)
+				if writeErr == nil {
+					writeErr = werr
+				}
+			}
 		}
 		ab.batch.Release()
 	}
 
-	_ = writer.Close()
+	if cerr := writer.Close(); cerr != nil {
+		h.logIPCWriteErr("close", info.Name, cerr)
+		if writeErr == nil {
+			writeErr = cerr
+		}
+	}
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
-	return nil
+	return writeErr
 }
 
 // runProduceLoop runs the producer state machine until completion or the batch
@@ -1187,13 +1244,13 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 		}()
 
 		if produceErr != nil {
-			_ = writeErrorBatch(writer, schema, produceErr, h.server.serverID, "", h.server.debugErrors)
+			h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, produceErr, h.server.serverID, "", h.server.debugErrors))
 			return false, produceErr
 		}
 
 		if !out.Finished() {
 			if err := out.validate(); err != nil {
-				_ = writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors)
+				h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
 				return false, err
 			}
 		}
@@ -1203,12 +1260,21 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 			if ab.meta != nil {
 				batchWithMeta := array.NewRecordBatchWithMetadata(
 					schema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
-				_ = writer.Write(batchWithMeta)
+				if werr := writer.Write(batchWithMeta); werr != nil {
+					h.logIPCWriteErr("log-batch", info.Name, werr)
+					batchWithMeta.Release()
+					ab.batch.Release()
+					return false, werr
+				}
 				batchWithMeta.Release()
 			} else {
 				// Data batch — record output stats
 				stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
-				_ = writer.Write(ab.batch)
+				if werr := writer.Write(ab.batch); werr != nil {
+					h.logIPCWriteErr("data-batch", info.Name, werr)
+					ab.batch.Release()
+					return false, werr
+				}
 				dataBatches++
 			}
 			ab.batch.Release()
@@ -1347,8 +1413,8 @@ func (h *HttpServer) handleDescribe(w http.ResponseWriter, r *http.Request) {
 
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(describeSchema))
-	_ = writer.Write(batchWithMeta)
-	_ = writer.Close()
+	h.logIPCWriteErr("describe-batch", "describe", writer.Write(batchWithMeta))
+	h.logIPCWriteErr("close", "describe", writer.Close())
 
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
 }
@@ -1489,8 +1555,8 @@ func (h *HttpServer) writeHttpError(w http.ResponseWriter, statusCode int, err e
 	}
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-	_ = writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors)
-	_ = writer.Close()
+	h.logIPCWriteErr("error-batch", "", writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
+	h.logIPCWriteErr("close", "", writer.Close())
 	h.writeArrow(w, statusCode, buf.Bytes())
 }
 
@@ -1501,5 +1567,20 @@ func (h *HttpServer) writeArrow(w http.ResponseWriter, statusCode int, data []by
 		statusCode = http.StatusOK
 	}
 	w.WriteHeader(statusCode)
-	_, _ = w.Write(data)
+	if _, err := w.Write(data); err != nil {
+		// Client disconnect mid-response is expected — log at debug level.
+		slog.Debug("http: response write failed", "err", err)
+	}
+}
+
+// logIPCWriteErr reports a non-nil error encountered while serializing an
+// Arrow IPC stream into a response buffer. These writes go to a bytes.Buffer
+// (which cannot itself fail), so any error indicates a serialization bug
+// such as a schema/batch mismatch — silent failures here produce a truncated
+// response that the client will not understand. Logs at error level.
+func (h *HttpServer) logIPCWriteErr(op, method string, err error) {
+	if err == nil {
+		return
+	}
+	slog.Error("ipc write failed", "op", op, "method", method, "err", err)
 }

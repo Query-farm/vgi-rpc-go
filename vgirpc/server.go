@@ -111,6 +111,17 @@ func (s *Server) SetDebugErrors(enabled bool) {
 	s.debugErrors = enabled
 }
 
+// logIPCWriteErr reports a non-nil error encountered while writing an Arrow
+// IPC stream on the serve-loop transport (stdio/pipe/unix socket). The writer
+// is the live transport, so errors here indicate real I/O failures — either
+// the peer went away or the stream was corrupted. Logs at error level.
+func (s *Server) logIPCWriteErr(op, method string, err error) {
+	if err == nil {
+		return
+	}
+	slog.Error("ipc write failed", "op", op, "method", method, "err", err)
+}
+
 // Unary registers a unary RPC method with typed parameters and return value.
 // P must be a struct with `vgirpc` tags. R is the return type.
 func Unary[P any, R any](s *Server, name string, handler func(context.Context, *CallContext, P) (R, error)) {
@@ -365,7 +376,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		// Try to write error response
 		if rpcErr, ok := err.(*RpcError); ok {
 			emptySchema := arrow.NewSchema(nil, nil)
-			_ = writeErrorResponse(w, emptySchema, rpcErr, s.serverID, "", s.debugErrors)
+			s.logIPCWriteErr("error-response", "", writeErrorResponse(w, emptySchema, rpcErr, s.serverID, "", s.debugErrors))
 			return nil // continue serving
 		}
 		return err // transport error, stop serving
@@ -383,10 +394,10 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		available := s.availableMethods()
 		errMsg := fmt.Sprintf("Unknown method: '%s'. Available methods: %v", req.Method, available)
 		emptySchema := arrow.NewSchema(nil, nil)
-		_ = writeErrorResponse(w, emptySchema, &RpcError{
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, emptySchema, &RpcError{
 			Type:    "AttributeError",
 			Message: errMsg,
-		}, s.serverID, req.RequestID, s.debugErrors)
+		}, s.serverID, req.RequestID, s.debugErrors))
 		return nil
 	}
 
@@ -429,9 +440,9 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 	case MethodProducer, MethodExchange, MethodDynamic:
 		handlerErr, transportErr = s.serveStream(ctx, r, w, req, info, stats)
 	default:
-		_ = writeErrorResponse(w, info.ResultSchema,
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, info.ResultSchema,
 			fmt.Errorf("method type %d not yet implemented", info.Type),
-			s.serverID, req.RequestID, s.debugErrors)
+			s.serverID, req.RequestID, s.debugErrors))
 	}
 
 	// Hook end (panic-safe)
@@ -456,7 +467,7 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
 		handlerErr = &RpcError{Type: "TypeError", Message: fmt.Sprintf("parameter deserialization: %v", err)}
-		_ = writeErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID, s.debugErrors)
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID, s.debugErrors))
 		return handlerErr, nil
 	}
 
@@ -533,7 +544,7 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 	resultBatch, err := serializeResult(info.ResultSchema, resultVal.Interface())
 	if err != nil {
 		handlerErr = &RpcError{Type: "SerializationError", Message: fmt.Sprintf("result serialization: %v", err)}
-		_ = writeErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID, s.debugErrors)
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID, s.debugErrors))
 		return handlerErr, nil
 	}
 	defer resultBatch.Release()
@@ -566,7 +577,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			Message: fmt.Sprintf("parameter deserialization: %v", err),
 		}
 		emptySchema := arrow.NewSchema(nil, nil)
-		_ = writeErrorResponse(w, emptySchema, handlerErr, s.serverID, req.RequestID, s.debugErrors)
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, emptySchema, handlerErr, s.serverID, req.RequestID, s.debugErrors))
 		return handlerErr, nil
 	}
 
@@ -641,8 +652,8 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				Message: fmt.Sprintf("dynamic stream state %T does not implement ProducerState or ExchangeState", state),
 			}
 			outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
-			_ = writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors)
-			_ = outputWriter.Close()
+			s.logIPCWriteErr("error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
+			s.logIPCWriteErr("close", req.Method, outputWriter.Close())
 			if inputReader, err := ipc.NewReader(r); err == nil {
 				for inputReader.Next() {
 				}
@@ -659,8 +670,8 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					Message: fmt.Sprintf("stream state %T does not implement ProducerState", state),
 				}
 				outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
-				_ = writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors)
-				_ = outputWriter.Close()
+				s.logIPCWriteErr("error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
+				s.logIPCWriteErr("close", req.Method, outputWriter.Close())
 				if inputReader, err := ipc.NewReader(r); err == nil {
 					for inputReader.Next() {
 					}
@@ -675,8 +686,8 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					Message: fmt.Sprintf("stream state %T does not implement ExchangeState", state),
 				}
 				outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
-				_ = writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors)
-				_ = outputWriter.Close()
+				s.logIPCWriteErr("error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
+				s.logIPCWriteErr("close", req.Method, outputWriter.Close())
 				if inputReader, err := ipc.NewReader(r); err == nil {
 					for inputReader.Next() {
 					}
@@ -955,10 +966,16 @@ func (s *Server) writeStreamHeader(w io.Writer, header ArrowSerializable, logs [
 
 	// Write any buffered logs into header stream
 	for _, logMsg := range logs {
-		_ = writeLogBatch(headerWriter, headerSchema, logMsg, s.serverID, "")
+		if werr := writeLogBatch(headerWriter, headerSchema, logMsg, s.serverID, ""); werr != nil {
+			s.logIPCWriteErr("log-batch", "", werr)
+			return werr
+		}
 	}
 
-	_ = headerWriter.Write(headerBatch)
+	if werr := headerWriter.Write(headerBatch); werr != nil {
+		s.logIPCWriteErr("header-batch", "", werr)
+		return werr
+	}
 	return headerWriter.Close()
 }
 

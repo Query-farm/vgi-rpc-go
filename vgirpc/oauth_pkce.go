@@ -645,7 +645,7 @@ func (h *HttpServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		slog.Warn("OAuth callback error", "error", errParam, "error_description", errorDesc)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write(oauthErrorPage(
+		writePkcePage(w, oauthErrorPage(
 			"The authorization server returned an error.",
 			errorDesc,
 			retryURL,
@@ -659,7 +659,7 @@ func (h *HttpServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if code == "" || state == "" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write(oauthErrorPage(
+		writePkcePage(w, oauthErrorPage(
 			"Missing authorization code or state parameter.",
 			"",
 			retryURL,
@@ -672,7 +672,7 @@ func (h *HttpServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if err != nil || sessionCookie.Value == "" {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write(oauthErrorPage(
+		writePkcePage(w, oauthErrorPage(
 			"Session cookie missing or expired. Please try again.",
 			"",
 			retryURL,
@@ -687,7 +687,7 @@ func (h *HttpServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		slog.Warn("OAuth session cookie invalid", "error", err)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write(oauthErrorPage(
+		writePkcePage(w, oauthErrorPage(
 			"Session expired or invalid. Please try again.",
 			"",
 			retryURL,
@@ -700,7 +700,7 @@ func (h *HttpServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		slog.Warn("OAuth state mismatch")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write(oauthErrorPage(
+		writePkcePage(w, oauthErrorPage(
 			"State mismatch — possible CSRF. Please try again.",
 			"",
 			retryURL,
@@ -713,7 +713,7 @@ func (h *HttpServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write(oauthErrorPage(
+		writePkcePage(w, oauthErrorPage(
 			"Could not reach the authorization server.",
 			"OIDC discovery failed.",
 			retryURL,
@@ -730,7 +730,7 @@ func (h *HttpServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		slog.Warn("OAuth token exchange failed", "error", err)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusBadGateway)
-		_, _ = w.Write(oauthErrorPage(
+		writePkcePage(w, oauthErrorPage(
 			"Token exchange with the authorization server failed.",
 			err.Error(),
 			retryURL,
@@ -807,6 +807,14 @@ func (h *HttpServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 
 // handleOAuthLogout handles GET {prefix}/_oauth/logout.
 // Clears the auth cookie and redirects to the landing page.
+// writePkcePage writes an OAuth HTML page body, logging (at debug level)
+// if the client disconnected mid-response.
+func writePkcePage(w http.ResponseWriter, body []byte) {
+	if _, err := w.Write(body); err != nil {
+		slog.Debug("oauth: response write failed", "err", err)
+	}
+}
+
 func (h *HttpServer) handleOAuthLogout(w http.ResponseWriter, r *http.Request) {
 	pkce := h.pkce
 
