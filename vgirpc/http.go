@@ -825,18 +825,9 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			token, tokenErr := h.packStateToken(state, outputSchema)
 			if tokenErr != nil {
 				handlerErr = tokenErr
-			} else {
-				stateMeta := arrow.NewMetadata(
-					[]string{MetaStreamState}, []string{string(token)})
-				zeroBatch := emptyBatch(outputSchema)
-				batchWithMeta := array.NewRecordBatchWithMetadata(
-					outputSchema, zeroBatch.Columns(), zeroBatch.NumRows(), stateMeta)
-				if werr := writer.Write(batchWithMeta); werr != nil {
-					h.logIPCWriteErr("state-token-batch", info.Name, werr)
-					handlerErr = werr
-				}
-				batchWithMeta.Release()
-				zeroBatch.Release()
+			} else if werr := writeStateTokenBatch(writer, outputSchema, token); werr != nil {
+				h.logIPCWriteErr("state-token-batch", info.Name, werr)
+				handlerErr = werr
 			}
 		}
 		if cerr := writer.Close(); cerr != nil {
@@ -862,17 +853,10 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Write zero-row batch with state token
-		stateMeta := arrow.NewMetadata(
-			[]string{MetaStreamState}, []string{string(token)})
-		zeroBatch := emptyBatch(outputSchema)
-		batchWithMeta := array.NewRecordBatchWithMetadata(
-			outputSchema, zeroBatch.Columns(), zeroBatch.NumRows(), stateMeta)
-		if werr := writer.Write(batchWithMeta); werr != nil {
+		if werr := writeStateTokenBatch(writer, outputSchema, token); werr != nil {
 			h.logIPCWriteErr("state-token-batch", info.Name, werr)
 			handlerErr = werr
 		}
-		batchWithMeta.Release()
-		zeroBatch.Release()
 		if cerr := writer.Close(); cerr != nil {
 			h.logIPCWriteErr("close", info.Name, cerr)
 			if handlerErr == nil {
@@ -1077,18 +1061,9 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 		token, tokenErr := h.packStateToken(state, schema)
 		if tokenErr != nil {
 			err = tokenErr
-		} else {
-			stateMeta := arrow.NewMetadata(
-				[]string{MetaStreamState}, []string{string(token)})
-			zeroBatch := emptyBatch(schema)
-			batchWithMeta := array.NewRecordBatchWithMetadata(
-				schema, zeroBatch.Columns(), zeroBatch.NumRows(), stateMeta)
-			if werr := writer.Write(batchWithMeta); werr != nil {
-				h.logIPCWriteErr("state-token-batch", info.Name, werr)
-				err = werr
-			}
-			batchWithMeta.Release()
-			zeroBatch.Release()
+		} else if werr := writeStateTokenBatch(writer, schema, token); werr != nil {
+			h.logIPCWriteErr("state-token-batch", info.Name, werr)
+			err = werr
 		}
 	}
 	if cerr := writer.Close(); cerr != nil {

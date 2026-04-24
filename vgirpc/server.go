@@ -111,6 +111,20 @@ func (s *Server) SetDebugErrors(enabled bool) {
 	s.debugErrors = enabled
 }
 
+// drainInputStream reads and discards any batches remaining on the input
+// IPC stream so the underlying transport is left clean for the next
+// request. Safe to call in error paths before any batches have been read.
+func drainInputStream(r io.Reader) {
+	inputReader, err := ipc.NewReader(r)
+	if err != nil {
+		return
+	}
+	for inputReader.Next() {
+		// discard
+	}
+	inputReader.Release()
+}
+
 // logIPCWriteErr reports a non-nil error encountered while writing an Arrow
 // IPC stream on the serve-loop transport (stdio/pipe/unix socket). The writer
 // is the live transport, so errors here indicate real I/O failures — either
@@ -612,12 +626,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 
 		// Drain the client's input (ticks / exchange batches).
 		// The client writes before reading, so this won't deadlock.
-		if inputReader, err := ipc.NewReader(r); err == nil {
-			for inputReader.Next() {
-				// discard
-			}
-			inputReader.Release()
-		}
+		drainInputStream(r)
 		return callErr, nil
 	}
 
@@ -640,11 +649,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				Message: fmt.Sprintf("dynamic stream state %T does not implement ProducerState or ExchangeState", state),
 			}
 			s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
-			if inputReader, err := ipc.NewReader(r); err == nil {
-				for inputReader.Next() {
-				}
-				inputReader.Release()
-			}
+			drainInputStream(r)
 			return stateErr, nil
 		}
 	} else {
@@ -656,11 +661,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					Message: fmt.Sprintf("stream state %T does not implement ProducerState", state),
 				}
 				s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
-				if inputReader, err := ipc.NewReader(r); err == nil {
-					for inputReader.Next() {
-					}
-					inputReader.Release()
-				}
+				drainInputStream(r)
 				return stateErr, nil
 			}
 		} else {
@@ -670,11 +671,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					Message: fmt.Sprintf("stream state %T does not implement ExchangeState", state),
 				}
 				s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
-				if inputReader, err := ipc.NewReader(r); err == nil {
-					for inputReader.Next() {
-					}
-					inputReader.Release()
-				}
+				drainInputStream(r)
 				return stateErr, nil
 			}
 		}
