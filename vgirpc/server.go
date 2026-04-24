@@ -522,16 +522,10 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 		// Write error response with logs in a single IPC stream
 		ipcW := ipc.NewWriter(w, ipc.WithSchema(info.ResultSchema))
 		for _, logMsg := range logs {
-			if err := writeLogBatch(ipcW, info.ResultSchema, logMsg, s.serverID, req.RequestID); err != nil {
-				slog.Error("failed to write log batch", "err", err)
-			}
+			s.logIPCWriteErr("log-batch", req.Method, writeLogBatch(ipcW, info.ResultSchema, logMsg, s.serverID, req.RequestID))
 		}
-		if err := writeErrorBatch(ipcW, info.ResultSchema, callErr, s.serverID, req.RequestID, s.debugErrors); err != nil {
-			slog.Error("failed to write error batch", "err", err)
-		}
-		if err := ipcW.Close(); err != nil {
-			slog.Error("failed to close IPC writer", "err", err)
-		}
+		s.logIPCWriteErr("error-batch", req.Method, writeErrorBatch(ipcW, info.ResultSchema, callErr, s.serverID, req.RequestID, s.debugErrors))
+		s.logIPCWriteErr("close", req.Method, ipcW.Close())
 		return callErr, nil
 	}
 
@@ -614,13 +608,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		if outputSchema == nil {
 			outputSchema = arrow.NewSchema(nil, nil)
 		}
-		outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
-		if err := writeErrorBatch(outputWriter, outputSchema, callErr, s.serverID, req.RequestID, s.debugErrors); err != nil {
-			slog.Error("failed to write error batch", "err", err)
-		}
-		if err := outputWriter.Close(); err != nil {
-			slog.Error("failed to close output writer", "err", err)
-		}
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, callErr, s.serverID, req.RequestID, s.debugErrors))
 
 		// Drain the client's input (ticks / exchange batches).
 		// The client writes before reading, so this won't deadlock.
@@ -651,9 +639,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				Type:    "RuntimeError",
 				Message: fmt.Sprintf("dynamic stream state %T does not implement ProducerState or ExchangeState", state),
 			}
-			outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
-			s.logIPCWriteErr("error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
-			s.logIPCWriteErr("close", req.Method, outputWriter.Close())
+			s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
 			if inputReader, err := ipc.NewReader(r); err == nil {
 				for inputReader.Next() {
 				}
@@ -669,9 +655,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					Type:    "RuntimeError",
 					Message: fmt.Sprintf("stream state %T does not implement ProducerState", state),
 				}
-				outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
-				s.logIPCWriteErr("error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
-				s.logIPCWriteErr("close", req.Method, outputWriter.Close())
+				s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
 				if inputReader, err := ipc.NewReader(r); err == nil {
 					for inputReader.Next() {
 					}
@@ -685,9 +669,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					Type:    "RuntimeError",
 					Message: fmt.Sprintf("stream state %T does not implement ExchangeState", state),
 				}
-				outputWriter := ipc.NewWriter(w, ipc.WithSchema(outputSchema))
-				s.logIPCWriteErr("error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
-				s.logIPCWriteErr("close", req.Method, outputWriter.Close())
+				s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
 				if inputReader, err := ipc.NewReader(r); err == nil {
 					for inputReader.Next() {
 					}
@@ -725,9 +707,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 	// Write any buffered init logs
 	initLogs := callCtx.drainLogs()
 	for _, logMsg := range initLogs {
-		if err := writeLogBatch(outputWriter, outputSchema, logMsg, s.serverID, req.RequestID); err != nil {
-			slog.Error("failed to write init log batch", "err", err)
-		}
+		s.logIPCWriteErr("init-log-batch", req.Method, writeLogBatch(outputWriter, outputSchema, logMsg, s.serverID, req.RequestID))
 	}
 
 	// Determine input schema for casting (exchange methods only)
@@ -809,9 +789,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			castBatch, castErr := castRecordBatch(inputBatch, inputSchema)
 			if castErr != nil {
 				streamErr = castErr
-				if writeErr := writeErrorBatch(outputWriter, outputSchema, castErr, s.serverID, req.RequestID, s.debugErrors); writeErr != nil {
-					slog.Error("failed to write cast error batch", "err", writeErr)
-				}
+				s.logIPCWriteErr("cast-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, castErr, s.serverID, req.RequestID, s.debugErrors))
 				break
 			}
 			defer castBatch.Release()
@@ -863,10 +841,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		}()
 
 		if streamErr != nil {
-			// Write error batch to output stream
-			if err := writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.debugErrors); err != nil {
-				slog.Error("failed to write stream error batch", "err", err)
-			}
+			s.logIPCWriteErr("stream-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.debugErrors))
 			break
 		}
 
@@ -874,9 +849,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		if !out.Finished() {
 			if err := out.validate(); err != nil {
 				streamErr = err
-				if writeErr := writeErrorBatch(outputWriter, outputSchema, err, s.serverID, req.RequestID, s.debugErrors); writeErr != nil {
-					slog.Error("failed to write validation error batch", "err", writeErr)
-				}
+				s.logIPCWriteErr("validate-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, err, s.serverID, req.RequestID, s.debugErrors))
 				break
 			}
 		}
@@ -928,9 +901,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 	}
 
 	// Close output writer (sends EOS)
-	if err := outputWriter.Close(); err != nil {
-		slog.Error("failed to close output writer", "err", err)
-	}
+	s.logIPCWriteErr("close", req.Method, outputWriter.Close())
 
 	// Drain remaining input so transport is clean for next request
 	for inputReader.Next() {

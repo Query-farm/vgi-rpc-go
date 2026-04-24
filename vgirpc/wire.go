@@ -237,9 +237,12 @@ func WriteErrorResponse(w io.Writer, schema *arrow.Schema, err error, serverID, 
 
 func writeErrorResponse(w io.Writer, schema *arrow.Schema, err error, serverID, requestID string, debug bool) error {
 	writer := ipc.NewWriter(w, ipc.WithSchema(schema))
-	defer writer.Close()
-
-	return writeErrorBatch(writer, schema, err, serverID, requestID, debug)
+	writeErr := writeErrorBatch(writer, schema, err, serverID, requestID, debug)
+	closeErr := writer.Close()
+	if writeErr != nil {
+		return writeErr
+	}
+	return closeErr
 }
 
 // castRecordBatch casts an input batch to the target schema when the schemas

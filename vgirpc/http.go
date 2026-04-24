@@ -1554,9 +1554,7 @@ func (h *HttpServer) writeHttpError(w http.ResponseWriter, statusCode int, err e
 		schema = arrow.NewSchema(nil, nil)
 	}
 	var buf bytes.Buffer
-	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-	h.logIPCWriteErr("error-batch", "", writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
-	h.logIPCWriteErr("close", "", writer.Close())
+	h.logIPCWriteErr("error-response", "", writeErrorResponse(&buf, schema, err, h.server.serverID, "", h.server.debugErrors))
 	h.writeArrow(w, statusCode, buf.Bytes())
 }
 
