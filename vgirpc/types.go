@@ -34,9 +34,10 @@ type tagInfo struct {
 	Name      string
 	Default   *string // nil if no default
 	ArrowType string  // explicit type override: "int32", "float32", "enum", "binary"
+	Nullable  bool    // force nullable for non-pointer primitive fields
 }
 
-// parseTag parses a vgirpc struct tag like "name", "name,default=foo", "name,enum", "name,int32".
+// parseTag parses a vgirpc struct tag like "name", "name,default=foo", "name,enum", "name,int32", "name,nullable".
 func parseTag(tag string) tagInfo {
 	parts := strings.Split(tag, ",")
 	info := tagInfo{Name: parts[0]}
@@ -44,6 +45,8 @@ func parseTag(tag string) tagInfo {
 		if strings.HasPrefix(part, "default=") {
 			val := strings.TrimPrefix(part, "default=")
 			info.Default = &val
+		} else if part == "nullable" {
+			info.Nullable = true
 		} else {
 			info.ArrowType = part
 		}
@@ -54,7 +57,7 @@ func parseTag(tag string) tagInfo {
 // goTypeToArrowType maps a Go reflect.Type to an Arrow DataType.
 // The tag provides additional type hints (e.g., "enum", "int32", "binary").
 func goTypeToArrowType(t reflect.Type, tag tagInfo) (arrow.DataType, bool, error) {
-	nullable := false
+	nullable := tag.Nullable
 
 	// Handle pointer types (optional/nullable)
 	if t.Kind() == reflect.Ptr {
