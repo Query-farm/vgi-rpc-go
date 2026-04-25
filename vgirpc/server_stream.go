@@ -161,6 +161,11 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 
 	slog.Debug("stream: entering lockstep loop", "method", info.Name)
 	for {
+		// Honor context cancellation (e.g. shutdown) between iterations.
+		if err := ctx.Err(); err != nil {
+			slog.Debug("stream: context cancelled", "method", info.Name, "err", err)
+			break
+		}
 		// Read one input batch (tick for producer, real data for exchange)
 		slog.Debug("stream: waiting for input batch", "method", info.Name)
 		if !inputReader.Next() {

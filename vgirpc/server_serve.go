@@ -50,8 +50,15 @@ func (s *Server) Serve(r io.Reader, w io.Writer) {
 }
 
 // ServeWithContext runs the server loop on the given reader/writer pair with a context.
+// Returns when the context is cancelled, the transport returns io.EOF, or a fatal
+// transport error occurs. A blocking read on r cannot be interrupted by ctx alone —
+// callers wanting prompt shutdown should also close r (or its underlying file
+// descriptor) when cancelling the context.
 func (s *Server) ServeWithContext(ctx context.Context, r io.Reader, w io.Writer) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
 		err := s.serveOne(ctx, r, w)
 		if err != nil {
 			if err == io.EOF {

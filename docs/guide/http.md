@@ -56,6 +56,34 @@ State tokens have a configurable time-to-live. Use `SetTokenTTL` to adjust:
 httpServer.SetTokenTTL(30 * time.Minute)
 ```
 
+## Graceful Shutdown
+
+`HttpServer` is an `http.Handler`, so the standard library's `http.Server.Shutdown(ctx)` is the right primitive. It stops accepting new connections and cancels the context of in-flight handlers; vgi-rpc's streaming handlers check the context between produce iterations and exit cleanly when it's cancelled.
+
+```go
+srv := &http.Server{Addr: ":8080", Handler: httpServer}
+
+go func() {
+    if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+        log.Fatal(err)
+    }
+}()
+
+// Wait for SIGINT / SIGTERM
+sigCh := make(chan os.Signal, 1)
+signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+<-sigCh
+
+// Give in-flight streams up to 30s to finish.
+shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+if err := srv.Shutdown(shutdownCtx); err != nil {
+    log.Printf("shutdown: %v", err)
+}
+```
+
+A long-running producer that ignores its context will not exit until the shutdown deadline expires, at which point the connection is closed and the goroutine is left running until it returns. Handlers that loop independently of vgi-rpc's produce loop should observe `ctx.Done()` themselves.
+
 ## Full Example
 
 ```go
