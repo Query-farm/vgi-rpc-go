@@ -11,6 +11,7 @@ import (
 	"reflect"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
 
@@ -98,12 +99,14 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 
 	// Maybe externalize large result batch
 	if s.externalConfig != nil {
-		extBatch, _, extErr := MaybeExternalizeBatch(resultBatch, arrow.Metadata{}, s.externalConfig)
+		extBatch, extMeta, extErr := MaybeExternalizeBatch(resultBatch, arrow.Metadata{}, s.externalConfig)
 		if extErr != nil {
 			slog.Error("failed to externalize result batch", "err", extErr)
 		} else if extBatch != resultBatch {
+			withMeta := array.NewRecordBatchWithMetadata(extBatch.Schema(), extBatch.Columns(), extBatch.NumRows(), extMeta)
 			resultBatch.Release()
-			resultBatch = extBatch
+			extBatch.Release()
+			resultBatch = withMeta
 		}
 	}
 

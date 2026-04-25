@@ -81,6 +81,30 @@ def conformance_http_auth_port() -> Iterator[int]:
     yield from _start_http_worker("--http-auth")
 
 
+@pytest.fixture(scope="session")
+def conformance_fake_storage() -> Iterator[str]:
+    """Run the Python fake-storage WSGI app in a background thread."""
+    from vgi_rpc.conformance.fake_storage import serve_in_thread
+
+    base_url, shutdown = serve_in_thread()
+    try:
+        yield base_url
+    finally:
+        shutdown()
+
+
+@pytest.fixture(scope="session")
+def conformance_http_with_storage_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Go HTTP worker configured to externalize large batches via fake storage."""
+    yield from _start_http_worker("--http-with-storage", conformance_fake_storage)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Go HTTP worker with externalization + zstd compression enabled."""
+    yield from _start_http_worker("--http-with-zstd-storage", conformance_fake_storage)
+
+
 def _short_unix_path(name: str) -> str:
     """Return a short /tmp path for a Unix domain socket (macOS 104-byte limit)."""
     fd, path = tempfile.mkstemp(prefix=f"vgi-go-{name}-", suffix=".sock", dir="/tmp")

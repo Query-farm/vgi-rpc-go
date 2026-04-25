@@ -8,12 +8,100 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/decimal128"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
+
+// epochUTC is the Unix epoch interpreted as UTC; used to derive Arrow
+// date32 / time64 / timestamp values from Go time.Time.
+var epochUTC = time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+
+// asTime converts value to a time.Time, accepting either a plain time.Time
+// or a named type whose underlying type is time.Time (so handlers can
+// declare a typed alias that implements AnnotatedReturn).
+func asTime(value any) (time.Time, bool) {
+	if t, ok := value.(time.Time); ok {
+		return t, true
+	}
+	rv := reflect.ValueOf(value)
+	if rv.IsValid() && rv.Type().ConvertibleTo(timeType) {
+		return rv.Convert(timeType).Interface().(time.Time), true
+	}
+	return time.Time{}, false
+}
+
+// asDuration is the time.Duration analogue of asTime.
+func asDuration(value any) (time.Duration, bool) {
+	if d, ok := value.(time.Duration); ok {
+		return d, true
+	}
+	rv := reflect.ValueOf(value)
+	if rv.IsValid() && rv.Type().ConvertibleTo(durationType) {
+		return rv.Convert(durationType).Interface().(time.Duration), true
+	}
+	return 0, false
+}
+
+// asString accepts a plain string, a named string type, or anything with a
+// String() method.
+func asString(value any) (string, bool) {
+	if s, ok := value.(string); ok {
+		return s, true
+	}
+	rv := reflect.ValueOf(value)
+	if rv.IsValid() && rv.Kind() == reflect.String {
+		return rv.String(), true
+	}
+	if s, ok := value.(fmt.Stringer); ok {
+		return s.String(), true
+	}
+	return "", false
+}
+
+// asBytes accepts a []byte or a named slice-of-byte type.
+func asBytes(value any) ([]byte, bool) {
+	if b, ok := value.([]byte); ok {
+		return b, true
+	}
+	rv := reflect.ValueOf(value)
+	if rv.IsValid() && rv.Kind() == reflect.Slice && rv.Type().Elem().Kind() == reflect.Uint8 {
+		return rv.Bytes(), true
+	}
+	return nil, false
+}
+
+// daysSinceEpoch returns the number of full UTC days between t and the
+// Unix epoch — the Arrow date32 wire encoding.
+func daysSinceEpoch(t time.Time) int32 {
+	return int32(t.UTC().Sub(epochUTC) / (24 * time.Hour))
+}
+
+// microsSinceMidnight returns the wall-clock microsecond offset of t
+// within its date — the Arrow time64[us] wire encoding.
+func microsSinceMidnight(t time.Time) int64 {
+	t = t.UTC()
+	h, m, s := t.Clock()
+	return int64(h)*3_600_000_000 + int64(m)*60_000_000 + int64(s)*1_000_000 + int64(t.Nanosecond()/1000)
+}
+
+// decimalFromValue accepts a string-shaped Decimal value and converts it to
+// a decimal128.Num at the given scale.
+func decimalFromValue(value any, dt *arrow.Decimal128Type) (decimal128.Num, error) {
+	s, ok := asString(value)
+	if !ok {
+		return decimal128.Num{}, fmt.Errorf("expected string for decimal, got %T", value)
+	}
+	n, err := decimal128.FromString(s, dt.Precision, dt.Scale)
+	if err != nil {
+		return decimal128.Num{}, fmt.Errorf("decimal128 parse %q: %w", s, err)
+	}
+	return n, nil
+}
 
 // serializeResult builds a 1-row record batch with a single "result" column.
 func serializeResult(schema *arrow.Schema, value any) (arrow.RecordBatch, error) {
@@ -156,6 +244,66 @@ func buildArray(mem memory.Allocator, dt arrow.DataType, value any) (arrow.Array
 		b.Append(int32(v))
 		return b.NewArray(), nil
 
+	case arrow.INT16:
+		b := array.NewInt16Builder(mem)
+		defer b.Release()
+		v, err := toInt64(value)
+		if err != nil {
+			return nil, err
+		}
+		b.Append(int16(v))
+		return b.NewArray(), nil
+
+	case arrow.INT8:
+		b := array.NewInt8Builder(mem)
+		defer b.Release()
+		v, err := toInt64(value)
+		if err != nil {
+			return nil, err
+		}
+		b.Append(int8(v))
+		return b.NewArray(), nil
+
+	case arrow.UINT64:
+		b := array.NewUint64Builder(mem)
+		defer b.Release()
+		v, err := toUint64(value)
+		if err != nil {
+			return nil, err
+		}
+		b.Append(v)
+		return b.NewArray(), nil
+
+	case arrow.UINT32:
+		b := array.NewUint32Builder(mem)
+		defer b.Release()
+		v, err := toUint64(value)
+		if err != nil {
+			return nil, err
+		}
+		b.Append(uint32(v))
+		return b.NewArray(), nil
+
+	case arrow.UINT16:
+		b := array.NewUint16Builder(mem)
+		defer b.Release()
+		v, err := toUint64(value)
+		if err != nil {
+			return nil, err
+		}
+		b.Append(uint16(v))
+		return b.NewArray(), nil
+
+	case arrow.UINT8:
+		b := array.NewUint8Builder(mem)
+		defer b.Release()
+		v, err := toUint64(value)
+		if err != nil {
+			return nil, err
+		}
+		b.Append(uint8(v))
+		return b.NewArray(), nil
+
 	case arrow.FLOAT64:
 		b := array.NewFloat64Builder(mem)
 		defer b.Release()
@@ -203,6 +351,92 @@ func buildArray(mem memory.Allocator, dt arrow.DataType, value any) (arrow.Array
 			}
 			b.Append(v)
 		}
+		return b.NewArray(), nil
+
+	case arrow.LARGE_BINARY:
+		b := array.NewBinaryBuilder(mem, arrow.BinaryTypes.LargeBinary)
+		defer b.Release()
+		v, ok := asBytes(value)
+		if !ok {
+			return nil, fmt.Errorf("expected []byte for LARGE_BINARY field, got %T", value)
+		}
+		b.Append(v)
+		return b.NewArray(), nil
+
+	case arrow.LARGE_STRING:
+		b := array.NewLargeStringBuilder(mem)
+		defer b.Release()
+		s, ok := asString(value)
+		if !ok {
+			s = fmt.Sprintf("%v", value)
+		}
+		b.Append(s)
+		return b.NewArray(), nil
+
+	case arrow.FIXED_SIZE_BINARY:
+		fsb := dt.(*arrow.FixedSizeBinaryType)
+		b := array.NewFixedSizeBinaryBuilder(mem, fsb)
+		defer b.Release()
+		v, ok := asBytes(value)
+		if !ok {
+			return nil, fmt.Errorf("expected []byte for FIXED_SIZE_BINARY, got %T", value)
+		}
+		if len(v) != fsb.ByteWidth {
+			return nil, fmt.Errorf("fixed_size_binary(%d) value has wrong length %d", fsb.ByteWidth, len(v))
+		}
+		b.Append(v)
+		return b.NewArray(), nil
+
+	case arrow.DATE32:
+		b := array.NewDate32Builder(mem)
+		defer b.Release()
+		t, ok := asTime(value)
+		if !ok {
+			return nil, fmt.Errorf("expected time.Time for DATE32, got %T", value)
+		}
+		b.Append(arrow.Date32(daysSinceEpoch(t)))
+		return b.NewArray(), nil
+
+	case arrow.TIMESTAMP:
+		ts := dt.(*arrow.TimestampType)
+		b := array.NewTimestampBuilder(mem, ts)
+		defer b.Release()
+		t, ok := asTime(value)
+		if !ok {
+			return nil, fmt.Errorf("expected time.Time for TIMESTAMP, got %T", value)
+		}
+		b.Append(arrow.Timestamp(t.UTC().UnixMicro()))
+		return b.NewArray(), nil
+
+	case arrow.TIME64:
+		b := array.NewTime64Builder(mem, &arrow.Time64Type{Unit: arrow.Microsecond})
+		defer b.Release()
+		t, ok := asTime(value)
+		if !ok {
+			return nil, fmt.Errorf("expected time.Time for TIME64, got %T", value)
+		}
+		b.Append(arrow.Time64(microsSinceMidnight(t)))
+		return b.NewArray(), nil
+
+	case arrow.DURATION:
+		b := array.NewDurationBuilder(mem, &arrow.DurationType{Unit: arrow.Microsecond})
+		defer b.Release()
+		d, ok := asDuration(value)
+		if !ok {
+			return nil, fmt.Errorf("expected time.Duration for DURATION, got %T", value)
+		}
+		b.Append(arrow.Duration(d.Microseconds()))
+		return b.NewArray(), nil
+
+	case arrow.DECIMAL128:
+		dec := dt.(*arrow.Decimal128Type)
+		b := array.NewDecimal128Builder(mem, dec)
+		defer b.Release()
+		n, err := decimalFromValue(value, dec)
+		if err != nil {
+			return nil, err
+		}
+		b.Append(n)
 		return b.NewArray(), nil
 
 	case arrow.LIST:
@@ -334,6 +568,42 @@ func appendToBuilder(b array.Builder, dt arrow.DataType, value any) error {
 			return err
 		}
 		b.(*array.Int32Builder).Append(int32(v))
+	case arrow.INT16:
+		v, err := toInt64(value)
+		if err != nil {
+			return err
+		}
+		b.(*array.Int16Builder).Append(int16(v))
+	case arrow.INT8:
+		v, err := toInt64(value)
+		if err != nil {
+			return err
+		}
+		b.(*array.Int8Builder).Append(int8(v))
+	case arrow.UINT64:
+		v, err := toUint64(value)
+		if err != nil {
+			return err
+		}
+		b.(*array.Uint64Builder).Append(v)
+	case arrow.UINT32:
+		v, err := toUint64(value)
+		if err != nil {
+			return err
+		}
+		b.(*array.Uint32Builder).Append(uint32(v))
+	case arrow.UINT16:
+		v, err := toUint64(value)
+		if err != nil {
+			return err
+		}
+		b.(*array.Uint16Builder).Append(uint16(v))
+	case arrow.UINT8:
+		v, err := toUint64(value)
+		if err != nil {
+			return err
+		}
+		b.(*array.Uint8Builder).Append(uint8(v))
 	case arrow.FLOAT64:
 		v, err := toFloat64(value)
 		if err != nil {
@@ -358,6 +628,55 @@ func appendToBuilder(b array.Builder, dt arrow.DataType, value any) error {
 		} else {
 			b.(*array.BinaryBuilder).Append(value.([]byte))
 		}
+	case arrow.LARGE_BINARY:
+		v, ok := asBytes(value)
+		if !ok {
+			return fmt.Errorf("expected []byte for LARGE_BINARY, got %T", value)
+		}
+		b.(*array.BinaryBuilder).Append(v)
+	case arrow.LARGE_STRING:
+		s, ok := asString(value)
+		if !ok {
+			s = fmt.Sprintf("%v", value)
+		}
+		b.(*array.LargeStringBuilder).Append(s)
+	case arrow.FIXED_SIZE_BINARY:
+		v, ok := asBytes(value)
+		if !ok {
+			return fmt.Errorf("expected []byte for FIXED_SIZE_BINARY, got %T", value)
+		}
+		b.(*array.FixedSizeBinaryBuilder).Append(v)
+	case arrow.DATE32:
+		t, ok := asTime(value)
+		if !ok {
+			return fmt.Errorf("expected time.Time for DATE32, got %T", value)
+		}
+		b.(*array.Date32Builder).Append(arrow.Date32(daysSinceEpoch(t)))
+	case arrow.TIMESTAMP:
+		t, ok := asTime(value)
+		if !ok {
+			return fmt.Errorf("expected time.Time for TIMESTAMP, got %T", value)
+		}
+		b.(*array.TimestampBuilder).Append(arrow.Timestamp(t.UTC().UnixMicro()))
+	case arrow.TIME64:
+		t, ok := asTime(value)
+		if !ok {
+			return fmt.Errorf("expected time.Time for TIME64, got %T", value)
+		}
+		b.(*array.Time64Builder).Append(arrow.Time64(microsSinceMidnight(t)))
+	case arrow.DURATION:
+		d, ok := asDuration(value)
+		if !ok {
+			return fmt.Errorf("expected time.Duration for DURATION, got %T", value)
+		}
+		b.(*array.DurationBuilder).Append(arrow.Duration(d.Microseconds()))
+	case arrow.DECIMAL128:
+		dec := dt.(*arrow.Decimal128Type)
+		n, err := decimalFromValue(value, dec)
+		if err != nil {
+			return err
+		}
+		b.(*array.Decimal128Builder).Append(n)
 	case arrow.LIST:
 		lb := b.(*array.ListBuilder)
 		lb.Append(true)

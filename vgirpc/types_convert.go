@@ -19,8 +19,45 @@ func toInt64(v any) (int64, error) {
 		return int64(val), nil
 	case int8:
 		return int64(val), nil
+	case uint64:
+		return int64(val), nil
+	case uint:
+		return int64(val), nil
+	case uint32:
+		return int64(val), nil
+	case uint16:
+		return int64(val), nil
+	case uint8:
+		return int64(val), nil
 	default:
 		return 0, fmt.Errorf("cannot convert %T to int64", v)
+	}
+}
+
+func toUint64(v any) (uint64, error) {
+	switch val := v.(type) {
+	case uint64:
+		return val, nil
+	case uint:
+		return uint64(val), nil
+	case uint32:
+		return uint64(val), nil
+	case uint16:
+		return uint64(val), nil
+	case uint8:
+		return uint64(val), nil
+	case int64:
+		return uint64(val), nil
+	case int:
+		return uint64(val), nil
+	case int32:
+		return uint64(val), nil
+	case int16:
+		return uint64(val), nil
+	case int8:
+		return uint64(val), nil
+	default:
+		return 0, fmt.Errorf("cannot convert %T to uint64", v)
 	}
 }
 

@@ -36,7 +36,24 @@ func main() {
 	conformance.RegisterMethods(server)
 
 	authMode := len(os.Args) > 1 && os.Args[1] == "--http-auth"
-	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode {
+	storageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-storage"
+	zstdStorageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-zstd-storage"
+	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode || storageMode || zstdStorageMode {
+		// Configure external location when in storage modes. The fake
+		// storage URL is the second argument.
+		if storageMode || zstdStorageMode {
+			if len(os.Args) < 3 {
+				fmt.Fprintf(os.Stderr, "missing storage URL argument\n")
+				os.Exit(1)
+			}
+			cfg := vgirpc.DefaultExternalLocationConfig(conformance.NewFakeStorage(os.Args[2]))
+			cfg.URLValidator = conformance.AllowAllValidator
+			cfg.ExternalizeThresholdBytes = 8 * 1024 // 8 KiB so the test thresholds line up
+			if zstdStorageMode {
+				cfg.Compression = &vgirpc.Compression{Algorithm: "zstd", Level: 3}
+			}
+			server.SetExternalLocation(cfg)
+		}
 		// Parse optional --otel-export flag
 		var otelExportPath string
 		for i := 2; i < len(os.Args)-1; i++ {

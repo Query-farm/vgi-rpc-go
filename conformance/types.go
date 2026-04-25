@@ -5,9 +5,193 @@ package conformance
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 )
+
+// --- Annotated result types for echo handlers that return wide Arrow types.
+// Each type implements vgirpc.AnnotatedReturn so the registered method's
+// result column carries the right Arrow data type.
+
+// DateResult is a date32-typed return value.
+type DateResult time.Time
+
+func (DateResult) VgirpcArrowResult() arrow.DataType { return arrow.FixedWidthTypes.Date32 }
+
+// TimestampResult is a naive microsecond timestamp.
+type TimestampResult time.Time
+
+func (TimestampResult) VgirpcArrowResult() arrow.DataType {
+	return &arrow.TimestampType{Unit: arrow.Microsecond}
+}
+
+// TimestampUTCResult is a UTC-tagged microsecond timestamp.
+type TimestampUTCResult time.Time
+
+func (TimestampUTCResult) VgirpcArrowResult() arrow.DataType {
+	return &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+}
+
+// TimeResult is a microsecond time-of-day value.
+type TimeResult time.Time
+
+func (TimeResult) VgirpcArrowResult() arrow.DataType { return arrow.FixedWidthTypes.Time64us }
+
+// DurationResult is a microsecond-resolution duration.
+type DurationResult time.Duration
+
+func (DurationResult) VgirpcArrowResult() arrow.DataType {
+	return arrow.FixedWidthTypes.Duration_us
+}
+
+// DecimalResult carries a decimal128(20, 4) value as its string form.
+type DecimalResult string
+
+func (DecimalResult) VgirpcArrowResult() arrow.DataType {
+	return &arrow.Decimal128Type{Precision: 20, Scale: 4}
+}
+
+// LargeStringResult round-trips as a large_utf8 column.
+type LargeStringResult string
+
+func (LargeStringResult) VgirpcArrowResult() arrow.DataType {
+	return arrow.BinaryTypes.LargeString
+}
+
+// LargeBinaryResult round-trips as a large_binary column.
+type LargeBinaryResult []byte
+
+func (LargeBinaryResult) VgirpcArrowResult() arrow.DataType {
+	return arrow.BinaryTypes.LargeBinary
+}
+
+// FixedBinary8Result round-trips as fixed_size_binary(8).
+type FixedBinary8Result []byte
+
+func (FixedBinary8Result) VgirpcArrowResult() arrow.DataType {
+	return &arrow.FixedSizeBinaryType{ByteWidth: 8}
+}
+
+// DictEncodedStringResult round-trips as dictionary<int16, utf8>.
+type DictEncodedStringResult string
+
+func (DictEncodedStringResult) VgirpcArrowResult() arrow.DataType {
+	return &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int16,
+		ValueType: arrow.BinaryTypes.String,
+	}
+}
+
+// --- Wide-type dataclasses mirroring the Python conformance protocol.
+
+// WideTypes exercises the full breadth of Arrow primitive widths.
+type WideTypes struct {
+	Int8Field         int64         `arrow:"int8_field"`
+	Int16Field        int64         `arrow:"int16_field"`
+	Int32Field        int64         `arrow:"int32_field"`
+	Uint8Field        uint64        `arrow:"uint8_field"`
+	Uint16Field       uint64        `arrow:"uint16_field"`
+	Uint32Field       uint64        `arrow:"uint32_field"`
+	Uint64Field       uint64        `arrow:"uint64_field"`
+	Float32Field      float64       `arrow:"float32_field"`
+	DateField         time.Time     `arrow:"date_field"`
+	TimestampField    time.Time     `arrow:"timestamp_field"`
+	TimestampUtcField time.Time     `arrow:"timestamp_utc_field"`
+	TimeField         time.Time     `arrow:"time_field"`
+	DurationField     time.Duration `arrow:"duration_field"`
+	DecimalField      string        `arrow:"decimal_field"`
+	LargeStringField  string        `arrow:"large_string_field"`
+	LargeBinaryField  []byte        `arrow:"large_binary_field"`
+	FixedBinaryField  []byte        `arrow:"fixed_binary_field"`
+}
+
+func (WideTypes) ArrowSchema() *arrow.Schema {
+	dec := &arrow.Decimal128Type{Precision: 20, Scale: 4}
+	return arrow.NewSchema([]arrow.Field{
+		{Name: "int8_field", Type: arrow.PrimitiveTypes.Int8},
+		{Name: "int16_field", Type: arrow.PrimitiveTypes.Int16},
+		{Name: "int32_field", Type: arrow.PrimitiveTypes.Int32},
+		{Name: "uint8_field", Type: arrow.PrimitiveTypes.Uint8},
+		{Name: "uint16_field", Type: arrow.PrimitiveTypes.Uint16},
+		{Name: "uint32_field", Type: arrow.PrimitiveTypes.Uint32},
+		{Name: "uint64_field", Type: arrow.PrimitiveTypes.Uint64},
+		{Name: "float32_field", Type: arrow.PrimitiveTypes.Float32},
+		{Name: "date_field", Type: arrow.FixedWidthTypes.Date32},
+		{Name: "timestamp_field", Type: &arrow.TimestampType{Unit: arrow.Microsecond}},
+		{Name: "timestamp_utc_field", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
+		{Name: "time_field", Type: arrow.FixedWidthTypes.Time64us},
+		{Name: "duration_field", Type: arrow.FixedWidthTypes.Duration_us},
+		{Name: "decimal_field", Type: dec},
+		{Name: "large_string_field", Type: arrow.BinaryTypes.LargeString},
+		{Name: "large_binary_field", Type: arrow.BinaryTypes.LargeBinary},
+		{Name: "fixed_binary_field", Type: &arrow.FixedSizeBinaryType{ByteWidth: 8}},
+	}, nil)
+}
+
+// ContainerWideTypes exercises wide types nested in list/dict/optional positions.
+type ContainerWideTypes struct {
+	ListDecimal       []string          `arrow:"list_decimal"`
+	ListDate          []time.Time       `arrow:"list_date"`
+	ListTimestamp     []time.Time       `arrow:"list_timestamp"`
+	OptionalDate      *time.Time        `arrow:"optional_date"`
+	OptionalDecimal   *string           `arrow:"optional_decimal"`
+	OptionalTimestamp *time.Time        `arrow:"optional_timestamp"`
+	DictStrDecimal    map[string]string `arrow:"dict_str_decimal"`
+	FrozensetInt      []int64           `arrow:"frozenset_int"`
+	ListOptionalInt   []*int64          `arrow:"list_optional_int"`
+}
+
+func (ContainerWideTypes) ArrowSchema() *arrow.Schema {
+	dec := &arrow.Decimal128Type{Precision: 20, Scale: 4}
+	tsNaive := &arrow.TimestampType{Unit: arrow.Microsecond}
+	return arrow.NewSchema([]arrow.Field{
+		{Name: "list_decimal", Type: arrow.ListOf(dec)},
+		{Name: "list_date", Type: arrow.ListOf(arrow.FixedWidthTypes.Date32)},
+		{Name: "list_timestamp", Type: arrow.ListOf(tsNaive)},
+		{Name: "optional_date", Type: arrow.FixedWidthTypes.Date32, Nullable: true},
+		{Name: "optional_decimal", Type: dec, Nullable: true},
+		{Name: "optional_timestamp", Type: tsNaive, Nullable: true},
+		{Name: "dict_str_decimal", Type: arrow.MapOf(arrow.BinaryTypes.String, dec)},
+		{Name: "frozenset_int", Type: arrow.ListOf(arrow.PrimitiveTypes.Int64)},
+		{Name: "list_optional_int", Type: arrow.ListOf(arrow.PrimitiveTypes.Int64)},
+	}, nil)
+}
+
+// DeepNested exercises multi-level nesting and dictionary-encoded strings.
+type DeepNested struct {
+	ListOfListsDecimal []([]string) `arrow:"list_of_lists_decimal"`
+	OptionalListDate   *[]time.Time `arrow:"optional_list_date"`
+	DictEncodedString  string       `arrow:"dict_encoded_string"`
+	ListOfDictEncoded  []string     `arrow:"list_of_dict_encoded"`
+}
+
+func (DeepNested) ArrowSchema() *arrow.Schema {
+	dec := &arrow.Decimal128Type{Precision: 20, Scale: 4}
+	dict := &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int16,
+		ValueType: arrow.BinaryTypes.String,
+	}
+	return arrow.NewSchema([]arrow.Field{
+		{Name: "list_of_lists_decimal", Type: arrow.ListOf(arrow.ListOf(dec))},
+		{Name: "optional_list_date", Type: arrow.ListOf(arrow.FixedWidthTypes.Date32), Nullable: true},
+		{Name: "dict_encoded_string", Type: dict},
+		{Name: "list_of_dict_encoded", Type: arrow.ListOf(dict)},
+	}, nil)
+}
+
+// EmbeddedArrow carries an Arrow RecordBatch and Schema as nested IPC bytes.
+type EmbeddedArrow struct {
+	Batch  []byte `arrow:"batch"`
+	Schema []byte `arrow:"schema"`
+}
+
+func (EmbeddedArrow) ArrowSchema() *arrow.Schema {
+	return arrow.NewSchema([]arrow.Field{
+		{Name: "batch", Type: arrow.BinaryTypes.Binary},
+		{Name: "schema", Type: arrow.BinaryTypes.Binary},
+	}, nil)
+}
 
 // Status is a string-backed enum matching the Python Status enum.
 type Status string

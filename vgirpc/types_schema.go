@@ -6,6 +6,7 @@ package vgirpc
 import (
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -21,6 +22,16 @@ type ArrowSerializable interface {
 
 // arrowSerializableType is used to check interface implementation at reflect time.
 var arrowSerializableType = reflect.TypeOf((*ArrowSerializable)(nil)).Elem()
+
+// AnnotatedReturn is an optional interface a unary method's return type can
+// implement to declare the Arrow data type its result column should carry.
+// Use it for wide types (decimal, date32, large_string, etc.) where the Go
+// type alone is not enough to choose the right Arrow primitive.
+type AnnotatedReturn interface {
+	VgirpcArrowResult() arrow.DataType
+}
+
+var annotatedReturnType = reflect.TypeOf((*AnnotatedReturn)(nil)).Elem()
 
 // tagInfo holds parsed information from a `vgirpc` struct tag.
 type tagInfo struct {
@@ -60,17 +71,54 @@ func goTypeToArrowType(t reflect.Type, tag tagInfo) (arrow.DataType, bool, error
 
 	// Check for explicit tag overrides
 	switch tag.ArrowType {
+	case "int8":
+		return arrow.PrimitiveTypes.Int8, nullable, nil
+	case "int16":
+		return arrow.PrimitiveTypes.Int16, nullable, nil
 	case "int32":
 		return arrow.PrimitiveTypes.Int32, nullable, nil
+	case "uint8":
+		return arrow.PrimitiveTypes.Uint8, nullable, nil
+	case "uint16":
+		return arrow.PrimitiveTypes.Uint16, nullable, nil
+	case "uint32":
+		return arrow.PrimitiveTypes.Uint32, nullable, nil
+	case "uint64":
+		return arrow.PrimitiveTypes.Uint64, nullable, nil
 	case "float32":
 		return arrow.PrimitiveTypes.Float32, nullable, nil
-	case "enum":
+	case "enum", "dict_string":
 		return &arrow.DictionaryType{
 			IndexType: arrow.PrimitiveTypes.Int16,
 			ValueType: arrow.BinaryTypes.String,
 		}, nullable, nil
 	case "binary":
 		return arrow.BinaryTypes.Binary, nullable, nil
+	case "large_string":
+		return arrow.BinaryTypes.LargeString, nullable, nil
+	case "large_binary":
+		return arrow.BinaryTypes.LargeBinary, nullable, nil
+	case "date":
+		return arrow.FixedWidthTypes.Date32, nullable, nil
+	case "timestamp":
+		return &arrow.TimestampType{Unit: arrow.Microsecond}, nullable, nil
+	case "timestamp_utc":
+		return &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}, nullable, nil
+	case "time":
+		return arrow.FixedWidthTypes.Time64us, nullable, nil
+	case "duration":
+		return arrow.FixedWidthTypes.Duration_us, nullable, nil
+	case "decimal":
+		// decimal128(20, 4) — matches the conformance protocol.
+		return &arrow.Decimal128Type{Precision: 20, Scale: 4}, nullable, nil
+	}
+	if strings.HasPrefix(tag.ArrowType, "fixed_binary[") && strings.HasSuffix(tag.ArrowType, "]") {
+		inner := tag.ArrowType[len("fixed_binary[") : len(tag.ArrowType)-1]
+		width, err := strconv.Atoi(inner)
+		if err != nil || width <= 0 {
+			return nil, false, fmt.Errorf("invalid fixed_binary tag %q", tag.ArrowType)
+		}
+		return &arrow.FixedSizeBinaryType{ByteWidth: width}, nullable, nil
 	}
 
 	// Check if the type implements ArrowSerializable
@@ -86,6 +134,18 @@ func goTypeToArrowType(t reflect.Type, tag tagInfo) (arrow.DataType, bool, error
 		return arrow.PrimitiveTypes.Int64, nullable, nil
 	case reflect.Int32:
 		return arrow.PrimitiveTypes.Int32, nullable, nil
+	case reflect.Int16:
+		return arrow.PrimitiveTypes.Int16, nullable, nil
+	case reflect.Int8:
+		return arrow.PrimitiveTypes.Int8, nullable, nil
+	case reflect.Uint64, reflect.Uint:
+		return arrow.PrimitiveTypes.Uint64, nullable, nil
+	case reflect.Uint32:
+		return arrow.PrimitiveTypes.Uint32, nullable, nil
+	case reflect.Uint16:
+		return arrow.PrimitiveTypes.Uint16, nullable, nil
+	case reflect.Uint8:
+		return arrow.PrimitiveTypes.Uint8, nullable, nil
 	case reflect.Float64:
 		return arrow.PrimitiveTypes.Float64, nullable, nil
 	case reflect.Float32:
@@ -152,6 +212,16 @@ func structToSchema(t reflect.Type) (*arrow.Schema, error) {
 func resultSchema(t reflect.Type) (*arrow.Schema, error) {
 	if t == nil {
 		return arrow.NewSchema(nil, nil), nil
+	}
+
+	// AnnotatedReturn lets a return type declare its own Arrow column type.
+	// Take precedence over the default inference so wide types (decimal,
+	// date, large_string, etc.) emit the right column.
+	if t.Implements(annotatedReturnType) || reflect.PointerTo(t).Implements(annotatedReturnType) {
+		zero := reflect.New(t).Elem().Interface().(AnnotatedReturn)
+		return arrow.NewSchema([]arrow.Field{
+			{Name: "result", Type: zero.VgirpcArrowResult(), Nullable: false},
+		}, nil), nil
 	}
 
 	// Check if it implements ArrowSerializable — result is binary

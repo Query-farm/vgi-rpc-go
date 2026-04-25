@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/Query-farm/vgi-rpc/vgirpc"
 	"github.com/apache/arrow-go/v18/arrow"
@@ -69,6 +70,66 @@ type echoInt32Params struct {
 type echoFloat32Params struct {
 	Value float64 `vgirpc:"value,float32"`
 }
+type echoInt8Params struct {
+	Value int64 `vgirpc:"value,int8"`
+}
+type echoInt16Params struct {
+	Value int64 `vgirpc:"value,int16"`
+}
+type echoUint8Params struct {
+	Value uint64 `vgirpc:"value,uint8"`
+}
+type echoUint16Params struct {
+	Value uint64 `vgirpc:"value,uint16"`
+}
+type echoUint32Params struct {
+	Value uint64 `vgirpc:"value,uint32"`
+}
+type echoUint64Params struct {
+	Value uint64 `vgirpc:"value,uint64"`
+}
+type echoDateParams struct {
+	Value time.Time `vgirpc:"value,date"`
+}
+type echoTimestampParams struct {
+	Value time.Time `vgirpc:"value,timestamp"`
+}
+type echoTimestampUtcParams struct {
+	Value time.Time `vgirpc:"value,timestamp_utc"`
+}
+type echoTimeParams struct {
+	Value time.Time `vgirpc:"value,time"`
+}
+type echoDurationParams struct {
+	Value time.Duration `vgirpc:"value,duration"`
+}
+type echoDecimalParams struct {
+	Value string `vgirpc:"value,decimal"`
+}
+type echoLargeStringParams struct {
+	Value string `vgirpc:"value,large_string"`
+}
+type echoLargeBinaryParams struct {
+	Value []byte `vgirpc:"value,large_binary"`
+}
+type echoFixedBinaryParams struct {
+	Value []byte `vgirpc:"value,fixed_binary[8]"`
+}
+type echoDictEncodedStringParams struct {
+	Value string `vgirpc:"value,dict_string"`
+}
+type echoWideTypesParams struct {
+	Data WideTypes `vgirpc:"data,binary"`
+}
+type echoContainerWideTypesParams struct {
+	Data ContainerWideTypes `vgirpc:"data,binary"`
+}
+type echoDeepNestedParams struct {
+	Data DeepNested `vgirpc:"data,binary"`
+}
+type echoEmbeddedArrowParams struct {
+	Data EmbeddedArrow `vgirpc:"data,binary"`
+}
 type addFloatsParams struct {
 	A float64 `vgirpc:"a"`
 	B float64 `vgirpc:"b"`
@@ -124,6 +185,26 @@ func RegisterMethods(server *vgirpc.Server) {
 	// Annotated types
 	vgirpc.Unary(server, "echo_int32", echoInt32)
 	vgirpc.Unary(server, "echo_float32", echoFloat32)
+	vgirpc.Unary(server, "echo_int8", echoInt8)
+	vgirpc.Unary(server, "echo_int16", echoInt16)
+	vgirpc.Unary(server, "echo_uint8", echoUint8)
+	vgirpc.Unary(server, "echo_uint16", echoUint16)
+	vgirpc.Unary(server, "echo_uint32", echoUint32)
+	vgirpc.Unary(server, "echo_uint64", echoUint64)
+	vgirpc.Unary(server, "echo_date", echoDate)
+	vgirpc.Unary(server, "echo_timestamp", echoTimestamp)
+	vgirpc.Unary(server, "echo_timestamp_utc", echoTimestampUtc)
+	vgirpc.Unary(server, "echo_time", echoTime)
+	vgirpc.Unary(server, "echo_duration", echoDuration)
+	vgirpc.Unary(server, "echo_decimal", echoDecimal)
+	vgirpc.Unary(server, "echo_large_string", echoLargeString)
+	vgirpc.Unary(server, "echo_large_binary", echoLargeBinary)
+	vgirpc.Unary(server, "echo_fixed_binary", echoFixedBinary)
+	vgirpc.Unary(server, "echo_dict_encoded_string", echoDictEncodedString)
+	vgirpc.Unary(server, "echo_wide_types", echoWideTypes)
+	vgirpc.Unary(server, "echo_container_wide_types", echoContainerWideTypes)
+	vgirpc.Unary(server, "echo_deep_nested", echoDeepNested)
+	vgirpc.Unary(server, "echo_embedded_arrow", echoEmbeddedArrow)
 
 	// Multi-param & defaults
 	vgirpc.Unary(server, "add_floats", addFloats)
@@ -138,6 +219,7 @@ func RegisterMethods(server *vgirpc.Server) {
 	// Client-directed logging
 	vgirpc.Unary(server, "echo_with_info_log", echoWithInfoLog)
 	vgirpc.Unary(server, "echo_with_multi_logs", echoWithMultiLogs)
+	vgirpc.Unary(server, "echo_with_all_log_levels", echoWithAllLogLevels)
 	vgirpc.Unary(server, "echo_with_log_extras", echoWithLogExtras)
 
 	// Producer streams
@@ -337,6 +419,66 @@ func echoInt32(_ context.Context, ctx *vgirpc.CallContext, p echoInt32Params) (i
 func echoFloat32(_ context.Context, ctx *vgirpc.CallContext, p echoFloat32Params) (float64, error) {
 	return p.Value, nil
 }
+func echoInt8(_ context.Context, ctx *vgirpc.CallContext, p echoInt8Params) (int64, error) {
+	return p.Value, nil
+}
+func echoInt16(_ context.Context, ctx *vgirpc.CallContext, p echoInt16Params) (int64, error) {
+	return p.Value, nil
+}
+func echoUint8(_ context.Context, ctx *vgirpc.CallContext, p echoUint8Params) (uint64, error) {
+	return p.Value, nil
+}
+func echoUint16(_ context.Context, ctx *vgirpc.CallContext, p echoUint16Params) (uint64, error) {
+	return p.Value, nil
+}
+func echoUint32(_ context.Context, ctx *vgirpc.CallContext, p echoUint32Params) (uint64, error) {
+	return p.Value, nil
+}
+func echoUint64(_ context.Context, ctx *vgirpc.CallContext, p echoUint64Params) (uint64, error) {
+	return p.Value, nil
+}
+func echoDate(_ context.Context, ctx *vgirpc.CallContext, p echoDateParams) (DateResult, error) {
+	return DateResult(p.Value), nil
+}
+func echoTimestamp(_ context.Context, ctx *vgirpc.CallContext, p echoTimestampParams) (TimestampResult, error) {
+	return TimestampResult(p.Value), nil
+}
+func echoTimestampUtc(_ context.Context, ctx *vgirpc.CallContext, p echoTimestampUtcParams) (TimestampUTCResult, error) {
+	return TimestampUTCResult(p.Value), nil
+}
+func echoTime(_ context.Context, ctx *vgirpc.CallContext, p echoTimeParams) (TimeResult, error) {
+	return TimeResult(p.Value), nil
+}
+func echoDuration(_ context.Context, ctx *vgirpc.CallContext, p echoDurationParams) (DurationResult, error) {
+	return DurationResult(p.Value), nil
+}
+func echoDecimal(_ context.Context, ctx *vgirpc.CallContext, p echoDecimalParams) (DecimalResult, error) {
+	return DecimalResult(p.Value), nil
+}
+func echoLargeString(_ context.Context, ctx *vgirpc.CallContext, p echoLargeStringParams) (LargeStringResult, error) {
+	return LargeStringResult(p.Value), nil
+}
+func echoLargeBinary(_ context.Context, ctx *vgirpc.CallContext, p echoLargeBinaryParams) (LargeBinaryResult, error) {
+	return LargeBinaryResult(p.Value), nil
+}
+func echoFixedBinary(_ context.Context, ctx *vgirpc.CallContext, p echoFixedBinaryParams) (FixedBinary8Result, error) {
+	return FixedBinary8Result(p.Value), nil
+}
+func echoDictEncodedString(_ context.Context, ctx *vgirpc.CallContext, p echoDictEncodedStringParams) (DictEncodedStringResult, error) {
+	return DictEncodedStringResult(p.Value), nil
+}
+func echoWideTypes(_ context.Context, ctx *vgirpc.CallContext, p echoWideTypesParams) (WideTypes, error) {
+	return p.Data, nil
+}
+func echoContainerWideTypes(_ context.Context, ctx *vgirpc.CallContext, p echoContainerWideTypesParams) (ContainerWideTypes, error) {
+	return p.Data, nil
+}
+func echoDeepNested(_ context.Context, ctx *vgirpc.CallContext, p echoDeepNestedParams) (DeepNested, error) {
+	return p.Data, nil
+}
+func echoEmbeddedArrow(_ context.Context, ctx *vgirpc.CallContext, p echoEmbeddedArrowParams) (EmbeddedArrow, error) {
+	return p.Data, nil
+}
 
 // --- Multi-param & defaults ---
 
@@ -380,6 +522,14 @@ func echoWithLogExtras(_ context.Context, ctx *vgirpc.CallContext, p echoWithLog
 		vgirpc.KV{Key: "source", Value: "conformance"},
 		vgirpc.KV{Key: "detail", Value: p.Value},
 	)
+	return p.Value, nil
+}
+func echoWithAllLogLevels(_ context.Context, ctx *vgirpc.CallContext, p echoWithLogParams) (string, error) {
+	ctx.ClientLog(vgirpc.LogTrace, fmt.Sprintf("trace: %s", p.Value))
+	ctx.ClientLog(vgirpc.LogDebug, fmt.Sprintf("debug: %s", p.Value))
+	ctx.ClientLog(vgirpc.LogInfo, fmt.Sprintf("info: %s", p.Value))
+	ctx.ClientLog(vgirpc.LogWarn, fmt.Sprintf("warn: %s", p.Value))
+	ctx.ClientLog(vgirpc.LogError, fmt.Sprintf("error: %s", p.Value))
 	return p.Value, nil
 }
 

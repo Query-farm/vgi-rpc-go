@@ -9,11 +9,56 @@ import (
 	"log/slog"
 	"reflect"
 	"strconv"
+	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
+
+var timeType = reflect.TypeOf(time.Time{})
+var durationType = reflect.TypeOf(time.Duration(0))
+
+// timestampToTime converts an Arrow timestamp value (interpreted in the unit
+// declared by ts) into a time.Time. The result is in UTC if ts.TimeZone is
+// non-empty, otherwise it is also UTC but the caller's interpretation may
+// treat it as naive.
+func timestampToTime(v int64, ts *arrow.TimestampType) time.Time {
+	var d time.Duration
+	switch ts.Unit {
+	case arrow.Second:
+		d = time.Duration(v) * time.Second
+	case arrow.Millisecond:
+		d = time.Duration(v) * time.Millisecond
+	case arrow.Microsecond:
+		d = time.Duration(v) * time.Microsecond
+	case arrow.Nanosecond:
+		d = time.Duration(v)
+	}
+	return time.Unix(0, 0).UTC().Add(d)
+}
+
+func setTimeField(field reflect.Value, fieldType reflect.Type, isPtr bool, val time.Time) {
+	v := reflect.ValueOf(val)
+	if isPtr {
+		ptr := reflect.New(fieldType)
+		ptr.Elem().Set(v)
+		field.Set(ptr)
+	} else {
+		field.Set(v)
+	}
+}
+
+func setDurationField(field reflect.Value, fieldType reflect.Type, isPtr bool, val time.Duration) {
+	v := reflect.ValueOf(val)
+	if isPtr {
+		ptr := reflect.New(fieldType)
+		ptr.Elem().Set(v)
+		field.Set(ptr)
+	} else {
+		field.Set(v)
+	}
+}
 
 // deserializeParams reads row 0 from a record batch into a Go struct.
 func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Value, error) {
@@ -153,10 +198,24 @@ func setFieldFromArrow(field reflect.Value, fieldType reflect.Type, col arrow.Ar
 	switch c := col.(type) {
 	case *array.String:
 		setStringField(field, fieldType, isPtr, c.Value(idx))
+	case *array.LargeString:
+		setStringField(field, fieldType, isPtr, c.Value(idx))
 	case *array.Int64:
 		setIntField(field, fieldType, isPtr, c.Value(idx))
 	case *array.Int32:
 		setIntField(field, fieldType, isPtr, int64(c.Value(idx)))
+	case *array.Int16:
+		setIntField(field, fieldType, isPtr, int64(c.Value(idx)))
+	case *array.Int8:
+		setIntField(field, fieldType, isPtr, int64(c.Value(idx)))
+	case *array.Uint64:
+		setUintField(field, fieldType, isPtr, c.Value(idx))
+	case *array.Uint32:
+		setUintField(field, fieldType, isPtr, uint64(c.Value(idx)))
+	case *array.Uint16:
+		setUintField(field, fieldType, isPtr, uint64(c.Value(idx)))
+	case *array.Uint8:
+		setUintField(field, fieldType, isPtr, uint64(c.Value(idx)))
 	case *array.Float64:
 		setFloatField(field, fieldType, isPtr, c.Value(idx))
 	case *array.Float32:
@@ -181,6 +240,35 @@ func setFieldFromArrow(field reflect.Value, fieldType reflect.Type, col arrow.Ar
 		} else {
 			field.SetBytes(c.Value(idx))
 		}
+	case *array.FixedSizeBinary:
+		if isPtr {
+			v := c.Value(idx)
+			ptr := reflect.New(fieldType)
+			ptr.Elem().SetBytes(v)
+			field.Set(ptr)
+		} else {
+			field.SetBytes(c.Value(idx))
+		}
+	case *array.Date32:
+		t := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).AddDate(0, 0, int(c.Value(idx)))
+		setTimeField(field, fieldType, isPtr, t)
+	case *array.Timestamp:
+		ts := c.DataType().(*arrow.TimestampType)
+		t := timestampToTime(int64(c.Value(idx)), ts)
+		setTimeField(field, fieldType, isPtr, t)
+	case *array.Time64:
+		// Microseconds since midnight; we represent as a time.Time on a fixed
+		// epoch so the wall-clock components round-trip.
+		us := int64(c.Value(idx))
+		t := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC).Add(time.Duration(us) * time.Microsecond)
+		setTimeField(field, fieldType, isPtr, t)
+	case *array.Duration:
+		d := time.Duration(c.Value(idx)) * time.Microsecond
+		setDurationField(field, fieldType, isPtr, d)
+	case *array.Decimal128:
+		dt := c.DataType().(*arrow.Decimal128Type)
+		s := c.Value(idx).ToString(dt.Scale)
+		setStringField(field, fieldType, isPtr, s)
 	case *array.List:
 		return setListField(field, fieldType, isPtr, c, idx, info)
 	case *array.Map:
@@ -209,6 +297,12 @@ func setStringField(field reflect.Value, fieldType reflect.Type, isPtr bool, val
 }
 
 func setIntField(field reflect.Value, fieldType reflect.Type, isPtr bool, val int64) {
+	// If the destination field is unsigned, route through SetUint so the
+	// reflection package doesn't panic on signed-to-unsigned mismatch.
+	if isUintKind(fieldType.Kind()) {
+		setUintField(field, fieldType, isPtr, uint64(val))
+		return
+	}
 	if isPtr {
 		ptr := reflect.New(fieldType)
 		ptr.Elem().SetInt(val)
@@ -216,6 +310,36 @@ func setIntField(field reflect.Value, fieldType reflect.Type, isPtr bool, val in
 	} else {
 		field.SetInt(val)
 	}
+}
+
+func setUintField(field reflect.Value, fieldType reflect.Type, isPtr bool, val uint64) {
+	// If the destination field is signed, fall back to SetInt (used when an
+	// unsigned Arrow column is read into a Go int field).
+	if !isUintKind(fieldType.Kind()) {
+		if isPtr {
+			ptr := reflect.New(fieldType)
+			ptr.Elem().SetInt(int64(val))
+			field.Set(ptr)
+		} else {
+			field.SetInt(int64(val))
+		}
+		return
+	}
+	if isPtr {
+		ptr := reflect.New(fieldType)
+		ptr.Elem().SetUint(val)
+		field.Set(ptr)
+	} else {
+		field.SetUint(val)
+	}
+}
+
+func isUintKind(k reflect.Kind) bool {
+	switch k {
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return true
+	}
+	return false
 }
 
 func setFloatField(field reflect.Value, fieldType reflect.Type, isPtr bool, val float64) {
@@ -247,7 +371,13 @@ func setListField(field reflect.Value, fieldType reflect.Type, isPtr bool, listA
 	slice := reflect.MakeSlice(fieldType, length, length)
 	for j := 0; j < length; j++ {
 		elemField := slice.Index(j)
-		if err := setFieldFromArrow(elemField, fieldType.Elem(), values, int(start)+j, tagInfo{}); err != nil {
+		elemIdx := int(start) + j
+		if values.IsNull(elemIdx) {
+			// Leave the slice slot as its zero value (nil for pointer
+			// element types, zero for value types).
+			continue
+		}
+		if err := setFieldFromArrow(elemField, fieldType.Elem(), values, elemIdx, tagInfo{}); err != nil {
 			return fmt.Errorf("list element [%d]: %w", j, err)
 		}
 	}

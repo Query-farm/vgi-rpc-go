@@ -6,9 +6,12 @@ package vgirpc
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"reflect"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
 
@@ -160,6 +163,21 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resultBatch.Release()
+
+	// Externalize the result batch if it exceeds the configured threshold.
+	if h.server.externalConfig != nil {
+		extBatch, extMeta, extErr := MaybeExternalizeBatch(resultBatch, arrow.Metadata{}, h.server.externalConfig)
+		if extErr != nil {
+			slog.Error("failed to externalize unary result", "method", info.Name, "err", extErr)
+		} else if extBatch != resultBatch {
+			// Wrap the pointer batch with the location metadata so the
+			// IPC writer surfaces it on the wire.
+			withMeta := array.NewRecordBatchWithMetadata(extBatch.Schema(), extBatch.Columns(), extBatch.NumRows(), extMeta)
+			resultBatch.Release()
+			extBatch.Release()
+			resultBatch = withMeta
+		}
+	}
 
 	// Record output stats
 	stats.RecordOutput(resultBatch.NumRows(), batchBufferSize(resultBatch))
