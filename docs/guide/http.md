@@ -56,6 +56,21 @@ State tokens have a configurable time-to-live. Use `SetTokenTTL` to adjust:
 httpServer.SetTokenTTL(30 * time.Minute)
 ```
 
+## Concurrency Limits
+
+`HttpServer` does not cap the number of concurrent streams or connections. A long-running producer holds an HTTP connection open until it finishes (or the batch limit is reached), so an unbounded client population combined with slow producers can pin batch buffers and connections.
+
+vgi-rpc deliberately delegates this concern to your reverse proxy or load balancer. Recommended controls:
+
+- **nginx**: `limit_conn` (per-IP or global), `limit_req` (request rate), `proxy_read_timeout` (cap producer duration).
+- **Envoy**: `circuit_breakers.max_connections` and `max_pending_requests` on the upstream cluster, `route.timeout` for per-request deadlines.
+- **HAProxy**: `maxconn` (frontend) and `rate-limit sessions`.
+- **AWS ALB / GCP HTTPS LB**: target group connection limits and idle timeouts.
+
+When stream methods may run for minutes, configure the proxy timeout accordingly, or use `SetProducerBatchLimit` to force the client to issue fresh `/exchange` requests inside the proxy's per-request timeout window.
+
+If you cannot place a proxy in front of the server, wrap `HttpServer` with a middleware `http.Handler` that maintains a `chan struct{}` semaphore and rejects new requests with `503 Service Unavailable` once the cap is reached.
+
 ## Graceful Shutdown
 
 `HttpServer` is an `http.Handler`, so the standard library's `http.Server.Shutdown(ctx)` is the right primitive. It stops accepting new connections and cancels the context of in-flight handlers; vgi-rpc's streaming handlers check the context between produce iterations and exit cleanly when it's cancelled.
