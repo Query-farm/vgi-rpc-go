@@ -131,7 +131,7 @@ func ReadRequest(r io.Reader) (*Request, error) {
 
 // emptyBatch creates a zero-row batch with the given schema.
 func emptyBatch(schema *arrow.Schema) arrow.RecordBatch {
-	mem := memory.NewGoAllocator()
+	mem := defaultAllocator()
 	cols := make([]arrow.Array, schema.NumFields())
 	for i, f := range schema.Fields() {
 		cols[i] = makeEmptyArray(mem, f.Type)
@@ -288,7 +288,7 @@ func castRecordBatch(batch arrow.RecordBatch, targetSchema *arrow.Schema) (arrow
 		}
 	}
 
-	ctx := compute.WithAllocator(context.Background(), memory.NewGoAllocator())
+	ctx := compute.WithAllocator(context.Background(), defaultAllocator())
 	cols := make([]arrow.Array, batch.NumCols())
 	for i := range batch.NumCols() {
 		srcCol := batch.Column(int(i))

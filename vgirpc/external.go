@@ -18,7 +18,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/klauspost/compress/zstd"
 )
 
@@ -150,7 +149,7 @@ func IsExternalLocationBatch(batch arrow.RecordBatch, meta arrow.Metadata) bool 
 // given schema and external location URL in metadata. If sha256Hex is
 // non-empty, it is included as MetaLocationSHA256 for integrity verification.
 func MakeExternalLocationBatch(schema *arrow.Schema, locationURL string, sha256Hex ...string) (arrow.RecordBatch, arrow.Metadata) {
-	mem := memory.NewGoAllocator()
+	mem := defaultAllocator()
 
 	// Build zero-row arrays for each field
 	cols := make([]arrow.Array, schema.NumFields())
@@ -623,4 +622,3 @@ func fetchSimple(client *http.Client, rawURL string, cfg *FetchConfig) ([]byte, 
 
 	return data, nil
 }
-

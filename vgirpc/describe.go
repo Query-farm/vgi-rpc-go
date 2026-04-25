@@ -13,7 +13,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
-	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
 // Describe schema field definitions matching Python introspect._DESCRIBE_FIELDS.
@@ -53,7 +52,7 @@ func serializeSchema(schema *arrow.Schema) []byte {
 
 // buildDescribeBatch builds the __describe__ response batch and metadata.
 func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
-	mem := memory.NewGoAllocator()
+	mem := defaultAllocator()
 
 	// Collect sorted method names
 	names := s.availableMethods()

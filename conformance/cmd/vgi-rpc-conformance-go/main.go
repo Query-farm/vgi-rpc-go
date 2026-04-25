@@ -23,6 +23,12 @@ import (
 )
 
 func main() {
+	defer func() {
+		if s := vgirpc.LeakCheckSummary(); s != "" {
+			fmt.Fprintln(os.Stderr, s)
+		}
+	}()
+
 	server := vgirpc.NewServer()
 	server.SetDebugErrors(true)
 	conformance.RegisterMethods(server)

@@ -17,7 +17,7 @@ import (
 
 // serializeResult builds a 1-row record batch with a single "result" column.
 func serializeResult(schema *arrow.Schema, value any) (arrow.RecordBatch, error) {
-	mem := memory.NewGoAllocator()
+	mem := defaultAllocator()
 
 	if schema.NumFields() == 0 {
 		return array.NewRecordBatch(schema, nil, 0), nil
@@ -71,7 +71,7 @@ func serializeVgirpcStruct(value any) ([]byte, error) {
 		return nil, err
 	}
 
-	mem := memory.NewGoAllocator()
+	mem := defaultAllocator()
 	cols := make([]arrow.Array, schema.NumFields())
 
 	fieldIdx := 0
@@ -426,7 +426,7 @@ func appendToBuilder(b array.Builder, dt arrow.DataType, value any) error {
 // serializeArrowSerializable converts an ArrowSerializable value to IPC stream bytes.
 func serializeArrowSerializable(as ArrowSerializable) ([]byte, error) {
 	schema := as.ArrowSchema()
-	mem := memory.NewGoAllocator()
+	mem := defaultAllocator()
 
 	// Use reflection to build a single-row batch from the struct
 	rv := reflect.ValueOf(as)

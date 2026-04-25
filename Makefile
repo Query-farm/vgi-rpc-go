@@ -8,7 +8,7 @@ export GO_CONFORMANCE_WORKER
 GOBIN := $(shell go env GOPATH)/bin
 COVDIR := $(CURDIR)/_covdata
 
-.PHONY: build lint test coverage docs clean
+.PHONY: build lint test coverage leakcheck docs clean
 
 # --- Build -----------------------------------------------------------------
 
@@ -49,6 +49,15 @@ coverage: conformance-worker-cover
 	GOCOVERDIR=$(COVDIR) $(PYTHON) -m pytest test_go_conformance.py -v
 	go tool covdata textfmt -i=$(COVDIR) -o=coverage-go.txt
 	@echo "Coverage written to coverage-go.txt"
+
+# --- Leak check ------------------------------------------------------------
+# Builds the conformance worker with -tags leakcheck so every internal
+# Arrow allocation routes through a single shared CheckedAllocator. The
+# worker prints LeakCheckSummary to stderr on exit; pytest captures it.
+
+leakcheck:
+	go build -tags leakcheck -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
+	$(PYTHON) -m pytest test_go_conformance.py -v -s 2>&1 | grep -E "vgirpc leakcheck|passed|failed" | tail -20
 
 # --- Docs ------------------------------------------------------------------
 

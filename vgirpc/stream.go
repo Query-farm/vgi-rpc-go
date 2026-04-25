@@ -134,7 +134,7 @@ func (o *OutputCollector) EmitArrays(arrays []arrow.Array, numRows int64) error 
 // EmitMap builds a 1-row RecordBatch from column name/value pairs using the
 // output schema and emits it. Values must be slices matching the schema types.
 func (o *OutputCollector) EmitMap(data map[string][]interface{}) error {
-	mem := memory.NewGoAllocator()
+	mem := defaultAllocator()
 	schema := o.schema
 	if o.ProcessSchema != nil {
 		schema = o.ProcessSchema
