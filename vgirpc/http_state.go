@@ -38,7 +38,23 @@ type stateTokenData struct {
 	SchemaIPC []byte // serialized output schema for dynamic methods; nil for static
 }
 
-func (h *HttpServer) packStateToken(state interface{}, outputSchema *arrow.Schema) ([]byte, error) {
+// stateSigningKey derives a per-principal HMAC key from the server's signing
+// key, binding state tokens to the authenticated caller. A token issued to one
+// principal will fail signature verification when presented by another, so a
+// copied token cannot be used across users. Anonymous callers share the empty
+// principal namespace.
+func (h *HttpServer) stateSigningKey(auth *AuthContext) []byte {
+	var principal string
+	if auth != nil {
+		principal = auth.Principal
+	}
+	mac := hmac.New(sha256.New, h.signingKey)
+	mac.Write([]byte("vgi-rpc-state-v1|"))
+	mac.Write([]byte(principal))
+	return mac.Sum(nil)
+}
+
+func (h *HttpServer) packStateToken(state interface{}, outputSchema *arrow.Schema, auth *AuthContext) ([]byte, error) {
 	data := stateTokenData{
 		CreatedAt: time.Now().Unix(),
 		State:     state,
@@ -53,7 +69,7 @@ func (h *HttpServer) packStateToken(state interface{}, outputSchema *arrow.Schem
 	}
 
 	payloadBytes := payload.Bytes()
-	mac := hmac.New(sha256.New, h.signingKey)
+	mac := hmac.New(sha256.New, h.stateSigningKey(auth))
 	mac.Write(payloadBytes)
 	sig := mac.Sum(nil)
 
@@ -63,7 +79,7 @@ func (h *HttpServer) packStateToken(state interface{}, outputSchema *arrow.Schem
 	return encoded, nil
 }
 
-func (h *HttpServer) unpackStateToken(token []byte) (*stateTokenData, error) {
+func (h *HttpServer) unpackStateToken(token []byte, auth *AuthContext) (*stateTokenData, error) {
 	raw, err := base64.StdEncoding.DecodeString(string(token))
 	if err != nil {
 		return nil, &RpcError{Type: "RuntimeError", Message: "Malformed state token"}
@@ -77,7 +93,7 @@ func (h *HttpServer) unpackStateToken(token []byte) (*stateTokenData, error) {
 	payloadBytes := token[:len(token)-hmacLen]
 	receivedSig := token[len(token)-hmacLen:]
 
-	mac := hmac.New(sha256.New, h.signingKey)
+	mac := hmac.New(sha256.New, h.stateSigningKey(auth))
 	mac.Write(payloadBytes)
 	expectedSig := mac.Sum(nil)
 

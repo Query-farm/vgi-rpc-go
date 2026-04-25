@@ -160,7 +160,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		handlerErr = err
 		if err == nil && !finished {
 			// Batch limit reached — append continuation token
-			token, tokenErr := h.packStateToken(state, outputSchema)
+			token, tokenErr := h.packStateToken(state, outputSchema, auth)
 			if tokenErr != nil {
 				handlerErr = tokenErr
 			} else if werr := writeStateTokenBatch(writer, outputSchema, token); werr != nil {
@@ -176,7 +176,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Exchange init — return state token (carry schema for dynamic methods)
-		token, err := h.packStateToken(state, outputSchema)
+		token, err := h.packStateToken(state, outputSchema, auth)
 		if err != nil {
 			h.writeHttpError(w, http.StatusInternalServerError, err, nil)
 			return
@@ -282,7 +282,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	tokenData, err := h.unpackStateToken(tokenBytes)
+	tokenData, err := h.unpackStateToken(tokenBytes, auth)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -396,7 +396,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies)
 	if err == nil && !finished {
 		// Batch limit reached — append continuation token
-		token, tokenErr := h.packStateToken(state, schema)
+		token, tokenErr := h.packStateToken(state, schema, auth)
 		if tokenErr != nil {
 			err = tokenErr
 		} else if werr := writeStateTokenBatch(writer, schema, token); werr != nil {
@@ -463,7 +463,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	}
 
 	// Serialize updated state into new token (carry schema for dynamic methods)
-	newToken, err := h.packStateToken(state, schema)
+	newToken, err := h.packStateToken(state, schema, auth)
 	if err != nil {
 		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
 		h.logIPCWriteErr("close", info.Name, writer.Close())
