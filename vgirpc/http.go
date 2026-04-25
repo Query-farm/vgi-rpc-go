@@ -122,6 +122,14 @@ func (h *HttpServer) SetProtocolName(name string) {
 	h.protocolName = name
 }
 
+// SetPrefix sets the URL path prefix under which RPC routes are mounted
+// (e.g. "/vgi"). The prefix must start with "/" or be empty. Must be called
+// before the server handles any request, since it rebuilds the route table.
+func (h *HttpServer) SetPrefix(prefix string) {
+	h.prefix = prefix
+	h.initRoutes()
+}
+
 // SetRepoURL sets a source repository URL shown on the landing and describe pages.
 func (h *HttpServer) SetRepoURL(url string) {
 	h.repoURL = url
@@ -185,6 +193,33 @@ func (h *HttpServer) initRoutes() {
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/exchange", h.prefix), h.handleStreamExchange)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}", h.prefix), h.handleUnary)
 	h.mux.HandleFunc(fmt.Sprintf("GET %s", wellKnownURL(h.prefix)), h.handleOAuthWellKnown)
+	// Health is registered at /health (root) regardless of the RPC prefix so
+	// load balancers don't need to know the application path layout. When a
+	// non-empty prefix is configured, also expose it at {prefix}/health for
+	// callers that scope all routes under one mount point.
+	h.mux.HandleFunc("GET /health", h.handleHealth)
+	if h.prefix != "" {
+		h.mux.HandleFunc(fmt.Sprintf("GET %s/health", h.prefix), h.handleHealth)
+	}
+}
+
+// handleHealth serves a JSON health probe at GET {prefix}/health. The endpoint
+// bypasses authentication so load balancers and orchestrators (Kubernetes,
+// AWS ALB, etc.) can verify liveness without holding credentials. The response
+// body has the shape {status, server_id, protocol}.
+func (h *HttpServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	protocol := h.protocolName
+	if protocol == "" {
+		protocol = h.server.serviceName
+	}
+	body := fmt.Sprintf(`{"status":"ok","server_id":%q,"protocol":%q}`,
+		h.server.serverID, protocol)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(body)); err != nil {
+		slog.Debug("http: response write failed", "err", err)
+	}
 }
 
 // handleOAuthWellKnown serves the OAuth Protected Resource Metadata document.

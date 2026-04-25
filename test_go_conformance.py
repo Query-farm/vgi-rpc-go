@@ -42,11 +42,10 @@ def _wait_for_http(port: int, timeout: float = 5.0) -> None:
     raise TimeoutError(f"HTTP server on port {port} did not start within {timeout}s")
 
 
-@pytest.fixture(scope="session")
-def go_http_port() -> Iterator[int]:
-    """Start Go conformance HTTP server."""
+def _start_http_worker(*extra_args: str) -> Iterator[int]:
+    """Spawn the Go HTTP conformance worker and yield its TCP port."""
     proc = subprocess.Popen(
-        [GO_WORKER, "--http"],
+        [GO_WORKER, *extra_args],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -62,6 +61,24 @@ def go_http_port() -> Iterator[int]:
     finally:
         proc.terminate()
         proc.wait(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def go_http_port() -> Iterator[int]:
+    """Start Go conformance HTTP server."""
+    yield from _start_http_worker("--http")
+
+
+# Aliases expected by upstream conformance suite (vgi_rpc.conformance._pytest_suite).
+@pytest.fixture(scope="session")
+def conformance_http_port(go_http_port: int) -> int:
+    return go_http_port
+
+
+@pytest.fixture(scope="session")
+def conformance_http_auth_port() -> Iterator[int]:
+    """Start a Go HTTP server that rejects every RPC call with 401."""
+    yield from _start_http_worker("--http-auth")
 
 
 def _short_unix_path(name: str) -> str:

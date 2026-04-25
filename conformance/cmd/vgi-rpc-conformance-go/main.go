@@ -31,9 +31,12 @@ func main() {
 
 	server := vgirpc.NewServer()
 	server.SetDebugErrors(true)
+	server.SetServiceName("ConformanceService")
+	server.SetServerID("conformance-go")
 	conformance.RegisterMethods(server)
 
-	if len(os.Args) > 1 && os.Args[1] == "--http" {
+	authMode := len(os.Args) > 1 && os.Args[1] == "--http-auth"
+	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode {
 		// Parse optional --otel-export flag
 		var otelExportPath string
 		for i := 2; i < len(os.Args)-1; i++ {
@@ -86,6 +89,12 @@ func main() {
 		}
 
 		httpServer := vgirpc.NewHttpServer(server)
+		if authMode {
+			httpServer.SetPrefix("/vgi")
+			httpServer.SetAuthenticate(func(*http.Request) (*vgirpc.AuthContext, error) {
+				return nil, &vgirpc.RpcError{Type: "ValueError", Message: "auth required"}
+			})
+		}
 		if err := httpServer.SetCompressionLevel(3); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to set compression level: %v\n", err)
 			os.Exit(1)
