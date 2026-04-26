@@ -36,6 +36,7 @@ type stateTokenData struct {
 	CreatedAt int64
 	State     interface{}
 	SchemaIPC []byte // serialized output schema for dynamic methods; nil for static
+	StreamID  string // 32-char lowercase hex; stable across init/continuations of one stream call
 }
 
 // stateSigningKey derives a per-principal HMAC key from the server's signing
@@ -54,10 +55,11 @@ func (h *HttpServer) stateSigningKey(auth *AuthContext) []byte {
 	return mac.Sum(nil)
 }
 
-func (h *HttpServer) packStateToken(state interface{}, outputSchema *arrow.Schema, auth *AuthContext) ([]byte, error) {
+func (h *HttpServer) packStateToken(state interface{}, outputSchema *arrow.Schema, auth *AuthContext, streamID string) ([]byte, error) {
 	data := stateTokenData{
 		CreatedAt: time.Now().Unix(),
 		State:     state,
+		StreamID:  streamID,
 	}
 	if outputSchema != nil {
 		data.SchemaIPC = serializeSchema(outputSchema)

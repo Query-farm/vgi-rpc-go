@@ -117,7 +117,7 @@ func (h *AccessLogHook) OnDispatchEnd(_ context.Context, token HookToken, info D
 		// see docs/porting-guide.md for the conformance gap.
 		streamID := info.StreamID
 		if streamID == "" {
-			streamID = randomStreamID()
+			streamID = RandomStreamID()
 		}
 		record["stream_id"] = streamID
 	}
@@ -177,10 +177,11 @@ func roundTo2Decimals(f float64) float64 {
 	return float64(int64(f*100-0.5)) / 100.0
 }
 
-// randomStreamID returns 32 lowercase hex characters from crypto/rand.
-// Used as a fallback stream_id when the dispatch path has not yet
-// plumbed a stable per-stream identifier through DispatchInfo.
-func randomStreamID() string {
+// RandomStreamID returns 32 lowercase hex characters from crypto/rand.
+// Use this to mint a stream_id at the start of a stream call; reuse
+// the same value across the init and every continuation record to
+// satisfy the spec's "stable across continuations" semantic.
+func RandomStreamID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		// crypto/rand.Read is documented as never returning an error in

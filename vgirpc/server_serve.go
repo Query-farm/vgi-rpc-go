@@ -115,7 +115,14 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		reqBytes = rb
 	}
 
-	// Build dispatch info and stats for hooks
+	// Build dispatch info and stats for hooks. For stream methods, mint a
+	// stable stream_id up front; pipe transport processes the entire stream
+	// lifetime within this one serveOne call, so a single ID covers init
+	// and all continuations.
+	var streamID string
+	if methodTypeString(info.Type) == DispatchMethodStream {
+		streamID = RandomStreamID()
+	}
 	dispatchInfo := DispatchInfo{
 		Method:            req.Method,
 		MethodType:        methodTypeString(info.Type),
@@ -125,6 +132,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		TransportMetadata: req.Metadata,
 		Auth:              Anonymous(),
 		RequestData:       reqBytes,
+		StreamID:          streamID,
 	}
 
 	var hookToken HookToken

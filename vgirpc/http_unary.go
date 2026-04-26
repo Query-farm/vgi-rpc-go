@@ -59,19 +59,53 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
 	}
-	defer req.Batch.Release()
+	defer func() { req.Batch.Release() }()
+
+	// If the client externalized the parameters via __upload_url__/init,
+	// the request batch is a zero-row pointer batch carrying
+	// vgi_rpc.location. Fetch the referenced IPC stream and replace the
+	// batch with the inner (real) batch. Dispatch metadata
+	// (vgi_rpc.method, vgi_rpc.request_version) is taken from the outer
+	// batch (req.Method already populated above).
+	if h.server.externalConfig != nil {
+		var outerMeta arrow.Metadata
+		if rb, ok := req.Batch.(arrow.RecordBatchWithMetadata); ok {
+			outerMeta = rb.Metadata()
+		}
+		if IsExternalLocationBatch(req.Batch, outerMeta) {
+			resolved, _, rerr := ResolveExternalLocation(req.Batch, outerMeta, h.server.externalConfig)
+			if rerr != nil {
+				h.writeHttpError(w, http.StatusBadRequest, &RpcError{
+					Type:    "ValueError",
+					Message: fmt.Sprintf("resolving external request: %v", rerr),
+				}, nil)
+				return
+			}
+			req.Batch.Release()
+			req.Batch = resolved
+		}
+	}
 
 	var handlerErr error
 	stats := &CallStatistics{}
+
+	// Capture self-contained IPC bytes of the request batch for the access log.
+	var reqBytes []byte
+	if rb, serErr := SerializeRequestBatch(req.Batch); serErr == nil {
+		reqBytes = rb
+	}
 
 	transportMeta := buildHTTPTransportMeta(req.Metadata, r)
 	dispatchInfo := DispatchInfo{
 		Method:            method,
 		MethodType:        DispatchMethodUnary,
 		ServerID:          h.server.serverID,
+		Protocol:          h.server.serviceName,
 		RequestID:         req.RequestID,
 		TransportMetadata: transportMeta,
 		Auth:              auth,
+		RemoteAddr:        r.RemoteAddr,
+		RequestData:       reqBytes,
 	}
 
 	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
