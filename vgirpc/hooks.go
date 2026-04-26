@@ -31,9 +31,15 @@ type DispatchInfo struct {
 	Method            string            // RPC method name
 	MethodType        string            // DispatchMethodUnary or DispatchMethodStream
 	ServerID          string            // Server identifier
+	Protocol          string            // Logical service / protocol name (server.SetServiceName)
 	RequestID         string            // Client-supplied request identifier
 	TransportMetadata map[string]string // Transport-level metadata (IPC custom metadata or HTTP headers)
 	Auth              *AuthContext      // Auth context for this dispatch; never nil
+	RemoteAddr        string            // HTTP transport: remote IP:port. Empty otherwise.
+	HTTPStatus        int               // HTTP transport: response status; 0 when not applicable.
+	RequestData       []byte            // Self-contained Arrow IPC stream of the request batch (unary + stream init only).
+	StreamID          string            // Stream lifecycle identifier (32-char lowercase hex); empty on unary.
+	Cancelled         bool              // True when a stream was cancelled by the client.
 }
 
 // CallStatistics holds per-call I/O counters matching the Python CallStatistics.

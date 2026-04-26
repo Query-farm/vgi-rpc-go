@@ -108,14 +108,23 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		return nil
 	}
 
+	// Capture self-contained IPC bytes of the request batch for observability hooks.
+	// Best-effort: a serialization failure here must not fail dispatch.
+	var reqBytes []byte
+	if rb, serErr := SerializeRequestBatch(req.Batch); serErr == nil {
+		reqBytes = rb
+	}
+
 	// Build dispatch info and stats for hooks
 	dispatchInfo := DispatchInfo{
 		Method:            req.Method,
 		MethodType:        methodTypeString(info.Type),
 		ServerID:          s.serverID,
+		Protocol:          s.serviceName,
 		RequestID:         req.RequestID,
 		TransportMetadata: req.Metadata,
 		Auth:              Anonymous(),
+		RequestData:       reqBytes,
 	}
 
 	var hookToken HookToken

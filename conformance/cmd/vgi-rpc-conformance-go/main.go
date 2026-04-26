@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/Query-farm/vgi-rpc/conformance"
@@ -35,32 +36,70 @@ func main() {
 	server.SetServerID("conformance-go")
 	conformance.RegisterMethods(server)
 
+	// Cross-language conformance: --access-log <path> may appear anywhere
+	// in os.Args. When present, install an AccessLogHook writing JSONL
+	// records to that path per docs/access-log-spec.md in the Python repo.
+	if accessLogPath := findFlagValue(os.Args, "--access-log"); accessLogPath != "" {
+		f, err := os.OpenFile(accessLogPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "failed to open --access-log file: %v\n", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		server.SetDispatchHook(vgirpc.NewAccessLogHook(f, "vgi-rpc-go-conformance"))
+	}
+
 	authMode := len(os.Args) > 1 && os.Args[1] == "--http-auth"
 	storageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-storage"
 	zstdStorageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-zstd-storage"
 	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode || storageMode || zstdStorageMode {
+		// Parse optional flags that may follow positional args:
+		//   --otel-export <path>
+		//   --externalize-threshold <bytes>   (overrides default 8 KiB in storage modes)
+		//   --max-request-bytes <bytes>       (overrides default 4 KiB inline request cap)
+		var otelExportPath string
+		externalizeThreshold := int64(-1) // -1 == not specified
+		maxRequestBytes := int64(-1)      // -1 == not specified
+		for i := 2; i < len(os.Args)-1; i++ {
+			switch os.Args[i] {
+			case "--otel-export":
+				otelExportPath = os.Args[i+1]
+			case "--externalize-threshold":
+				v, err := strconv.ParseInt(os.Args[i+1], 10, 64)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "invalid --externalize-threshold: %v\n", err)
+					os.Exit(1)
+				}
+				externalizeThreshold = v
+			case "--max-request-bytes":
+				v, err := strconv.ParseInt(os.Args[i+1], 10, 64)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "invalid --max-request-bytes: %v\n", err)
+					os.Exit(1)
+				}
+				maxRequestBytes = v
+			}
+		}
+
 		// Configure external location when in storage modes. The fake
 		// storage URL is the second argument.
+		var fakeStorage *conformance.FakeStorage
 		if storageMode || zstdStorageMode {
 			if len(os.Args) < 3 {
 				fmt.Fprintf(os.Stderr, "missing storage URL argument\n")
 				os.Exit(1)
 			}
-			cfg := vgirpc.DefaultExternalLocationConfig(conformance.NewFakeStorage(os.Args[2]))
+			fakeStorage = conformance.NewFakeStorage(os.Args[2])
+			cfg := vgirpc.DefaultExternalLocationConfig(fakeStorage)
 			cfg.URLValidator = conformance.AllowAllValidator
 			cfg.ExternalizeThresholdBytes = 8 * 1024 // 8 KiB so the test thresholds line up
+			if externalizeThreshold > 0 {
+				cfg.ExternalizeThresholdBytes = externalizeThreshold
+			}
 			if zstdStorageMode {
 				cfg.Compression = &vgirpc.Compression{Algorithm: "zstd", Level: 3}
 			}
 			server.SetExternalLocation(cfg)
-		}
-		// Parse optional --otel-export flag
-		var otelExportPath string
-		for i := 2; i < len(os.Args)-1; i++ {
-			if os.Args[i] == "--otel-export" {
-				otelExportPath = os.Args[i+1]
-				break
-			}
 		}
 
 		var otelFile *os.File
@@ -106,6 +145,19 @@ func main() {
 		}
 
 		httpServer := vgirpc.NewHttpServer(server)
+		// In storage modes the same fake-storage instance also acts as
+		// the upload-URL provider so client-vended request externalization
+		// works end-to-end. The 4 KiB request cap is small enough that the
+		// large-payload conformance tests trigger the 413 → upload flow.
+		if fakeStorage != nil {
+			httpServer.SetUploadURLProvider(fakeStorage)
+			reqCap := int64(4096)
+			if maxRequestBytes > 0 {
+				reqCap = maxRequestBytes
+			}
+			httpServer.SetMaxRequestBytes(reqCap)
+			httpServer.SetMaxUploadBytes(64 * 1024 * 1024)
+		}
 		if authMode {
 			httpServer.SetPrefix("/vgi")
 			httpServer.SetAuthenticate(func(*http.Request) (*vgirpc.AuthContext, error) {
@@ -187,4 +239,16 @@ func main() {
 	} else {
 		server.RunStdio()
 	}
+}
+
+// findFlagValue scans args for "--name <value>" and returns the value, or
+// "" if not found. Used so the --access-log flag can appear before or
+// after the transport-mode positional arg.
+func findFlagValue(args []string, name string) string {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == name {
+			return args[i+1]
+		}
+	}
+	return ""
 }
