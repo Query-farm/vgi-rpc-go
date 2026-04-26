@@ -5,30 +5,29 @@ package vgirpc
 
 import (
 	"bytes"
-	"encoding/json"
-	"log/slog"
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
-	"strconv"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
 
-// Describe schema field definitions matching Python introspect._DESCRIBE_FIELDS.
+// describeSchema mirrors Python's slim _DESCRIBE_FIELDS for DESCRIBE_VERSION 4.
+// Python-flavoured fields (doc, param_types_json, param_defaults_json,
+// param_docs_json) are not on the wire — the Arrow schema IPC bytes are the
+// authoritative type information; everything else is source-level metadata
+// that callers should consult the Protocol class for.
 var describeSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "name", Type: arrow.BinaryTypes.String},
 	{Name: "method_type", Type: arrow.BinaryTypes.String},
-	{Name: "doc", Type: arrow.BinaryTypes.String, Nullable: true},
 	{Name: "has_return", Type: &arrow.BooleanType{}},
 	{Name: "params_schema_ipc", Type: arrow.BinaryTypes.Binary},
 	{Name: "result_schema_ipc", Type: arrow.BinaryTypes.Binary},
-	{Name: "param_types_json", Type: arrow.BinaryTypes.String, Nullable: true},
-	{Name: "param_defaults_json", Type: arrow.BinaryTypes.String, Nullable: true},
 	{Name: "has_header", Type: &arrow.BooleanType{}},
 	{Name: "header_schema_ipc", Type: arrow.BinaryTypes.Binary, Nullable: true},
 	{Name: "is_exchange", Type: &arrow.BooleanType{}, Nullable: true},
-	{Name: "param_docs_json", Type: arrow.BinaryTypes.String, Nullable: true},
 }, nil)
 
 // Describe metadata keys used in __describe__ introspection responses.
@@ -38,8 +37,11 @@ const (
 	// MetaDescribeVersion carries the describe schema version for forwards
 	// compatibility.
 	MetaDescribeVersion = "vgi_rpc.describe_version"
+	// MetaProtocolHash carries a SHA-256 hex digest of the canonical describe
+	// payload — stable across processes/builds that expose the same Protocol.
+	MetaProtocolHash = "vgi_rpc.protocol_hash"
 	// DescribeVersion is the current describe schema version string.
-	DescribeVersion = "3"
+	DescribeVersion = "4"
 )
 
 // serializeSchema serializes an Arrow schema to IPC format bytes.
@@ -66,9 +68,6 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 	methodTypeBuilder := array.NewStringBuilder(mem)
 	defer methodTypeBuilder.Release()
 
-	docBuilder := array.NewStringBuilder(mem)
-	defer docBuilder.Release()
-
 	hasReturnBuilder := array.NewBooleanBuilder(mem)
 	defer hasReturnBuilder.Release()
 
@@ -77,12 +76,6 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 
 	resultSchemaBuilder := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
 	defer resultSchemaBuilder.Release()
-
-	paramTypesBuilder := array.NewStringBuilder(mem)
-	defer paramTypesBuilder.Release()
-
-	paramDefaultsBuilder := array.NewStringBuilder(mem)
-	defer paramDefaultsBuilder.Release()
 
 	hasHeaderBuilder := array.NewBooleanBuilder(mem)
 	defer hasHeaderBuilder.Release()
@@ -93,125 +86,109 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 	isExchangeBuilder := array.NewBooleanBuilder(mem)
 	defer isExchangeBuilder.Release()
 
-	paramDocsBuilder := array.NewStringBuilder(mem)
-	defer paramDocsBuilder.Release()
+	// Per-row metadata snapshots are also fed to the hash, in the same order.
+	methodTypeStrs := make([]string, 0, n)
+	hasReturns := make([]bool, 0, n)
+	hasHeaders := make([]bool, 0, n)
+	isExchanges := make([]int8, 0, n) // -1 == null, 0 == false, 1 == true
+	paramsSchemaIPC := make([][]byte, 0, n)
+	resultSchemaIPC := make([][]byte, 0, n)
+	headerSchemaIPC := make([][]byte, 0, n)
 
 	for _, name := range names {
 		info := s.methods[name]
 
 		nameBuilder.Append(name)
 
+		var methodTypeStr string
 		switch info.Type {
 		case MethodUnary:
-			methodTypeBuilder.Append("unary")
+			methodTypeStr = "unary"
 		case MethodProducer, MethodExchange, MethodDynamic:
-			methodTypeBuilder.Append("stream")
+			methodTypeStr = "stream"
 		}
+		methodTypeBuilder.Append(methodTypeStr)
+		methodTypeStrs = append(methodTypeStrs, methodTypeStr)
 
-		// Doc (nullable)
-		docBuilder.AppendNull()
+		hasReturn := info.Type == MethodUnary && info.ResultType != nil
+		hasReturnBuilder.Append(hasReturn)
+		hasReturns = append(hasReturns, hasReturn)
 
-		// has_return — true for valued unary methods, false for void/stream
-		hasReturnBuilder.Append(info.Type == MethodUnary && info.ResultType != nil)
+		paramsBytes := serializeSchema(info.ParamsSchema)
+		paramsSchemaBuilder.Append(paramsBytes)
+		paramsSchemaIPC = append(paramsSchemaIPC, paramsBytes)
 
-		// params_schema_ipc
-		paramsSchemaBuilder.Append(serializeSchema(info.ParamsSchema))
-
-		// result_schema_ipc — for streams, serialize the output schema
+		var resultBytes []byte
 		if info.OutputSchema != nil {
-			resultSchemaBuilder.Append(serializeSchema(info.OutputSchema))
+			resultBytes = serializeSchema(info.OutputSchema)
 		} else {
-			resultSchemaBuilder.Append(serializeSchema(info.ResultSchema))
+			resultBytes = serializeSchema(info.ResultSchema)
 		}
+		resultSchemaBuilder.Append(resultBytes)
+		resultSchemaIPC = append(resultSchemaIPC, resultBytes)
 
-		// param_types_json
-		if info.ParamsSchema.NumFields() > 0 {
-			paramTypes := make(map[string]string)
-			for i := range info.ParamsSchema.NumFields() {
-				f := info.ParamsSchema.Field(i)
-				paramTypes[f.Name] = arrowTypeToString(f.Type)
-			}
-			ptJSON, err := json.Marshal(paramTypes)
-			if err != nil {
-				slog.Error("failed to marshal param types JSON", "err", err)
-				paramTypesBuilder.AppendNull()
-			} else {
-				paramTypesBuilder.Append(string(ptJSON))
-			}
-		} else {
-			paramTypesBuilder.AppendNull()
-		}
-
-		// param_defaults_json — values must be native JSON types, not all strings
-		if len(info.ParamDefaults) > 0 {
-			typed := make(map[string]any, len(info.ParamDefaults))
-			for k, v := range info.ParamDefaults {
-				typed[k] = coerceDefaultValue(v, info.ParamsSchema, k)
-			}
-			pdJSON, err := json.Marshal(typed)
-			if err != nil {
-				slog.Error("failed to marshal param defaults JSON", "err", err)
-				paramDefaultsBuilder.AppendNull()
-			} else {
-				paramDefaultsBuilder.Append(string(pdJSON))
-			}
-		} else {
-			paramDefaultsBuilder.AppendNull()
-		}
-
-		// has_header
 		hasHeaderBuilder.Append(info.HasHeader)
+		hasHeaders = append(hasHeaders, info.HasHeader)
 
-		// header_schema_ipc
+		var headerBytes []byte
 		if info.HasHeader && info.HeaderSchema != nil {
-			headerSchemaBuilder.Append(serializeSchema(info.HeaderSchema))
+			headerBytes = serializeSchema(info.HeaderSchema)
+			headerSchemaBuilder.Append(headerBytes)
 		} else {
 			headerSchemaBuilder.AppendNull()
 		}
+		headerSchemaIPC = append(headerSchemaIPC, headerBytes)
 
-		// is_exchange (nullable) — true for exchange, false for producer, null for unary/dynamic
+		var isExchangeFlag int8 = -1
 		switch info.Type {
 		case MethodExchange:
 			isExchangeBuilder.Append(true)
+			isExchangeFlag = 1
 		case MethodProducer:
 			isExchangeBuilder.Append(false)
+			isExchangeFlag = 0
 		default:
 			isExchangeBuilder.AppendNull()
 		}
-
-		// param_docs_json — Go has no docstring source, always null
-		paramDocsBuilder.AppendNull()
+		isExchanges = append(isExchanges, isExchangeFlag)
 	}
 
-	cols := make([]arrow.Array, 12)
+	cols := make([]arrow.Array, 8)
 	cols[0] = nameBuilder.NewArray()
 	cols[1] = methodTypeBuilder.NewArray()
-	cols[2] = docBuilder.NewArray()
-	cols[3] = hasReturnBuilder.NewArray()
-	cols[4] = paramsSchemaBuilder.NewArray()
-	cols[5] = resultSchemaBuilder.NewArray()
-	cols[6] = paramTypesBuilder.NewArray()
-	cols[7] = paramDefaultsBuilder.NewArray()
-	cols[8] = hasHeaderBuilder.NewArray()
-	cols[9] = headerSchemaBuilder.NewArray()
-	cols[10] = isExchangeBuilder.NewArray()
-	cols[11] = paramDocsBuilder.NewArray()
+	cols[2] = hasReturnBuilder.NewArray()
+	cols[3] = paramsSchemaBuilder.NewArray()
+	cols[4] = resultSchemaBuilder.NewArray()
+	cols[5] = hasHeaderBuilder.NewArray()
+	cols[6] = headerSchemaBuilder.NewArray()
+	cols[7] = isExchangeBuilder.NewArray()
 	for _, c := range cols {
 		defer c.Release()
 	}
 
 	batch := array.NewRecordBatch(describeSchema, cols, int64(n))
 
-	// Build custom metadata
+	protocolName := s.serviceName
+	if protocolName == "" {
+		protocolName = "GoRpcServer"
+	}
+
+	hash := computeProtocolHash(
+		protocolName, names, methodTypeStrs, hasReturns, hasHeaders, isExchanges,
+		paramsSchemaIPC, resultSchemaIPC, headerSchemaIPC,
+	)
+
 	keys := []string{
 		MetaProtocolName,
 		MetaRequestVersion,
 		MetaDescribeVersion,
+		MetaProtocolHash,
 	}
 	vals := []string{
-		"GoRpcServer",
+		protocolName,
 		ProtocolVersion,
 		DescribeVersion,
+		hash,
 	}
 	if s.serverID != "" {
 		keys = append(keys, MetaServerID)
@@ -222,57 +199,61 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 	return batch, meta
 }
 
-// coerceDefaultValue converts a string default to its proper JSON type
-// based on the Arrow schema field type.
-func coerceDefaultValue(val string, schema *arrow.Schema, fieldName string) any {
-	indices := schema.FieldIndices(fieldName)
-	if len(indices) == 0 {
-		return val
-	}
-	f := schema.Field(indices[0])
-	switch f.Type.ID() {
-	case arrow.INT64, arrow.INT32:
-		if v, err := strconv.ParseInt(val, 10, 64); err == nil {
-			return v
+// computeProtocolHash returns the SHA-256 hex digest of the canonical
+// describe payload, byte-identical to the Python compute_protocol_hash
+// implementation in vgi_rpc/introspect.py.
+//
+// Inputs are pre-extracted from the per-method describe rows in sorted-name
+// order so callers don't need a second pass over the Arrow batch.
+func computeProtocolHash(
+	protocolName string,
+	names, methodTypes []string,
+	hasReturns, hasHeaders []bool,
+	isExchanges []int8,
+	paramsIPC, resultIPC, headerIPC [][]byte,
+) string {
+	h := sha256.New()
+	h.Write([]byte("vgi_rpc.describe.v"))
+	h.Write([]byte(DescribeVersion))
+	h.Write([]byte("|"))
+	h.Write([]byte(ProtocolVersion))
+	h.Write([]byte("|"))
+	h.Write([]byte(protocolName))
+	h.Write([]byte("|"))
+	for i := range names {
+		h.Write([]byte{0x1f})
+		h.Write([]byte(names[i]))
+		h.Write([]byte{0x1e})
+		h.Write([]byte(methodTypes[i]))
+		h.Write([]byte{0x1e})
+		if hasReturns[i] {
+			h.Write([]byte("1"))
+		} else {
+			h.Write([]byte("0"))
 		}
-	case arrow.FLOAT64, arrow.FLOAT32:
-		if v, err := strconv.ParseFloat(val, 64); err == nil {
-			return v
+		h.Write([]byte{0x1e})
+		if hasHeaders[i] {
+			h.Write([]byte("1"))
+		} else {
+			h.Write([]byte("0"))
 		}
-	case arrow.BOOL:
-		if v, err := strconv.ParseBool(val); err == nil {
-			return v
+		h.Write([]byte{0x1e})
+		switch isExchanges[i] {
+		case 1:
+			h.Write([]byte("1"))
+		case 0:
+			h.Write([]byte("0"))
+		default:
+			h.Write([]byte("-"))
+		}
+		h.Write([]byte{0x1e})
+		h.Write(paramsIPC[i])
+		h.Write([]byte{0x1e})
+		h.Write(resultIPC[i])
+		h.Write([]byte{0x1e})
+		if len(headerIPC[i]) > 0 {
+			h.Write(headerIPC[i])
 		}
 	}
-	return val
-}
-
-// arrowTypeToString returns a human-readable type name for an Arrow type.
-func arrowTypeToString(dt arrow.DataType) string {
-	switch dt.ID() {
-	case arrow.STRING:
-		return "str"
-	case arrow.INT64:
-		return "int"
-	case arrow.INT32:
-		return "int32"
-	case arrow.FLOAT64:
-		return "float"
-	case arrow.FLOAT32:
-		return "float32"
-	case arrow.BOOL:
-		return "bool"
-	case arrow.BINARY:
-		return "bytes"
-	case arrow.LIST:
-		lt := dt.(*arrow.ListType)
-		return "list[" + arrowTypeToString(lt.Elem()) + "]"
-	case arrow.MAP:
-		mt := dt.(*arrow.MapType)
-		return "dict[" + arrowTypeToString(mt.KeyType()) + ", " + arrowTypeToString(mt.ItemType()) + "]"
-	case arrow.DICTIONARY:
-		return "enum"
-	default:
-		return dt.String()
-	}
+	return hex.EncodeToString(h.Sum(nil))
 }

@@ -46,12 +46,14 @@ type methodInfo struct {
 
 // Server is the RPC server that dispatches incoming requests to registered methods.
 type Server struct {
-	methods        map[string]*methodInfo
-	serverID       string
-	serviceName    string
-	dispatchHook   DispatchHook
-	debugErrors    bool
-	externalConfig *ExternalLocationConfig
+	methods         map[string]*methodInfo
+	serverID        string
+	serviceName     string
+	protocolVersion string
+	protocolHash    string
+	dispatchHook    DispatchHook
+	debugErrors     bool
+	externalConfig  *ExternalLocationConfig
 }
 
 // NewServer creates a new RPC server.
@@ -92,6 +94,31 @@ func (s *Server) SetExternalLocation(config *ExternalLocationConfig) {
 // SetDispatchHook registers a hook that is called around each RPC dispatch.
 func (s *Server) SetDispatchHook(hook DispatchHook) {
 	s.dispatchHook = hook
+}
+
+// SetProtocolVersion stores an operator-supplied free-form protocol-contract
+// version string. Reported in access-log records as ``protocol_version``;
+// complementary to (build) ``server_version``.
+func (s *Server) SetProtocolVersion(v string) {
+	s.protocolVersion = v
+}
+
+// ProtocolVersion returns the operator-supplied protocol version string.
+func (s *Server) ProtocolVersion() string {
+	return s.protocolVersion
+}
+
+// ProtocolHash returns the SHA-256 hex digest of the canonical __describe__
+// payload. Computed lazily on first call and cached.
+func (s *Server) ProtocolHash() string {
+	if s.protocolHash == "" {
+		batch, meta := s.buildDescribeBatch()
+		batch.Release()
+		if v, ok := meta.GetValue(MetaProtocolHash); ok {
+			s.protocolHash = v
+		}
+	}
+	return s.protocolHash
 }
 
 // SetDebugErrors controls whether error responses include full stack traces

@@ -4,7 +4,6 @@
 package vgirpc
 
 import (
-	"encoding/json"
 	"fmt"
 	"html"
 	"log/slog"
@@ -269,39 +268,18 @@ func buildMethodCard(w *strings.Builder, info *methodInfo) {
 	}
 	w.WriteString(`</div>`) // card-header
 
-	// Parameters table
+	// Parameters table — Arrow type names from the params_schema. Per the
+	// DESCRIBE_VERSION 4 spec, Python-flavoured type-name strings, defaults,
+	// and docstrings are no longer carried on the wire; consult the Protocol
+	// source for that information.
 	if info.ParamsSchema.NumFields() > 0 {
-		// Build param types map
-		paramTypes := make(map[string]string, info.ParamsSchema.NumFields())
-		for i := range info.ParamsSchema.NumFields() {
-			f := info.ParamsSchema.Field(i)
-			paramTypes[f.Name] = arrowTypeToString(f.Type)
-		}
-
-		// Parse defaults
-		var defaults map[string]any
-		if len(info.ParamDefaults) > 0 {
-			defaults = make(map[string]any, len(info.ParamDefaults))
-			for k, v := range info.ParamDefaults {
-				defaults[k] = coerceDefaultValue(v, info.ParamsSchema, k)
-			}
-		}
-
 		w.WriteString(`<div class="section-label">Parameters</div>`)
-		w.WriteString(`<table><tr><th>Name</th><th>Type</th><th>Default</th><th>Description</th></tr>`)
+		w.WriteString(`<table><tr><th>Name</th><th>Type</th></tr>`)
 		for i := range info.ParamsSchema.NumFields() {
 			f := info.ParamsSchema.Field(i)
-			defaultStr := "&mdash;"
-			if defaults != nil {
-				if dv, ok := defaults[f.Name]; ok {
-					b, _ := json.Marshal(dv)
-					defaultStr = html.EscapeString(string(b))
-				}
-			}
-			fmt.Fprintf(w, `<tr><td><code>%s</code></td><td><code>%s</code></td><td>%s</td><td>&mdash;</td></tr>`,
+			fmt.Fprintf(w, `<tr><td><code>%s</code></td><td><code>%s</code></td></tr>`,
 				html.EscapeString(f.Name),
-				html.EscapeString(paramTypes[f.Name]),
-				defaultStr,
+				html.EscapeString(f.Type.String()),
 			)
 		}
 		w.WriteString(`</table>`)
@@ -317,7 +295,7 @@ func buildMethodCard(w *strings.Builder, info *methodInfo) {
 			f := info.ResultSchema.Field(i)
 			fmt.Fprintf(w, `<tr><td><code>%s</code></td><td><code>%s</code></td></tr>`,
 				html.EscapeString(f.Name),
-				html.EscapeString(arrowTypeToString(f.Type)),
+				html.EscapeString(f.Type.String()),
 			)
 		}
 		w.WriteString(`</table>`)
@@ -331,7 +309,7 @@ func buildMethodCard(w *strings.Builder, info *methodInfo) {
 			f := info.HeaderSchema.Field(i)
 			fmt.Fprintf(w, `<tr><td><code>%s</code></td><td><code>%s</code></td></tr>`,
 				html.EscapeString(f.Name),
-				html.EscapeString(arrowTypeToString(f.Type)),
+				html.EscapeString(f.Type.String()),
 			)
 		}
 		w.WriteString(`</table>`)

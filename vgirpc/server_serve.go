@@ -128,6 +128,8 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		MethodType:        methodTypeString(info.Type),
 		ServerID:          s.serverID,
 		Protocol:          s.serviceName,
+		ProtocolHash:      s.ProtocolHash(),
+		ProtocolVersion:   s.protocolVersion,
 		RequestID:         req.RequestID,
 		TransportMetadata: req.Metadata,
 		Auth:              Anonymous(),

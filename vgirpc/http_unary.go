@@ -101,6 +101,8 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		MethodType:        DispatchMethodUnary,
 		ServerID:          h.server.serverID,
 		Protocol:          h.server.serviceName,
+		ProtocolHash:      h.server.ProtocolHash(),
+		ProtocolVersion:   h.server.protocolVersion,
 		RequestID:         req.RequestID,
 		TransportMetadata: transportMeta,
 		Auth:              auth,

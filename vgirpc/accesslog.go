@@ -82,6 +82,7 @@ func (h *AccessLogHook) OnDispatchEnd(_ context.Context, token HookToken, info D
 		"message":       info.Protocol + "." + info.Method + " " + status,
 		"server_id":     info.ServerID,
 		"protocol":      info.Protocol,
+		"protocol_hash": info.ProtocolHash,
 		"method":        info.Method,
 		"method_type":   info.MethodType,
 		"principal":     authPrincipal(info.Auth),
@@ -98,6 +99,9 @@ func (h *AccessLogHook) OnDispatchEnd(_ context.Context, token HookToken, info D
 	}
 	if h.serverVersion != "" {
 		record["server_version"] = h.serverVersion
+	}
+	if info.ProtocolVersion != "" {
+		record["protocol_version"] = info.ProtocolVersion
 	}
 	if info.RequestID != "" {
 		record["request_id"] = info.RequestID
