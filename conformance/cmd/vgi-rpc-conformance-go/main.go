@@ -52,7 +52,8 @@ func main() {
 	authMode := len(os.Args) > 1 && os.Args[1] == "--http-auth"
 	storageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-storage"
 	zstdStorageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-zstd-storage"
-	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode || storageMode || zstdStorageMode {
+	pkceMode := len(os.Args) > 1 && os.Args[1] == "--http-pkce"
+	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode || storageMode || zstdStorageMode || pkceMode {
 		// Parse optional flags that may follow positional args:
 		//   --otel-export <path>
 		//   --externalize-threshold <bytes>   (overrides default 8 KiB in storage modes)
@@ -164,6 +165,33 @@ func main() {
 				return nil, &vgirpc.RpcError{Type: "ValueError", Message: "auth required"}
 			})
 		}
+		if pkceMode {
+			idpURL := findFlagValue(os.Args, "--idp-url")
+			if idpURL == "" {
+				idpURL = "http://127.0.0.1:9999"
+			}
+			resource := findFlagValue(os.Args, "--resource")
+			if resource == "" {
+				resource = "http://127.0.0.1:8000/vgi"
+			}
+			httpServer.SetPrefix("/vgi")
+			httpServer.SetAuthenticate(func(*http.Request) (*vgirpc.AuthContext, error) {
+				return nil, &vgirpc.RpcError{Type: "ValueError", Message: "auth required"}
+			})
+			if err := httpServer.SetOAuthResourceMetadata(&vgirpc.OAuthResourceMetadata{
+				Resource:             resource,
+				AuthorizationServers: []string{idpURL},
+				ClientID:             "my-client-id",
+				ClientSecret:         "my-client-secret",
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "SetOAuthResourceMetadata: %v\n", err)
+				os.Exit(1)
+			}
+			if err := httpServer.SetOAuthPkce(vgirpc.OAuthPkceConfig{}); err != nil {
+				fmt.Fprintf(os.Stderr, "SetOAuthPkce: %v\n", err)
+				os.Exit(1)
+			}
+		}
 		if err := httpServer.SetCompressionLevel(3); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to set compression level: %v\n", err)
 			os.Exit(1)
@@ -174,7 +202,11 @@ func main() {
 		// reference server's default.
 		httpServer.SetProducerBatchLimit(1)
 
-		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		listenAddr := "127.0.0.1:0"
+		if portFlag := findFlagValue(os.Args, "--port"); portFlag != "" {
+			listenAddr = "127.0.0.1:" + portFlag
+		}
+		listener, err := net.Listen("tcp", listenAddr)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "failed to listen: %v\n", err)
 			os.Exit(1)

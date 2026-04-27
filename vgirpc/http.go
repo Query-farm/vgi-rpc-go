@@ -6,6 +6,7 @@ package vgirpc
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -70,6 +71,12 @@ type HttpServer struct {
 	corsMaxAge  string // Access-Control-Max-Age value; empty = omit
 
 	pkce *oauthPkceState // non-nil when OAuth PKCE browser login is enabled
+
+	// Server-vended client externalization (capability advertisement +
+	// __upload_url__/init route + 413 enforcement on inline POSTs).
+	uploadURLProvider UploadURLProvider
+	maxRequestBytes   int64 // 0 = no limit / not advertised
+	maxUploadBytes    int64 // 0 = not advertised
 }
 
 // NewHttpServer creates a new HTTP server wrapping an RPC server.
@@ -171,6 +178,50 @@ func (h *HttpServer) SetCorsMaxAge(seconds int) {
 	}
 }
 
+// Capability advertisement header names. Mirror the Python reference
+// (vgi_rpc/http/_common.py) so cross-implementation clients agree.
+const (
+	maxRequestBytesHeader = "VGI-Max-Request-Bytes"
+	uploadURLHeader       = "VGI-Upload-URL-Support"
+	maxUploadBytesHeader  = "VGI-Max-Upload-Bytes"
+	capabilityCacheMaxAge = 300 // seconds; OPTIONS Cache-Control max-age
+)
+
+// addCapabilityHeaders writes the advertised capability headers (when
+// configured) on every response. On OPTIONS responses an additional
+// Cache-Control: public, max-age=N header is set so clients can cache
+// the discovered values for the advertised TTL.
+func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool) {
+	if h.maxRequestBytes > 0 {
+		w.Header().Set(maxRequestBytesHeader, strconv.FormatInt(h.maxRequestBytes, 10))
+	}
+	if h.uploadURLProvider != nil {
+		w.Header().Set(uploadURLHeader, "true")
+		if h.maxUploadBytes > 0 {
+			w.Header().Set(maxUploadBytesHeader, strconv.FormatInt(h.maxUploadBytes, 10))
+		}
+	}
+	if isOptions {
+		w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", capabilityCacheMaxAge))
+	}
+}
+
+// isMaxBytesExempt returns true for routes that should bypass the
+// max_request_bytes enforcement: __upload_url__ (its payloads are
+// intrinsically small) and health checks.
+func (h *HttpServer) isMaxBytesExempt(path string) bool {
+	for _, base := range []string{
+		h.prefix + "/__upload_url__",
+		h.prefix + "/health",
+		"/health",
+	} {
+		if path == base || strings.HasPrefix(path, base+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // addCorsHeaders adds CORS response headers when cors is enabled.
 // When isOptions is true, the Access-Control-Max-Age header is included.
 func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, isOptions bool) {
@@ -191,6 +242,7 @@ func (h *HttpServer) initRoutes() {
 	h.mux = http.NewServeMux()
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/init", h.prefix), h.handleStreamInit)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/exchange", h.prefix), h.handleStreamExchange)
+	h.mux.HandleFunc(fmt.Sprintf("POST %s/__upload_url__/init", h.prefix), h.handleUploadURLInit)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}", h.prefix), h.handleUnary)
 	h.mux.HandleFunc(fmt.Sprintf("GET %s", wellKnownURL(h.prefix)), h.handleOAuthWellKnown)
 	// Health is registered at /health (root) regardless of the RPC prefix so
@@ -257,6 +309,11 @@ func (h *HttpServer) InitPages() {
 	if h.pkce != nil {
 		h.mux.HandleFunc(fmt.Sprintf("GET %s/_oauth/callback", h.prefix), h.handleOAuthCallback)
 		h.mux.HandleFunc(fmt.Sprintf("GET %s/_oauth/logout", h.prefix), h.handleOAuthLogout)
+		// Token-exchange proxy: lets SPA PKCE clients (which cannot safely
+		// hold a client_secret) complete authorization_code/refresh_token
+		// exchanges against IdPs that require a client_secret (e.g. Google).
+		h.mux.HandleFunc(fmt.Sprintf("POST %s/_oauth/token", h.prefix), h.handleOAuthTokenProxy)
+		h.mux.HandleFunc(fmt.Sprintf("OPTIONS %s/_oauth/token", h.prefix), h.handleOAuthTokenProxy)
 	}
 
 	if h.enableDescribePage {
@@ -302,6 +359,32 @@ func (h *HttpServer) InitPages() {
 // SetTokenTTL sets the maximum age for state tokens.
 func (h *HttpServer) SetTokenTTL(d time.Duration) {
 	h.tokenTTL = d
+}
+
+// SetUploadURLProvider configures a provider that issues pre-signed
+// upload/download URL pairs for server-vended client externalization.
+// When set, the server registers POST {prefix}/__upload_url__/init and
+// advertises VGI-Upload-URL-Support: true on every response.
+func (h *HttpServer) SetUploadURLProvider(p UploadURLProvider) {
+	h.uploadURLProvider = p
+	h.initRoutes()
+}
+
+// SetMaxRequestBytes sets the maximum inline request body size in bytes
+// the server will accept on RPC routes. Requests with a Content-Length
+// exceeding this limit receive HTTP 413. The value is also advertised
+// via the VGI-Max-Request-Bytes capability header. Set to 0 to disable
+// (no advertisement, no enforcement). The /__upload_url__ and /health
+// routes are exempt from enforcement.
+func (h *HttpServer) SetMaxRequestBytes(n int64) {
+	h.maxRequestBytes = n
+}
+
+// SetMaxUploadBytes sets the maximum upload size advertised via
+// VGI-Max-Upload-Bytes when an upload-URL provider is configured.
+// Set to 0 to omit the advertisement.
+func (h *HttpServer) SetMaxUploadBytes(n int64) {
+	h.maxUploadBytes = n
 }
 
 // SetMaxBodySize sets the maximum allowed HTTP request body size in bytes.
@@ -425,7 +508,33 @@ func (h *HttpServer) SetOAuthPkce(config OAuthPkceConfig) error {
 		allowedReturnOrigins: allowedOrigins,
 		userInfoHTML:         userInfoHTML,
 	}
+
+	// When a client_secret is configured, advertise the token-proxy URL in the
+	// resource metadata so SPA PKCE clients can complete token exchanges
+	// without holding the secret themselves. Re-marshal the JSON with the
+	// extra field merged in.
+	if h.oauthMetadata.ClientSecret != "" {
+		proxyURL := fmt.Sprintf("%s://%s%s/_oauth/token", resourceURL.Scheme, resourceURL.Host, h.prefix)
+		merged, err := mergeTokenEndpointIntoMetadata(h.oauthMetadataJSON, proxyURL)
+		if err != nil {
+			return fmt.Errorf("vgirpc: advertising token proxy URL: %w", err)
+		}
+		h.oauthMetadataJSON = merged
+	}
 	return nil
+}
+
+// mergeTokenEndpointIntoMetadata adds a "token_endpoint" field to the
+// pre-rendered resource metadata JSON. Re-marshaling preserves all original
+// fields without requiring the OAuthResourceMetadata struct to carry a
+// proxy-specific field that callers shouldn't have to populate.
+func mergeTokenEndpointIntoMetadata(original []byte, tokenEndpoint string) ([]byte, error) {
+	var m map[string]any
+	if err := json.Unmarshal(original, &m); err != nil {
+		return nil, err
+	}
+	m["token_endpoint"] = tokenEndpoint
+	return json.Marshal(m)
 }
 
 // authenticate runs the registered AuthenticateFunc (if any) and writes
@@ -459,8 +568,20 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.InitPages()
 	}
 
+	// Capability headers go on every response so clients can probe via
+	// any verb (typically OPTIONS /health). On OPTIONS we also add a
+	// Cache-Control so well-behaved clients honour the advertised TTL.
+	h.addCapabilityHeaders(w, r.Method == http.MethodOptions)
+
 	// CORS preflight — respond before auth or dispatch.
 	if r.Method == http.MethodOptions {
+		// The OAuth token-proxy needs Origin-allowlist CORS that's tighter
+		// than the global SetCorsOrigins value (which is typically "*"),
+		// so route its preflight through the dedicated handler.
+		if h.pkce != nil && r.URL.Path == h.prefix+"/_oauth/token" {
+			h.handleOAuthTokenProxy(w, r)
+			return
+		}
 		h.addCorsHeaders(w, true)
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -468,6 +589,17 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Add CORS headers to all non-OPTIONS responses.
 	h.addCorsHeaders(w, false)
+
+	// Enforce the advertised max_request_bytes cap on RPC routes (the
+	// upload-URL and health routes are exempt because their payloads
+	// are intrinsically tiny and not user-controlled).
+	if h.maxRequestBytes > 0 && r.ContentLength > h.maxRequestBytes && !h.isMaxBytesExempt(r.URL.Path) {
+		http.Error(w, fmt.Sprintf(
+			"Request body of %d bytes exceeds max_request_bytes=%d. Use the upload-URL flow (__upload_url__/init) to externalize large inputs.",
+			r.ContentLength, h.maxRequestBytes,
+		), http.StatusRequestEntityTooLarge)
+		return
+	}
 
 	if h.zstdEncoder != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "zstd") {
 		cw := &compressResponseWriter{ResponseWriter: w, encoder: h.zstdEncoder}
