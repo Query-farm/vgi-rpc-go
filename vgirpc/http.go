@@ -77,6 +77,10 @@ type HttpServer struct {
 	uploadURLProvider UploadURLProvider
 	maxRequestBytes   int64 // 0 = no limit / not advertised
 	maxUploadBytes    int64 // 0 = not advertised
+
+	// Response caps (advertised + enforced). 0 = unbounded.
+	maxResponseBytes             int64
+	maxExternalizedResponseBytes int64
 }
 
 // NewHttpServer creates a new HTTP server wrapping an RPC server.
@@ -195,6 +199,19 @@ func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool)
 	if h.maxRequestBytes > 0 {
 		w.Header().Set(maxRequestBytesHeader, strconv.FormatInt(h.maxRequestBytes, 10))
 	}
+	if h.maxResponseBytes > 0 {
+		w.Header().Set(maxResponseBytesHeader, strconv.FormatInt(h.maxResponseBytes, 10))
+	}
+	if h.maxExternalizedResponseBytes > 0 {
+		w.Header().Set(maxExternalizedResponseBytesHeader, strconv.FormatInt(h.maxExternalizedResponseBytes, 10))
+	}
+	// Always present so capability-aware clients can decide whether to
+	// expect externalised payloads.
+	if h.server.externalConfig != nil && h.server.externalConfig.Storage != nil {
+		w.Header().Set(externalizationEnabledHeader, "true")
+	} else {
+		w.Header().Set(externalizationEnabledHeader, "false")
+	}
 	if h.uploadURLProvider != nil {
 		w.Header().Set(uploadURLHeader, "true")
 		if h.maxUploadBytes > 0 {
@@ -229,7 +246,7 @@ func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, isOptions bool) {
 		w.Header().Set("Access-Control-Allow-Origin", h.corsOrigins)
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error")
+		w.Header().Set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, "+maxResponseBytesHeader+", "+maxExternalizedResponseBytesHeader+", "+externalizationEnabledHeader)
 		if isOptions && h.corsMaxAge != "" {
 			w.Header().Set("Access-Control-Max-Age", h.corsMaxAge)
 		}

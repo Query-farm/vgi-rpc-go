@@ -22,6 +22,8 @@ func init() {
 	vgirpc.RegisterStateType(&largeProducerState{})
 	vgirpc.RegisterStateType(&loggingProducerState{})
 	vgirpc.RegisterStateType(&errorAfterNState{})
+	vgirpc.RegisterStateType(&oversizedBatchState{})
+	vgirpc.RegisterStateType(&oversizedExchangeState{})
 	vgirpc.RegisterStateType(&headerProducerState{})
 	vgirpc.RegisterStateType(&scaleExchangeState{})
 	vgirpc.RegisterStateType(&accumulatingExchangeState{})
@@ -170,6 +172,62 @@ func (s *largeProducerState) Produce(_ context.Context, out *vgirpc.OutputCollec
 	}
 	s.Current++
 	return nil
+}
+
+// oversizedBatchState emits one batch of RowsPerBatch int64 rows then
+// finishes. Used by HTTP-only conformance tests to deliberately overshoot
+// the configured response cap in a single producer iteration.
+type oversizedBatchState struct {
+	RowsPerBatch int
+	Emitted      bool
+}
+
+func (s *oversizedBatchState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+	if s.Emitted {
+		return out.Finish()
+	}
+	mem := memory.NewGoAllocator()
+	idxBuilder := array.NewInt64Builder(mem)
+	valBuilder := array.NewInt64Builder(mem)
+	defer idxBuilder.Release()
+	defer valBuilder.Release()
+	for i := int64(0); i < int64(s.RowsPerBatch); i++ {
+		idxBuilder.Append(i)
+		valBuilder.Append(i * 10)
+	}
+	idxArr := idxBuilder.NewArray()
+	valArr := valBuilder.NewArray()
+	defer idxArr.Release()
+	defer valArr.Release()
+	if err := out.EmitArrays([]arrow.Array{idxArr, valArr}, int64(s.RowsPerBatch)); err != nil {
+		return err
+	}
+	s.Emitted = true
+	return nil
+}
+
+// oversizedExchangeState emits a fixed-size oversized output batch for
+// any input. Companion to oversizedBatchState for the lockstep exchange
+// path.
+type oversizedExchangeState struct {
+	RowsPerBatch int
+}
+
+func (s *oversizedExchangeState) Exchange(_ context.Context, _ arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+	mem := memory.NewGoAllocator()
+	idxBuilder := array.NewInt64Builder(mem)
+	valBuilder := array.NewInt64Builder(mem)
+	defer idxBuilder.Release()
+	defer valBuilder.Release()
+	for i := int64(0); i < int64(s.RowsPerBatch); i++ {
+		idxBuilder.Append(i)
+		valBuilder.Append(i * 10)
+	}
+	idxArr := idxBuilder.NewArray()
+	valArr := valBuilder.NewArray()
+	defer idxArr.Release()
+	defer valArr.Release()
+	return out.EmitArrays([]arrow.Array{idxArr, valArr}, int64(s.RowsPerBatch))
 }
 
 // loggingProducerState produces batches with an INFO log before each.

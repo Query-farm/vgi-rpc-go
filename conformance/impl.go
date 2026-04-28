@@ -21,6 +21,15 @@ type echoStringParams struct {
 type echoBytesParams struct {
 	Data []byte `vgirpc:"data"`
 }
+type oversizedUnaryParams struct {
+	TargetBytes int64 `vgirpc:"target_bytes"`
+}
+type produceOversizedBatchParams struct {
+	RowsPerBatch int64 `vgirpc:"rows_per_batch"`
+}
+type exchangeOversizedParams struct {
+	RowsPerBatch int64 `vgirpc:"rows_per_batch"`
+}
 type echoIntParams struct {
 	Value int64 `vgirpc:"value"`
 }
@@ -156,6 +165,7 @@ func RegisterMethods(server *vgirpc.Server) {
 	// Scalar echo methods
 	vgirpc.Unary(server, "echo_string", echoString)
 	vgirpc.Unary(server, "echo_bytes", echoBytes)
+	vgirpc.Unary(server, "oversized_unary", oversizedUnary)
 	vgirpc.Unary(server, "echo_int", echoInt)
 	vgirpc.Unary(server, "echo_float", echoFloat)
 	vgirpc.Unary(server, "echo_bool", echoBool)
@@ -230,6 +240,7 @@ func RegisterMethods(server *vgirpc.Server) {
 	vgirpc.Producer(server, "produce_with_logs", counterSchema, produceWithLogs)
 	vgirpc.Producer(server, "produce_error_mid_stream", counterSchema, produceErrorMidStream)
 	vgirpc.Producer(server, "produce_error_on_init", counterSchema, produceErrorOnInit)
+	vgirpc.Producer(server, "produce_oversized_batch", counterSchema, produceOversizedBatch)
 
 	// Producer streams with headers
 	headerSchema := ConformanceHeader{}.ArrowSchema()
@@ -243,6 +254,7 @@ func RegisterMethods(server *vgirpc.Server) {
 	vgirpc.Exchange(server, "exchange_error_on_nth", scaleOutputSchema, scaleInputSchema, exchangeErrorOnNth)
 	vgirpc.Exchange(server, "exchange_error_on_init", scaleOutputSchema, scaleInputSchema, exchangeErrorOnInit)
 	vgirpc.Exchange(server, "exchange_cast_compatible", scaleOutputSchema, scaleInputSchema, exchangeCastCompatible)
+	vgirpc.Exchange(server, "exchange_oversized", counterSchema, scaleInputSchema, exchangeOversized)
 
 	// Zero-column exchange
 	emptySchema := arrow.NewSchema([]arrow.Field{}, nil)
@@ -349,6 +361,12 @@ func echoString(_ context.Context, ctx *vgirpc.CallContext, p echoStringParams) 
 }
 func echoBytes(_ context.Context, ctx *vgirpc.CallContext, p echoBytesParams) ([]byte, error) {
 	return p.Data, nil
+}
+func oversizedUnary(_ context.Context, ctx *vgirpc.CallContext, p oversizedUnaryParams) ([]byte, error) {
+	if p.TargetBytes < 0 {
+		return nil, &vgirpc.RpcError{Type: "ValueError", Message: "target_bytes must be non-negative"}
+	}
+	return make([]byte, p.TargetBytes), nil
 }
 func echoInt(_ context.Context, ctx *vgirpc.CallContext, p echoIntParams) (int64, error) {
 	return p.Value, nil
@@ -579,6 +597,21 @@ func produceErrorMidStream(_ context.Context, ctx *vgirpc.CallContext, p produce
 
 func produceErrorOnInit(_ context.Context, ctx *vgirpc.CallContext, _ produceErrorOnInitParams) (*vgirpc.StreamResult, error) {
 	return nil, &vgirpc.RpcError{Type: "RuntimeError", Message: "intentional init error"}
+}
+
+func produceOversizedBatch(_ context.Context, ctx *vgirpc.CallContext, p produceOversizedBatchParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: counterSchema,
+		State:        &oversizedBatchState{RowsPerBatch: int(p.RowsPerBatch)},
+	}, nil
+}
+
+func exchangeOversized(_ context.Context, ctx *vgirpc.CallContext, p exchangeOversizedParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: counterSchema,
+		InputSchema:  scaleInputSchema,
+		State:        &oversizedExchangeState{RowsPerBatch: int(p.RowsPerBatch)},
+	}, nil
 }
 
 func produceWithHeader(_ context.Context, ctx *vgirpc.CallContext, p produceWithHeaderParams) (*vgirpc.StreamResult, error) {

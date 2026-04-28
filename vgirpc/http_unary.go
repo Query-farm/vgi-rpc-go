@@ -201,11 +201,24 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	defer resultBatch.Release()
 
 	// Externalize the result batch if it exceeds the configured threshold.
+	// Pre-flight max_externalized_response_bytes BEFORE incurring the
+	// upload — the operator's intent is "don't emit data beyond this per
+	// call," not "emit and then complain."
+	var externalBytesWritten int64
 	if h.server.externalConfig != nil {
+		predicted := predictExternalizeBytes(resultBatch, h.server.externalConfig)
+		if h.maxExternalizedResponseBytes > 0 && predicted > h.maxExternalizedResponseBytes {
+			overshoot := fmt.Errorf("Externalised payload exceeds max_externalized_response_bytes (%d > %d) for method %q",
+				predicted, h.maxExternalizedResponseBytes, info.Name)
+			handlerErr = overshoot
+			h.writeUnaryCapError(w, info, req.RequestID, logs, overshoot)
+			return
+		}
 		extBatch, extMeta, extErr := MaybeExternalizeBatch(resultBatch, arrow.Metadata{}, h.server.externalConfig)
 		if extErr != nil {
 			slog.Error("failed to externalize unary result", "method", info.Name, "err", extErr)
 		} else if extBatch != resultBatch {
+			externalBytesWritten = predicted
 			// Wrap the pointer batch with the location metadata so the
 			// IPC writer surfaces it on the wire.
 			withMeta := array.NewRecordBatchWithMetadata(extBatch.Schema(), extBatch.Columns(), extBatch.NumRows(), extMeta)
@@ -222,5 +235,30 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		h.logIPCWriteErr("unary-response", info.Name, err)
 		handlerErr = err
 	}
+
+	// Post-flush enforcement of both caps. Wire body cap is hard for unary;
+	// overshoot replaces the response with a fresh EXCEPTION-only stream.
+	if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), externalBytesWritten,
+		h.maxResponseBytes, h.maxExternalizedResponseBytes); capErr != nil {
+		handlerErr = capErr
+		h.writeUnaryCapError(w, info, req.RequestID, nil, capErr)
+		return
+	}
+
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
+}
+
+// writeUnaryCapError emits a fresh IPC stream containing only the
+// configured cap-overshoot error batch (plus any logs collected before
+// the overshoot). Goes through writeArrow at status 500 so the existing
+// machinery rewrites it to 200 + X-VGI-RPC-Error: true.
+func (h *HttpServer) writeUnaryCapError(w http.ResponseWriter, info *methodInfo, requestID string, logs []LogMessage, capErr error) {
+	var buf bytes.Buffer
+	ipcW := ipc.NewWriter(&buf, ipc.WithSchema(info.ResultSchema))
+	for _, logMsg := range logs {
+		h.logIPCWriteErr("log-batch", info.Name, writeLogBatch(ipcW, info.ResultSchema, logMsg, h.server.serverID, requestID))
+	}
+	h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(ipcW, info.ResultSchema, capErr, h.server.serverID, requestID, h.server.debugErrors))
+	h.logIPCWriteErr("close", info.Name, ipcW.Close())
+	h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 }

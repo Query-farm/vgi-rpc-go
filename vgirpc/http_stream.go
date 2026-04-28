@@ -544,6 +544,22 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 			writeErr = cerr
 		}
 	}
+
+	// Hard wire-cap enforcement for exchange: if the IPC body exceeded
+	// max_response_bytes, replace the response with a fresh EXCEPTION-only
+	// stream so the client surfaces RpcError. External cap also enforced
+	// here for symmetry with Python (HTTP exchange doesn't externalise
+	// today, so externalBytes=0; harmless when storage is unconfigured).
+	if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), 0,
+		h.maxResponseBytes, h.maxExternalizedResponseBytes); capErr != nil {
+		var errBuf bytes.Buffer
+		errW := ipc.NewWriter(&errBuf, ipc.WithSchema(schema))
+		h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(errW, schema, capErr, h.server.serverID, "", h.server.debugErrors))
+		h.logIPCWriteErr("close", info.Name, errW.Close())
+		h.writeArrow(w, http.StatusInternalServerError, errBuf.Bytes())
+		return capErr
+	}
+
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
 	return writeErr
 }

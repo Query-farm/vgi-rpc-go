@@ -53,7 +53,8 @@ func main() {
 	storageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-storage"
 	zstdStorageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-zstd-storage"
 	pkceMode := len(os.Args) > 1 && os.Args[1] == "--http-pkce"
-	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode || storageMode || zstdStorageMode || pkceMode {
+	strictMode := len(os.Args) > 1 && os.Args[1] == "--http-strict"
+	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode || storageMode || zstdStorageMode || pkceMode || strictMode {
 		// Parse optional flags that may follow positional args:
 		//   --otel-export <path>
 		//   --externalize-threshold <bytes>   (overrides default 8 KiB in storage modes)
@@ -61,6 +62,13 @@ func main() {
 		var otelExportPath string
 		externalizeThreshold := int64(-1) // -1 == not specified
 		maxRequestBytes := int64(-1)      // -1 == not specified
+		// Strict-mode response caps (default 1 MiB matches Python's
+		// tests/serve_conformance_http_strict.py — large enough that
+		// incidental tests don't trip while still being small enough that
+		// the http_response_cap.* tests' 4x targets clearly overshoot).
+		maxResponseBytes := int64(1024 * 1024)
+		maxExternalizedResponseBytes := int64(1024 * 1024)
+		var strictFakeStorageURL string
 		for i := 2; i < len(os.Args)-1; i++ {
 			switch os.Args[i] {
 			case "--otel-export":
@@ -79,6 +87,22 @@ func main() {
 					os.Exit(1)
 				}
 				maxRequestBytes = v
+			case "--max-response-bytes":
+				v, err := strconv.ParseInt(os.Args[i+1], 10, 64)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "invalid --max-response-bytes: %v\n", err)
+					os.Exit(1)
+				}
+				maxResponseBytes = v
+			case "--max-externalized-response-bytes":
+				v, err := strconv.ParseInt(os.Args[i+1], 10, 64)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "invalid --max-externalized-response-bytes: %v\n", err)
+					os.Exit(1)
+				}
+				maxExternalizedResponseBytes = v
+			case "--fake-storage":
+				strictFakeStorageURL = os.Args[i+1]
 			}
 		}
 
@@ -99,6 +123,16 @@ func main() {
 			}
 			if zstdStorageMode {
 				cfg.Compression = &vgirpc.Compression{Algorithm: "zstd", Level: 3}
+			}
+			server.SetExternalLocation(cfg)
+		}
+		if strictMode && strictFakeStorageURL != "" {
+			fakeStorage = conformance.NewFakeStorage(strictFakeStorageURL)
+			cfg := vgirpc.DefaultExternalLocationConfig(fakeStorage)
+			cfg.URLValidator = conformance.AllowAllValidator
+			cfg.ExternalizeThresholdBytes = 4096
+			if externalizeThreshold > 0 {
+				cfg.ExternalizeThresholdBytes = externalizeThreshold
 			}
 			server.SetExternalLocation(cfg)
 		}
@@ -191,6 +225,10 @@ func main() {
 				fmt.Fprintf(os.Stderr, "SetOAuthPkce: %v\n", err)
 				os.Exit(1)
 			}
+		}
+		if strictMode {
+			httpServer.SetMaxResponseBytes(maxResponseBytes)
+			httpServer.SetMaxExternalizedResponseBytes(maxExternalizedResponseBytes)
 		}
 		if err := httpServer.SetCompressionLevel(3); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to set compression level: %v\n", err)
