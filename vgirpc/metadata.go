@@ -35,6 +35,16 @@ const (
 	MetaShmOffset = "vgi_rpc.shm_offset"
 	// MetaShmLength carries the byte length for shared memory pointers.
 	MetaShmLength = "vgi_rpc.shm_length"
+	// MetaShmSegmentName carries the POSIX shared-memory segment name on
+	// the request batch's custom_metadata. Advertised by the client; the
+	// server attaches per-request.
+	MetaShmSegmentName = "vgi_rpc.shm_segment_name"
+	// MetaShmSegmentSize carries the segment size (decimal-encoded bytes,
+	// including the 64 KB header) on the request batch's custom_metadata.
+	MetaShmSegmentSize = "vgi_rpc.shm_segment_size"
+	// MetaShmSource is set on a materialized batch after a pointer batch
+	// has been resolved, carrying the segment name. Diagnostic only.
+	MetaShmSource = "vgi_rpc.shm_source"
 	// MetaLocation carries a URI for external pointer references.
 	MetaLocation = "vgi_rpc.location"
 	// MetaLocationSHA256 carries a hex-encoded SHA-256 checksum of the raw

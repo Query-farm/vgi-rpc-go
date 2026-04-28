@@ -113,7 +113,22 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 	// Record output stats
 	stats.RecordOutput(resultBatch.NumRows(), batchBufferSize(resultBatch))
 
-	return nil, WriteUnaryResponse(w, info.ResultSchema, logs, resultBatch, s.serverID, req.RequestID)
+	// If the client advertised a shared-memory segment, try to ship the
+	// result through it. On success the pipe carries only a small pointer
+	// batch (zero rows + offset/length metadata) instead of the full IPC
+	// stream.
+	wireBatch := resultBatch
+	if req.Shm != nil {
+		shmBatch, replaced, shmErr := MaybeWriteToShm(resultBatch, req.Shm)
+		if shmErr != nil {
+			slog.Debug("shm write failed; falling back to pipe", "method", req.Method, "err", shmErr)
+		} else if replaced {
+			defer shmBatch.Release()
+			wireBatch = shmBatch
+		}
+	}
+
+	return nil, WriteUnaryResponse(w, info.ResultSchema, logs, wireBatch, s.serverID, req.RequestID)
 }
 
 // serveStream dispatches a producer or exchange stream method.

@@ -42,6 +42,11 @@ type Request struct {
 	Batch arrow.RecordBatch
 	// Metadata is the full set of custom metadata key-value pairs from the batch.
 	Metadata map[string]string
+	// Shm is the shared-memory segment attached for this request, or nil
+	// if the client did not advertise one. Server-internal; not on the
+	// wire. The serve loop owns the lifecycle and detaches at the end of
+	// the call.
+	Shm *ShmSegment
 }
 
 // ReadRequest reads one complete IPC stream from the reader and extracts
@@ -96,8 +101,12 @@ func ReadRequest(r io.Reader) (*Request, error) {
 		}
 	}
 
-	// Validate row count
-	if batch.Schema().NumFields() > 0 && batch.NumRows() != 1 {
+	// Validate row count. External-location pointer batches are zero-row
+	// by construction (the real parameters are fetched from the URL); the
+	// caller is expected to resolve them and re-validate against the
+	// inner batch.
+	_, isExternal := meta.GetValue(MetaLocation)
+	if batch.Schema().NumFields() > 0 && batch.NumRows() != 1 && !isExternal {
 		batch.Release()
 		return nil, &RpcError{
 			Type:    "ProtocolError",

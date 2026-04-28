@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/Query-farm/vgi-rpc/vgirpc"
 	"github.com/apache/arrow-go/v18/arrow"
@@ -71,9 +72,36 @@ func (f *FakeStorage) Upload(data []byte, _ *arrow.Schema, contentEncoding strin
 	return alloc.ObjectURL, nil
 }
 
+// GenerateUploadURL allocates a new blob slot and returns a URL pair the
+// client can PUT to and the server can later GET from. The fake storage
+// uses the same URL for both verbs (HTTP method dispatch in the service).
+func (f *FakeStorage) GenerateUploadURL(_ *arrow.Schema) (vgirpc.UploadURL, error) {
+	allocResp, err := f.Client.Post(f.BaseURL+"/alloc", "application/json", bytes.NewReader([]byte("{}")))
+	if err != nil {
+		return vgirpc.UploadURL{}, fmt.Errorf("fake storage alloc: %w", err)
+	}
+	defer allocResp.Body.Close()
+	if allocResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(allocResp.Body)
+		return vgirpc.UploadURL{}, fmt.Errorf("fake storage alloc returned %d: %s", allocResp.StatusCode, body)
+	}
+	var alloc struct {
+		ObjectURL string `json:"object_url"`
+	}
+	if err := json.NewDecoder(allocResp.Body).Decode(&alloc); err != nil {
+		return vgirpc.UploadURL{}, fmt.Errorf("fake storage alloc decode: %w", err)
+	}
+	return vgirpc.UploadURL{
+		UploadURL:   alloc.ObjectURL,
+		DownloadURL: alloc.ObjectURL,
+		ExpiresAt:   time.Now().UTC().Add(1 * time.Hour),
+	}, nil
+}
+
 // AllowAllValidator is a vgirpc.URLValidator that accepts every URL,
 // matching the test client's permissive configuration.
 func AllowAllValidator(string) error { return nil }
 
 // Compile-time check that FakeStorage satisfies the ExternalStorage interface.
 var _ vgirpc.ExternalStorage = (*FakeStorage)(nil)
+var _ vgirpc.UploadURLProvider = (*FakeStorage)(nil)

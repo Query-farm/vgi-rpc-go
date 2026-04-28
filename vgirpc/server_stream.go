@@ -211,6 +211,31 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			}
 		}
 
+		// Resolve shared-memory pointer batches into materialized batches.
+		// Done before external-location resolution because the two
+		// pointer-batch shapes are mutually exclusive in practice.
+		// A resolve failure here is unrecoverable for the stream — the
+		// pointer batch is a zero-row batch with no usable input data,
+		// so passing it to the user handler would silently corrupt the
+		// computation. End the stream with an error response instead.
+		if req.Shm != nil && IsShmPointerBatch(inputBatch) {
+			resolved, releaseOff, release, rerr := ResolveShmBatch(inputBatch, req.Shm)
+			if rerr != nil {
+				slog.Error("failed to resolve shm input batch", "method", req.Method, "err", rerr)
+				streamErr = &RpcError{
+					Type:    "IOError",
+					Message: fmt.Sprintf("shm resolve failed: %v", rerr),
+				}
+				s.logIPCWriteErr("stream-shm-resolve-error", req.Method,
+					writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.debugErrors))
+				break
+			}
+			inputBatch = resolved
+			if release {
+				_ = req.Shm.FreeOffset(releaseOff)
+			}
+		}
+
 		// Resolve external input batches (exchange streams may receive pointer batches)
 		if s.externalConfig != nil {
 			var inputMeta arrow.Metadata
@@ -314,6 +339,16 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					} else if extBatch != dataBatch {
 						dataBatch.Release()
 						dataBatch = extBatch
+					}
+				}
+				// Maybe ship the data batch through shared memory.
+				if req.Shm != nil && dataBatch.NumRows() > 0 {
+					shmBatch, replaced, shmErr := MaybeWriteToShm(dataBatch, req.Shm)
+					if shmErr != nil {
+						slog.Debug("shm write failed; falling back to pipe", "method", req.Method, "err", shmErr)
+					} else if replaced {
+						dataBatch.Release()
+						dataBatch = shmBatch
 					}
 				}
 				// Data batch — record output stats

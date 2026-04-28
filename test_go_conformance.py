@@ -105,6 +105,26 @@ def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> It
     yield from _start_http_worker("--http-with-zstd-storage", conformance_fake_storage)
 
 
+@pytest.fixture(scope="session")
+def conformance_http_externalize_always_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Go HTTP worker that externalizes EVERY non-empty response batch.
+
+    Sets ``--externalize-threshold 1`` so every data-bearing batch (any
+    batch with > 0 rows) goes through the upload-URL flow.  Keeps the
+    inline-request cap loose (1 MiB) so normal client-vended request
+    bodies aren't 413-rejected — this variant exercises *response*-side
+    externalization across the full conformance method matrix.
+    """
+    yield from _start_http_worker(
+        "--http-with-storage",
+        conformance_fake_storage,
+        "--externalize-threshold",
+        "1",
+        "--max-request-bytes",
+        "1048576",
+    )
+
+
 def _short_unix_path(name: str) -> str:
     """Return a short /tmp path for a Unix domain socket (macOS 104-byte limit)."""
     fd, path = tempfile.mkstemp(prefix=f"vgi-go-{name}-", suffix=".sock", dir="/tmp")
@@ -152,7 +172,38 @@ def go_unix_path() -> Iterator[str]:
 ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 
 
-@pytest.fixture(params=["pipe", "subprocess", "http", "unix"])
+class _ShmAdapter:
+    """Wraps a SubprocessTransport with a shared-memory side-channel.
+
+    Mirrors ``vgi_rpc.rpc.ShmPipeTransport`` — exposes the inner pipe's
+    reader/writer plus a ``.shm`` property the proxy uses to redirect
+    large batch payloads through the segment. Client owns the segment
+    lifetime; server attaches per-request.
+    """
+
+    __slots__ = ("_inner", "_shm")
+
+    def __init__(self, inner: SubprocessTransport, shm: Any) -> None:
+        self._inner = inner
+        self._shm = shm
+
+    @property
+    def reader(self) -> Any:
+        return self._inner.reader
+
+    @property
+    def writer(self) -> Any:
+        return self._inner.writer
+
+    @property
+    def shm(self) -> Any:
+        return self._shm
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+@pytest.fixture(params=["pipe", "subprocess", "shm", "http", "http_externalize_always", "unix"])
 def conformance_conn(
     request: pytest.FixtureRequest,
     go_transport: SubprocessTransport,
@@ -173,11 +224,41 @@ def conformance_conn(
                     transport.close()
 
             return _pipe_conn()
+        elif request.param == "shm":
+
+            @contextlib.contextmanager
+            def _shm_conn() -> Iterator[_RpcProxy]:
+                from vgi_rpc.shm import ShmSegment
+
+                segment = ShmSegment.create(8 * 1024 * 1024)
+                transport = SubprocessTransport([GO_WORKER])
+                wrapped = _ShmAdapter(transport, segment)
+                try:
+                    yield _RpcProxy(ConformanceService, wrapped, on_log)
+                finally:
+                    transport.close()
+                    with contextlib.suppress(BufferError):
+                        segment.close()
+                    segment.unlink()
+
+            return _shm_conn()
         elif request.param == "http":
             return http_connect(
                 ConformanceService,
                 f"http://127.0.0.1:{go_http_port}",
                 on_log=on_log,
+            )
+        elif request.param == "http_externalize_always":
+            from vgi_rpc.external import ExternalLocationConfig
+
+            ext_port: int = request.getfixturevalue("conformance_http_externalize_always_port")
+            return http_connect(
+                ConformanceService,
+                f"http://127.0.0.1:{ext_port}",
+                on_log=on_log,
+                # Server uses http://127.0.0.1 download URLs from the
+                # in-process fake storage; disable the HTTPS-only validator.
+                external_location=ExternalLocationConfig(url_validator=None),
             )
         elif request.param == "unix":
             return unix_connect(

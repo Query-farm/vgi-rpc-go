@@ -41,6 +41,23 @@ type ExternalStorage interface {
 	Upload(data []byte, schema *arrow.Schema, contentEncoding string) (string, error)
 }
 
+// UploadURL is a pre-signed URL pair vended by the server so the client
+// can upload large request payloads directly to object storage and then
+// re-POST a small pointer batch.  The expiry is informational; the
+// server-side store decides actual lifetime.
+type UploadURL struct {
+	UploadURL   string    // PUT URL
+	DownloadURL string    // GET URL the server will fetch from
+	ExpiresAt   time.Time // UTC
+}
+
+// UploadURLProvider generates pre-signed upload/download URL pairs for
+// client-vended request externalization.  Implementations must be safe
+// for concurrent use.
+type UploadURLProvider interface {
+	GenerateUploadURL(schema *arrow.Schema) (UploadURL, error)
+}
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------

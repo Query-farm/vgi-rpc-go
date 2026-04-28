@@ -90,6 +90,42 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 	}
 	defer req.Batch.Release()
 
+	// If the client advertised a shared-memory segment, attach it for the
+	// lifetime of this dispatch and resolve the request batch through it
+	// (the request batch may itself be a pointer batch carrying the
+	// real parameters in the segment).
+	if seg := shmAttachFromMetadata(req.Metadata); seg != nil {
+		req.Shm = seg
+		defer func() {
+			_ = seg.Close()
+		}()
+		if IsShmPointerBatch(req.Batch) {
+			resolved, releaseOff, release, rerr := ResolveShmBatch(req.Batch, seg)
+			if rerr != nil {
+				// Unrecoverable: the pointer batch carries no usable
+				// row data on its own, so dispatching it would silently
+				// fail parameter deserialization. Surface the resolve
+				// error directly to the client. The method may not
+				// have been looked up yet at this point, so use an
+				// empty schema for the error response (matches the
+				// other early-error paths in this function).
+				rpcErr := &RpcError{
+					Type:    "IOError",
+					Message: fmt.Sprintf("shm resolve failed: %v", rerr),
+				}
+				emptySchema := arrow.NewSchema(nil, nil)
+				s.logIPCWriteErr("error-response", req.Method,
+					writeErrorResponse(w, emptySchema, rpcErr, s.serverID, req.RequestID, s.debugErrors))
+				return nil
+			}
+			req.Batch.Release()
+			req.Batch = resolved
+			if release {
+				_ = seg.FreeOffset(releaseOff)
+			}
+		}
+	}
+
 	// Handle __describe__ introspection
 	if req.Method == "__describe__" {
 		return s.serveDescribe(w, req)
