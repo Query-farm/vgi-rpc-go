@@ -29,6 +29,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"sync"
@@ -804,7 +805,23 @@ func unixNow() unix.Timespec {
 // if the metadata is absent (no shm in this request) or attach fails.
 // Server hot path: never returns an error; failures are silently
 // degraded into "no shm" so the request still serves over the pipe.
-func shmAttachFromMetadata(reqMeta map[string]string) *ShmSegment {
+//
+// Only honoured for local pipe / Unix-socket transports where the
+// client and server share a kernel and the client legitimately owns
+// the named segment.  HTTP transport is explicitly rejected: a remote
+// client could otherwise supply an arbitrary POSIX shm name and have
+// the server attach to it, leading to information disclosure or
+// crashes on multi-tenant hosts.  HTTP dispatch does not currently
+// call this helper; the rejection is defence-in-depth against future
+// refactors that might wire it differently.
+func shmAttachFromMetadata(reqMeta map[string]string, isHTTP bool) *ShmSegment {
+	if isHTTP {
+		if name, ok := reqMeta[MetaShmSegmentName]; ok {
+			slog.Warn("vgirpc: refusing dynamic SHM attach over HTTP transport",
+				"client_supplied_segment", name)
+		}
+		return nil
+	}
 	name, hasName := reqMeta[MetaShmSegmentName]
 	sizeStr, hasSize := reqMeta[MetaShmSegmentSize]
 	if !hasName || !hasSize {

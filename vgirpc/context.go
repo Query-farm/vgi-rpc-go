@@ -41,7 +41,12 @@ type CallContext struct {
 	InputMetadata arrow.Metadata
 	// Cookies holds the incoming HTTP request cookies.  Empty for non-HTTP
 	// transports (pipe, subprocess, Unix socket).
-	Cookies           map[string]string
+	Cookies map[string]string
+	// Kind identifies the transport the server is bound to. Empty string
+	// before the first request is dispatched. Use this for per-call
+	// branching (e.g. attach HTTP-specific tracing attributes only when
+	// Kind == TransportKindHTTP).
+	Kind              TransportKind
 	logs              []LogMessage
 	responseCookies   []CookieSpec
 	cookieSinkEnabled bool

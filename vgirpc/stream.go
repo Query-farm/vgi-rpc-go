@@ -77,6 +77,14 @@ type OutputCollector struct {
 	// batches instead of the output schema. Use this when the function emits
 	// all columns but the wire output should be a projection.
 	ProcessSchema *arrow.Schema
+
+	// Snapshot budgets surfaced to worker code. 0 means "no cap" /
+	// "not applicable" (e.g. non-HTTP transports). See
+	// RemainingResponseBytes / RemainingExternalizedResponseBytes /
+	// ExternalizationEnabled for the public accessors.
+	remainingResponseBytes             int64
+	remainingExternalizedResponseBytes int64
+	externalizationEnabled             bool
 }
 
 // annotatedBatch is a batch with optional custom metadata.
@@ -93,6 +101,16 @@ func newOutputCollector(schema *arrow.Schema, serverID string, producerMode bool
 		producerMode: producerMode,
 		serverID:     serverID,
 	}
+}
+
+// setBudgets seeds the snapshot budgets surfaced to worker code via
+// RemainingResponseBytes / RemainingExternalizedResponseBytes /
+// ExternalizationEnabled. Called by HTTP dispatch when the collector is
+// created so workers can size their emitted batch to fit the budget.
+func (o *OutputCollector) setBudgets(remaining, remainingExternal int64, externalizationEnabled bool) {
+	o.remainingResponseBytes = remaining
+	o.remainingExternalizedResponseBytes = remainingExternal
+	o.externalizationEnabled = externalizationEnabled
 }
 
 // Emit adds a pre-built data batch. Returns an error if a data batch was already emitted.
@@ -170,6 +188,37 @@ func (o *OutputCollector) Finish() error {
 // Finished returns whether Finish() has been called.
 func (o *OutputCollector) Finished() bool {
 	return o.finished
+}
+
+// RemainingResponseBytes returns the HTTP body bytes the framework will
+// accept from this iteration before triggering a continuation token
+// (producer) or strict-fail (unary/exchange). Returns 0 when no body cap
+// is in effect (pipe/subprocess/unix transports, or HTTP without
+// max_response_bytes configured) — workers should treat 0 as "no
+// budget surfaced". The value is a snapshot at construction and does
+// not update as batches accumulate within one Produce/Exchange call.
+//
+// The value counts wire bytes including IPC framing, slightly
+// conservative for a worker computing payload size from its own data
+// structures. Comparisons like `est_payload <= remaining` leave a
+// small margin for framing overhead — the safe direction.
+func (o *OutputCollector) RemainingResponseBytes() int64 {
+	return o.remainingResponseBytes
+}
+
+// RemainingExternalizedResponseBytes returns the external-channel
+// budget remaining for this iteration. Returns 0 when no external cap
+// is configured *or* when externalisation is not enabled — workers
+// should consult ExternalizationEnabled to disambiguate.
+func (o *OutputCollector) RemainingExternalizedResponseBytes() int64 {
+	return o.remainingExternalizedResponseBytes
+}
+
+// ExternalizationEnabled reports whether the server has external
+// storage wired up. Workers consult this to decide whether to expect
+// externalisation as an escape valve for oversize emissions.
+func (o *OutputCollector) ExternalizationEnabled() bool {
+	return o.externalizationEnabled
 }
 
 // ClientLog emits a zero-row log batch with the given level and message.

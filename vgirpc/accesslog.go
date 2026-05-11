@@ -34,13 +34,36 @@ type AccessLogHook struct {
 	mu            sync.Mutex
 	w             io.Writer
 	serverVersion string
+	debug         bool
 }
 
 // NewAccessLogHook returns an [AccessLogHook] that writes records to w.
 // serverVersion is reported in the optional ``server_version`` field;
 // pass an empty string to omit it.
+//
+// By default the hook emits records at the equivalent of "INFO" level:
+// ``request_data`` is replaced with ``original_request_bytes`` plus
+// ``truncated: true`` because the full base64-encoded payload typically
+// dominates the record (8+ KiB per call) and most audit consumers care
+// about who/what/when rather than the raw bytes. Call [AccessLogHook.SetDebug]
+// to re-enable the full payload for replay/audit workloads.
 func NewAccessLogHook(w io.Writer, serverVersion string) *AccessLogHook {
 	return &AccessLogHook{w: w, serverVersion: serverVersion}
+}
+
+// SetDebug toggles emission of the full base64-encoded request payload
+// in the ``request_data`` field. When true, the record carries the
+// payload (suitable for replay/audit). When false (default), the
+// payload is omitted and the record is marked ``truncated: true`` with
+// ``original_request_bytes`` set so the access-log schema's
+// "unary requires request_data unless truncated" invariant still holds.
+//
+// Mirrors Python's ``_access_logger.isEnabledFor(logging.DEBUG)``
+// gating introduced in vgi-rpc e7ee750.
+func (h *AccessLogHook) SetDebug(debug bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.debug = debug
 }
 
 type accessLogToken struct {
@@ -110,7 +133,18 @@ func (h *AccessLogHook) OnDispatchEnd(_ context.Context, token HookToken, info D
 		record["http_status"] = info.HTTPStatus
 	}
 	if len(info.RequestData) > 0 {
-		record["request_data"] = base64.StdEncoding.EncodeToString(info.RequestData)
+		// Gate full base64 payload on DEBUG mode. At INFO this field is
+		// by far the heaviest in the record; audit consumers rarely need
+		// the bytes. When omitted, mark the record truncated and surface
+		// the original size so the access-log schema's "unary requires
+		// request_data unless truncated" invariant still holds.
+		encoded := base64.StdEncoding.EncodeToString(info.RequestData)
+		if h.debug {
+			record["request_data"] = encoded
+		} else {
+			record["original_request_bytes"] = len(encoded)
+			record["truncated"] = true
+		}
 	}
 	if info.MethodType == DispatchMethodStream {
 		// Schema requires stream_id (32 lowercase hex chars) on every stream

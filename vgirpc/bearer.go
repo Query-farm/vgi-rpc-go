@@ -4,6 +4,7 @@
 package vgirpc
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"strings"
 )
@@ -38,15 +39,43 @@ func BearerAuthenticate(validate func(token string) (*AuthContext, error)) Authe
 // BearerAuthenticateStatic returns an [AuthenticateFunc] that validates Bearer
 // tokens against a fixed map of token → [AuthContext]. Unknown tokens are
 // rejected with a ValueError [RpcError].
+//
+// The lookup uses [crypto/subtle.ConstantTimeCompare] against each known
+// token rather than a map lookup so the comparison runs in constant time
+// relative to the secret. A map lookup short-circuits string comparison on
+// the first mismatching byte and would let a remote attacker brute-force a
+// valid token byte-by-byte through response timing; this avoids that side
+// channel at the cost of an O(n) scan over the typically tiny token set.
+// The loop never short-circuits on a match — every iteration runs the full
+// comparison so total work is independent of which (if any) token matched.
 func BearerAuthenticateStatic(tokens map[string]*AuthContext) AuthenticateFunc {
+	type entry struct {
+		key []byte
+		ctx *AuthContext
+	}
+	encoded := make([]entry, 0, len(tokens))
+	for k, v := range tokens {
+		encoded = append(encoded, entry{key: []byte(k), ctx: v})
+	}
 	return BearerAuthenticate(func(token string) (*AuthContext, error) {
-		if ac, ok := tokens[token]; ok {
-			return ac, nil
+		tokenB := []byte(token)
+		var match *AuthContext
+		for _, e := range encoded {
+			// ConstantTimeCompare returns 1 only when lengths are equal
+			// and bytes match. Always run for every entry; do not
+			// short-circuit on the first hit — that would re-introduce
+			// the timing side channel.
+			if subtle.ConstantTimeCompare(tokenB, e.key) == 1 && match == nil {
+				match = e.ctx
+			}
 		}
-		return nil, &RpcError{
-			Type:    "ValueError",
-			Message: "Unknown bearer token",
+		if match == nil {
+			return nil, &RpcError{
+				Type:    "ValueError",
+				Message: "Unknown bearer token",
+			}
 		}
+		return match, nil
 	})
 }
 

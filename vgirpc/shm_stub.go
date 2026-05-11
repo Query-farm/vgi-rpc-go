@@ -72,6 +72,6 @@ func MaybeWriteToShm(batch arrow.RecordBatch, _ *ShmSegment) (arrow.RecordBatch,
 }
 
 // shmAttachFromMetadata always returns nil on non-POSIX platforms.
-func shmAttachFromMetadata(map[string]string) *ShmSegment {
+func shmAttachFromMetadata(map[string]string, bool) *ShmSegment {
 	return nil
 }

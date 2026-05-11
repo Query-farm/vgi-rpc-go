@@ -108,6 +108,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		Auth:              auth,
 		TransportMetadata: transportMeta,
 		Cookies:           buildHTTPCookies(r),
+		Kind:              TransportKindHTTP,
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
@@ -394,6 +395,7 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 			Auth:              auth,
 			TransportMetadata: transportMeta,
 			Cookies:           cookies,
+			Kind:              TransportKindHTTP,
 		}
 		func() {
 			defer func() {
@@ -450,6 +452,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
 
 	out := newOutputCollector(schema, h.server.serverID, false)
+	out.setBudgets(h.maxResponseBytes, h.maxExternalizedResponseBytes, h.server.externalConfig != nil)
 	callCtx := &CallContext{
 		Ctx:               ctx,
 		ServerID:          h.server.serverID,
@@ -458,6 +461,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		Auth:              auth,
 		TransportMetadata: transportMeta,
 		Cookies:           cookies,
+		Kind:              TransportKindHTTP,
 	}
 
 	var exchangeErr error
@@ -577,6 +581,7 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 			return true, nil
 		}
 		out := newOutputCollector(schema, h.server.serverID, true)
+		out.setBudgets(h.maxResponseBytes, h.maxExternalizedResponseBytes, h.server.externalConfig != nil)
 		callCtx := &CallContext{
 			Ctx:               ctx,
 			ServerID:          h.server.serverID,
@@ -585,6 +590,7 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 			Auth:              auth,
 			TransportMetadata: transportMeta,
 			Cookies:           cookies,
+			Kind:              TransportKindHTTP,
 		}
 
 		var produceErr error

@@ -106,8 +106,13 @@ func (h *HttpServer) handleDescribe(w http.ResponseWriter, r *http.Request) {
 // --- Helpers ---
 
 // readHTTPBody reads the request body, decompressing it if the Content-Encoding
-// header indicates zstd compression. Both the raw and decompressed body are
-// limited to h.maxBodySize bytes (0 = unlimited).
+// header indicates zstd compression. The raw body is limited to h.maxBodySize
+// bytes; the decompressed body is limited to h.maxDecompressedBodySize bytes
+// (defaulting to maxBodySize*16). Both default 0 = unlimited.
+//
+// The decompression cap is checked against the zstd frame's declared
+// content size *before* allocation so a tiny compressed body claiming a
+// huge decompressed size cannot OOM the server (decompression-bomb DoS).
 func (h *HttpServer) readHTTPBody(r *http.Request) ([]byte, error) {
 	limit := h.maxBodySize
 
@@ -126,22 +131,31 @@ func (h *HttpServer) readHTTPBody(r *http.Request) ([]byte, error) {
 	}
 
 	if r.Header.Get("Content-Encoding") == "zstd" {
-		reader, err := zstd.NewReader(bytes.NewReader(body))
+		decompressedCap := h.maxDecompressedBodySize
+		if decompressedCap <= 0 && limit > 0 {
+			decompressedCap = limit * 16
+		}
+
+		opts := []zstd.DOption{}
+		if decompressedCap > 0 {
+			opts = append(opts, zstd.WithDecoderMaxMemory(uint64(decompressedCap)))
+		}
+		reader, err := zstd.NewReader(bytes.NewReader(body), opts...)
 		if err != nil {
 			return nil, fmt.Errorf("zstd decompression init: %w", err)
 		}
 		defer reader.Close()
 
-		if limit > 0 {
-			body, err = io.ReadAll(io.LimitReader(reader, limit+1))
+		if decompressedCap > 0 {
+			body, err = io.ReadAll(io.LimitReader(reader, decompressedCap+1))
 		} else {
 			body, err = io.ReadAll(reader)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("zstd decompression: %w", err)
 		}
-		if limit > 0 && int64(len(body)) > limit {
-			return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Decompressed body exceeds maximum size of %d bytes", limit)}
+		if decompressedCap > 0 && int64(len(body)) > decompressedCap {
+			return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Decompressed body exceeds maximum size of %d bytes", decompressedCap)}
 		}
 	}
 	return body, nil

@@ -8,10 +8,43 @@ import (
 	"log/slog"
 	"reflect"
 	"sort"
+	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
+
+// TransportKind is a coarse identifier of the transport binding a [Server].
+//
+// Workers (RPC method implementations) read this via [Server.TransportKind]
+// or the [ServeStartHook] lifecycle hook to tailor startup behaviour
+// (skip HTTP-only caching, enable transport-specific metrics, etc.).
+// Per-call branching is available via [CallContext.Kind].
+type TransportKind string
+
+const (
+	// TransportKindPipe identifies stdio / pipe / shared-memory pipe transports.
+	TransportKindPipe TransportKind = "pipe"
+	// TransportKindHTTP identifies the HTTP server transport.
+	TransportKindHTTP TransportKind = "http"
+	// TransportKindUnix identifies AF_UNIX socket transports.
+	TransportKindUnix TransportKind = "unix"
+)
+
+// TransportCapabilityShm signals the transport supports zero-copy
+// shared-memory pointer batches. Currently only set for pipe transports
+// bound through a shared-memory segment.
+const TransportCapabilityShm = "shm"
+
+// ServeStartHook is a lifecycle callback fired once per process before
+// the first request is dispatched. For HTTP it fires on the first request
+// handled in the current process (lazy / fork-safe). For pipe transports
+// it fires when [Server.Serve] begins.
+//
+// A hook that returns an error propagates out of the serve path; the
+// transport binding is NOT committed when the hook fails, so a retry
+// re-fires the hook rather than silently skipping it.
+type ServeStartHook func(kind TransportKind, capabilities map[string]bool) error
 
 // MethodType identifies how a registered method should be dispatched.
 type MethodType int
@@ -54,6 +87,12 @@ type Server struct {
 	dispatchHook    DispatchHook
 	debugErrors     bool
 	externalConfig  *ExternalLocationConfig
+
+	// Transport binding state, set lazily by notifyTransport.
+	transportMu           sync.Mutex
+	transportKind         TransportKind
+	transportCapabilities map[string]bool
+	serveStartHook        ServeStartHook
 }
 
 // NewServer creates a new RPC server.
@@ -94,6 +133,90 @@ func (s *Server) SetExternalLocation(config *ExternalLocationConfig) {
 // SetDispatchHook registers a hook that is called around each RPC dispatch.
 func (s *Server) SetDispatchHook(hook DispatchHook) {
 	s.dispatchHook = hook
+}
+
+// SetServeStartHook registers a lifecycle callback fired once per process
+// before the first request is dispatched. Use this to run worker-side
+// setup that depends on the transport binding (warm caches differently
+// for HTTP vs. pipe, attach metrics labels, etc.).
+//
+// The hook is fired lazily on first dispatch for HTTP (so pre-fork
+// servers wire each child correctly) and eagerly on [Server.Serve] for
+// pipe transports.
+func (s *Server) SetServeStartHook(hook ServeStartHook) {
+	s.transportMu.Lock()
+	defer s.transportMu.Unlock()
+	s.serveStartHook = hook
+}
+
+// TransportKind returns the kind of transport the server is bound to,
+// or empty string before the first request is dispatched.
+func (s *Server) TransportKind() TransportKind {
+	s.transportMu.Lock()
+	defer s.transportMu.Unlock()
+	return s.transportKind
+}
+
+// TransportCapabilities returns the capability set advertised by the
+// bound transport. Currently includes "shm" when a shared-memory pipe
+// is in use. Returns nil before a transport is bound.
+func (s *Server) TransportCapabilities() map[string]bool {
+	s.transportMu.Lock()
+	defer s.transportMu.Unlock()
+	if s.transportCapabilities == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(s.transportCapabilities))
+	for k, v := range s.transportCapabilities {
+		out[k] = v
+	}
+	return out
+}
+
+// notifyTransport binds the server to a transport and fires
+// [ServeStartHook] once. Idempotent for the same (kind, capabilities).
+// Bind state is committed only after the hook returns successfully, so a
+// transient hook failure leaves transportKind unset and the next request
+// re-fires the hook rather than silently skipping it.
+func (s *Server) notifyTransport(kind TransportKind, capabilities map[string]bool) error {
+	s.transportMu.Lock()
+	if s.transportKind == kind && capabilitiesEqual(s.transportCapabilities, capabilities) {
+		s.transportMu.Unlock()
+		return nil
+	}
+	hook := s.serveStartHook
+	s.transportMu.Unlock()
+
+	if hook != nil {
+		// Defensive copy so the hook can't mutate our internal state.
+		capsCopy := make(map[string]bool, len(capabilities))
+		for k, v := range capabilities {
+			capsCopy[k] = v
+		}
+		if err := hook(kind, capsCopy); err != nil {
+			slog.Error("vgirpc: on_serve_start hook failed; not committing transport binding",
+				"transport_kind", string(kind), "err", err)
+			return err
+		}
+	}
+
+	s.transportMu.Lock()
+	s.transportKind = kind
+	s.transportCapabilities = capabilities
+	s.transportMu.Unlock()
+	return nil
+}
+
+func capabilitiesEqual(a, b map[string]bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 // SetProtocolVersion stores an operator-supplied free-form protocol-contract

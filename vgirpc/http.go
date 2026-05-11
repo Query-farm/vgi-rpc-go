@@ -14,8 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -41,10 +39,11 @@ type HttpServer struct {
 	server      *Server
 	signingKey  []byte
 	tokenTTL    time.Duration
-	maxBodySize int64
-	prefix      string
+	maxBodySize             int64
+	maxDecompressedBodySize int64 // 0 = derive as maxBodySize*16
+	prefix                  string
 	mux         *http.ServeMux
-	zstdEncoder *zstd.Encoder // non-nil when response compression is enabled
+	zstdEncoderLevel int // > 0 when response compression is enabled
 
 	rehydrateFunc      RehydrateFunc    // called after unpacking state tokens
 	producerBatchLimit int              // max data batches per producer response; 0 = unlimited
@@ -404,11 +403,22 @@ func (h *HttpServer) SetMaxUploadBytes(n int64) {
 	h.maxUploadBytes = n
 }
 
-// SetMaxBodySize sets the maximum allowed HTTP request body size in bytes.
-// The limit applies to both raw and decompressed bodies. Set to 0 to disable
-// the limit (not recommended for production).
+// SetMaxBodySize sets the maximum allowed HTTP wire request body size in
+// bytes. The decompressed cap defaults to 16x this value unless explicitly
+// overridden via SetMaxDecompressedBodySize. Set to 0 to disable the limit
+// (not recommended for production).
 func (h *HttpServer) SetMaxBodySize(n int64) {
 	h.maxBodySize = n
+}
+
+// SetMaxDecompressedBodySize sets the maximum allowed decompressed HTTP
+// request body size in bytes. When unset (0), the cap is derived as
+// maxBodySize*16 — generous enough for normal zstd ratios on Arrow IPC
+// bodies, tight enough that a tiny compressed body cannot inflate to
+// hundreds of MB. Set to a positive value to override; set to a negative
+// value to disable the cap entirely (matches Python's None).
+func (h *HttpServer) SetMaxDecompressedBodySize(n int64) {
+	h.maxDecompressedBodySize = n
 }
 
 // SetCompressionLevel enables zstd compression of response bodies at the
@@ -580,6 +590,16 @@ func (h *HttpServer) authenticate(w http.ResponseWriter, r *http.Request) *AuthC
 
 // ServeHTTP implements http.Handler.
 func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Fire the on_serve_start hook lazily on the first request so pre-fork
+	// servers wire each child correctly. notifyTransport is idempotent for
+	// repeat calls with the same kind. If the hook fails, refuse the
+	// request — the transport binding has not been committed and a retry
+	// will re-fire the hook.
+	if err := h.server.notifyTransport(TransportKindHTTP, nil); err != nil {
+		http.Error(w, fmt.Sprintf("server startup hook failed: %v", err), http.StatusServiceUnavailable)
+		return
+	}
+
 	// Auto-initialize pages on first request if not done explicitly.
 	if h.landingHTML == nil && h.describeHTML == nil && h.notFoundHTML == nil {
 		h.InitPages()
@@ -618,8 +638,8 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.zstdEncoder != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "zstd") {
-		cw := &compressResponseWriter{ResponseWriter: w, encoder: h.zstdEncoder}
+	if h.zstdEncoderLevel > 0 && strings.Contains(r.Header.Get("Accept-Encoding"), "zstd") {
+		cw := &compressResponseWriter{ResponseWriter: w, encoderLevel: h.zstdEncoderLevel}
 		defer cw.finish()
 		h.mux.ServeHTTP(cw, r)
 		return

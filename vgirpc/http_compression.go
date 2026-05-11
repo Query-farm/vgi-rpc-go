@@ -18,14 +18,19 @@ import (
 // response compression (the default).
 func (h *HttpServer) SetCompressionLevel(level int) error {
 	if level <= 0 {
-		h.zstdEncoder = nil
+		h.zstdEncoderLevel = 0
 		return nil
 	}
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevel(level)))
+	// Validate the level early by attempting a probe encoder. The probe
+	// is discarded; per-request encoders are constructed on demand so
+	// each goroutine gets a fresh writer (klauspost's Encoder is not
+	// goroutine-safe and reuse-via-Reset across goroutines is awkward).
+	probe, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevel(level)))
 	if err != nil {
 		return fmt.Errorf("vgirpc: failed to create zstd encoder: %w", err)
 	}
-	h.zstdEncoder = enc
+	_ = probe.Close()
+	h.zstdEncoderLevel = level
 	return nil
 }
 
@@ -35,9 +40,9 @@ func (h *HttpServer) SetCompressionLevel(level int) error {
 // when the response has an Arrow content type.
 type compressResponseWriter struct {
 	http.ResponseWriter
-	encoder    *zstd.Encoder
-	buf        bytes.Buffer
-	statusCode int
+	encoderLevel int
+	buf          bytes.Buffer
+	statusCode   int
 }
 
 func (cw *compressResponseWriter) WriteHeader(code int) {
@@ -48,21 +53,36 @@ func (cw *compressResponseWriter) Write(data []byte) (int, error) {
 	return cw.buf.Write(data)
 }
 
+// finish flushes the buffered response. For Arrow IPC bodies that the
+// client accepts zstd-compressed, the buffer is streamed directly into a
+// per-request zstd writer attached to the underlying ResponseWriter —
+// avoiding the extra `len(compressed)` allocation that EncodeAll would
+// pay for a "buffer → compressed buffer → write" pipeline.
+//
+// Mirrors the streaming compression refactor on the Python side
+// (vgi-rpc 4cfbcbe), which dropped per-thread peak from ~2× body size
+// to ~1× body size by removing the intermediate compressed bytes copy.
 func (cw *compressResponseWriter) finish() {
 	if cw.statusCode == 0 {
 		cw.statusCode = http.StatusOK
 	}
-	data := cw.buf.Bytes()
-	if cw.ResponseWriter.Header().Get("Content-Type") == arrowContentType && len(data) > 0 {
-		compressed := cw.encoder.EncodeAll(data, make([]byte, 0, len(data)))
+	if cw.ResponseWriter.Header().Get("Content-Type") == arrowContentType && cw.buf.Len() > 0 {
 		cw.ResponseWriter.Header().Set("Content-Encoding", "zstd")
 		cw.ResponseWriter.WriteHeader(cw.statusCode)
-		if _, err := cw.ResponseWriter.Write(compressed); err != nil {
-			slog.Debug("http: response write failed", "err", err)
+		writer, err := zstd.NewWriter(cw.ResponseWriter, zstd.WithEncoderLevel(zstd.EncoderLevel(cw.encoderLevel)))
+		if err != nil {
+			slog.Debug("http: zstd writer init failed", "err", err)
+			return
+		}
+		if _, err := writer.Write(cw.buf.Bytes()); err != nil {
+			slog.Debug("http: zstd write failed", "err", err)
+		}
+		if err := writer.Close(); err != nil {
+			slog.Debug("http: zstd close failed", "err", err)
 		}
 	} else {
 		cw.ResponseWriter.WriteHeader(cw.statusCode)
-		if _, err := cw.ResponseWriter.Write(data); err != nil {
+		if _, err := cw.ResponseWriter.Write(cw.buf.Bytes()); err != nil {
 			slog.Debug("http: response write failed", "err", err)
 		}
 	}

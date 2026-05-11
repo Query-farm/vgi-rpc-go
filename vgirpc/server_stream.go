@@ -37,6 +37,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		LogLevel:          LogLevel(req.LogLevel),
 		Auth:              Anonymous(),
 		TransportMetadata: req.Metadata,
+		Kind:              s.TransportKind(),
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
@@ -192,6 +193,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 						LogLevel:          LogLevel(req.LogLevel),
 						Auth:              Anonymous(),
 						TransportMetadata: req.Metadata,
+						Kind:              s.TransportKind(),
 					}
 					if cancelCtx.LogLevel == "" {
 						cancelCtx.LogLevel = LogTrace
@@ -277,6 +279,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			LogLevel:          LogLevel(req.LogLevel),
 			Auth:              Anonymous(),
 			TransportMetadata: req.Metadata,
+			Kind:              s.TransportKind(),
 		}
 		if iterCtx.LogLevel == "" {
 			iterCtx.LogLevel = LogTrace

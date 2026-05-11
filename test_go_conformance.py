@@ -30,6 +30,11 @@ def go_transport() -> Iterator[SubprocessTransport]:
     transport.close()
 
 
+# Environment knob so `make race` (which builds the worker with -race and
+# slows it 3-5x) can bump teardown timeouts without changing call sites.
+_WORKER_TEARDOWN_TIMEOUT = float(os.environ.get("VGI_GO_WORKER_TEARDOWN_TIMEOUT", "5"))
+
+
 def _wait_for_http(port: int, timeout: float = 5.0) -> None:
     """Poll until the HTTP server is accepting connections."""
     deadline = time.monotonic() + timeout
@@ -60,7 +65,7 @@ def _start_http_worker(*extra_args: str) -> Iterator[int]:
         yield port
     finally:
         proc.terminate()
-        proc.wait(timeout=5)
+        proc.wait(timeout=_WORKER_TEARDOWN_TIMEOUT)
 
 
 @pytest.fixture(scope="session")
@@ -103,6 +108,19 @@ def conformance_http_with_storage_port(conformance_fake_storage: str) -> Iterato
 def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> Iterator[int]:
     """Go HTTP worker with externalization + zstd compression enabled."""
     yield from _start_http_worker("--http-with-zstd-storage", conformance_fake_storage)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_strict_cap_port() -> Iterator[int]:
+    """Go HTTP worker with strict response caps (matches Python's --http-strict).
+
+    The worker installs max_response_bytes + max_externalized_response_bytes
+    (defaulting to 1 MiB each). The conformance suite's
+    ``TestHttpResponseCap`` / ``TestHttpResponseCapSoftWire`` classes probe
+    the capability headers at runtime and tailor expectations to whichever
+    caps the server advertises.
+    """
+    yield from _start_http_worker("--http-strict")
 
 
 @pytest.fixture(scope="session")
@@ -166,7 +184,7 @@ def go_unix_path() -> Iterator[str]:
         yield path
     finally:
         proc.terminate()
-        proc.wait(timeout=5)
+        proc.wait(timeout=_WORKER_TEARDOWN_TIMEOUT)
 
 
 ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]

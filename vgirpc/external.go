@@ -5,6 +5,7 @@ package vgirpc
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"sync"
 	"time"
 
@@ -282,6 +284,40 @@ var zstdDecoderPool = sync.Pool{
 	},
 }
 
+// defaultExternalFetchDecompressionCap is the fallback cap when no
+// FetchConfig is in scope (resolver path with no operator-tunable
+// max_fetch_bytes). 4 GiB matches 16 * the 256 MiB default MaxFetchBytes
+// so the resolver path has the same headroom as a default-configured
+// parallel fetch.
+const defaultExternalFetchDecompressionCap int64 = 4 * 1024 * 1024 * 1024
+
+// decompressZstdCapped decodes zstd-compressed bytes with an upper
+// bound on the decompressed size. The bound is checked against the
+// frame's declared content size *before* allocation, mirroring the
+// Python external_fetch defence against decompression-bomb DoS where
+// a tiny compressed body claims a huge decompressed size and OOMs the
+// client. cap <= 0 disables the cap.
+func decompressZstdCapped(compressed []byte, cap int64) ([]byte, error) {
+	if cap <= 0 {
+		decoder := zstdDecoderPool.Get().(*zstd.Decoder)
+		defer zstdDecoderPool.Put(decoder)
+		return decoder.DecodeAll(compressed, nil)
+	}
+	reader, err := zstd.NewReader(bytes.NewReader(compressed), zstd.WithDecoderMaxMemory(uint64(cap)))
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	out, err := io.ReadAll(io.LimitReader(reader, cap+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(out)) > cap {
+		return nil, fmt.Errorf("decompressed output exceeds cap of %d bytes", cap)
+	}
+	return out, nil
+}
+
 // ResolveExternalLocation checks if a batch is an external pointer and fetches
 // the data from the URL if so. Returns the original batch unchanged if not a
 // pointer batch.
@@ -399,9 +435,7 @@ func fetchExternalData(client *http.Client, rawURL string) ([]byte, error) {
 
 	// Decompress if needed
 	if resp.Header.Get("Content-Encoding") == "zstd" {
-		decoder := zstdDecoderPool.Get().(*zstd.Decoder)
-		defer zstdDecoderPool.Put(decoder)
-		data, err = decoder.DecodeAll(data, nil)
+		data, err = decompressZstdCapped(data, defaultExternalFetchDecompressionCap)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing zstd data from %s: %w", rawURL, err)
 		}
@@ -500,17 +534,31 @@ func FetchWithParallelRangeRequests(client *http.Client, rawURL string, cfg *Fet
 		index int
 		data  []byte
 		err   error
+		hedge bool // true if this result is from a speculative duplicate
 	}
 
 	results := make([][]byte, numChunks)
-	resultCh := make(chan chunkResult, numChunks)
+	// Each chunk can have at most one hedge in flight, so the channel
+	// can receive up to 2*numChunks results in the worst case. Buffering
+	// to that ceiling ensures straggler goroutines never block on send
+	// after the receive loop exits early, so they can finish cleanly.
+	resultCh := make(chan chunkResult, numChunks*2)
 	sem := make(chan struct{}, cfg.MaxParallelRequests)
 
-	// Track completion times for hedging
+	// Per-chunk launch timestamps (set when the *initial* attempt starts).
+	// Used to compute elapsed-time-since-launch when deciding whether a
+	// pending chunk has gone slow enough to warrant a hedge.
 	var mu sync.Mutex
-	completionTimes := make([]time.Duration, 0, numChunks)
+	taskStart := make([]time.Time, numChunks)
+	completionTimes := make([]time.Duration, 0, numChunks*2)
 
-	fetchChunk := func(index int) {
+	// Cancel context fires when the receive loop has all chunks; in-flight
+	// stragglers honour it via req.WithContext and exit promptly instead
+	// of running to completion on cancelled work.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	fetchChunk := func(index int, isHedge bool) {
 		sem <- struct{}{}
 		defer func() { <-sem }()
 
@@ -521,24 +569,24 @@ func FetchWithParallelRangeRequests(client *http.Client, rawURL string, cfg *Fet
 			rangeEnd = contentLength - 1
 		}
 
-		req, _ := http.NewRequest("GET", rawURL, nil)
+		req, _ := http.NewRequestWithContext(ctx, "GET", rawURL, nil)
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", rangeStart, rangeEnd))
 
 		resp, err := client.Do(req)
 		if err != nil {
-			resultCh <- chunkResult{index: index, err: err}
+			resultCh <- chunkResult{index: index, err: err, hedge: isHedge}
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-			resultCh <- chunkResult{index: index, err: fmt.Errorf("range request returned %d", resp.StatusCode)}
+			resultCh <- chunkResult{index: index, err: fmt.Errorf("range request returned %d", resp.StatusCode), hedge: isHedge}
 			return
 		}
 
 		data, err := io.ReadAll(resp.Body)
 		if err != nil {
-			resultCh <- chunkResult{index: index, err: err}
+			resultCh <- chunkResult{index: index, err: err, hedge: isHedge}
 			return
 		}
 
@@ -547,32 +595,106 @@ func FetchWithParallelRangeRequests(client *http.Client, rawURL string, cfg *Fet
 		completionTimes = append(completionTimes, elapsed)
 		mu.Unlock()
 
-		resultCh <- chunkResult{index: index, data: data}
+		resultCh <- chunkResult{index: index, data: data, hedge: isHedge}
 	}
 
-	// Launch all chunks
+	// Launch initial chunks; stamp launch time per chunk so hedge
+	// decisions can compute "elapsed since start" without needing the
+	// goroutine to publish its own start time.
+	now := time.Now()
 	for i := 0; i < numChunks; i++ {
-		go fetchChunk(i)
+		taskStart[i] = now
+		go fetchChunk(i, false)
 	}
 
-	// Collect results
-	received := 0
+	hedgingEnabled := cfg.SpeculativeRetryMultiplier > 0
+	hedgedChunks := make(map[int]bool)
+	chunksRemaining := numChunks
+	expected := numChunks
 	var firstErr error
-	for received < numChunks {
+
+	maybeHedge := func() {
+		if !hedgingEnabled {
+			return
+		}
+		if cfg.MaxSpeculativeHedges > 0 && len(hedgedChunks) >= cfg.MaxSpeculativeHedges {
+			return
+		}
+		mu.Lock()
+		if len(completionTimes) < 2 {
+			mu.Unlock()
+			return
+		}
+		// Sort a snapshot to avoid mutating shared state; take median.
+		snapshot := make([]time.Duration, len(completionTimes))
+		copy(snapshot, completionTimes)
+		mu.Unlock()
+		sort.Slice(snapshot, func(i, j int) bool { return snapshot[i] < snapshot[j] })
+		median := snapshot[len(snapshot)/2]
+		threshold := time.Duration(float64(median) * cfg.SpeculativeRetryMultiplier)
+		nowT := time.Now()
+		for i := 0; i < numChunks; i++ {
+			if results[i] != nil || hedgedChunks[i] {
+				continue
+			}
+			if cfg.MaxSpeculativeHedges > 0 && len(hedgedChunks) >= cfg.MaxSpeculativeHedges {
+				return
+			}
+			if nowT.Sub(taskStart[i]) > threshold {
+				hedgedChunks[i] = true
+				expected++
+				go fetchChunk(i, true)
+			}
+		}
+	}
+
+	// Receive loop. `expected` grows as we launch hedges; we exit when
+	// we have a successful result for every chunk OR when we've drained
+	// every launched goroutine and some chunks are still missing.
+	for chunksRemaining > 0 {
 		cr := <-resultCh
+		expected--
 		if cr.err != nil {
+			// Suppress hedge failures whose original (or earlier hedge)
+			// already succeeded — the duplicate was lost, but the chunk's
+			// data is safely in results. Hedging must only *increase*
+			// reliability, not turn a flaky speculative duplicate into a
+			// hard failure.
+			if results[cr.index] != nil {
+				continue
+			}
 			if firstErr == nil {
 				firstErr = cr.err
 			}
-			// Don't fail immediately — other chunks might succeed
-			received++
+			// If no more attempts are in flight for this chunk, account
+			// for the missing result so the loop can exit deterministically.
+			if expected <= 0 && chunksRemaining > 0 {
+				break
+			}
 			continue
 		}
 		if results[cr.index] == nil {
 			results[cr.index] = cr.data
+			chunksRemaining--
 		}
-		received++
+		// After every completion, consider whether to hedge any pending
+		// chunk that's running long. Decision uses the just-updated
+		// completionTimes so the hedge threshold tracks observed latency.
+		if chunksRemaining > 0 {
+			maybeHedge()
+		}
 	}
+
+	// Cancel any straggler goroutines (initial attempts whose hedges
+	// already returned, or hedges whose originals already returned).
+	// Then drain remaining sends in the background so those goroutines
+	// can exit cleanly without blocking on a full channel.
+	cancel()
+	go func() {
+		for i := 0; i < expected; i++ {
+			<-resultCh
+		}
+	}()
 
 	// Check for missing chunks
 	for i, chunk := range results {
@@ -594,11 +716,12 @@ func FetchWithParallelRangeRequests(client *http.Client, rawURL string, cfg *Fet
 		assembled = append(assembled, chunk...)
 	}
 
-	// Decompress if needed
+	// Decompress if needed. Cap at 16 * MaxFetchBytes — generous enough
+	// for normal Arrow IPC zstd ratios on legitimate payloads, tight
+	// enough that a small compressed body cannot inflate to many GB
+	// (decompression-bomb DoS from a malicious / compromised backend).
 	if contentEncoding == "zstd" {
-		decoder := zstdDecoderPool.Get().(*zstd.Decoder)
-		defer zstdDecoderPool.Put(decoder)
-		assembled, err = decoder.DecodeAll(assembled, nil)
+		assembled, err = decompressZstdCapped(assembled, cfg.MaxFetchBytes*16)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing assembled data: %w", err)
 		}
@@ -627,11 +750,10 @@ func fetchSimple(client *http.Client, rawURL string, cfg *FetchConfig) ([]byte, 
 		return nil, fmt.Errorf("response too large: %d bytes exceeds max %d", len(data), cfg.MaxFetchBytes)
 	}
 
-	// Decompress if needed
+	// Decompress if needed. Cap at 16 * MaxFetchBytes — see
+	// FetchWithParallelRangeRequests for the rationale.
 	if resp.Header.Get("Content-Encoding") == "zstd" {
-		decoder := zstdDecoderPool.Get().(*zstd.Decoder)
-		defer zstdDecoderPool.Put(decoder)
-		data, err = decoder.DecodeAll(data, nil)
+		data, err = decompressZstdCapped(data, cfg.MaxFetchBytes*16)
 		if err != nil {
 			return nil, fmt.Errorf("decompressing: %w", err)
 		}

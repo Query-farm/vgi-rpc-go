@@ -55,6 +55,11 @@ func (s *Server) Serve(r io.Reader, w io.Writer) {
 // callers wanting prompt shutdown should also close r (or its underlying file
 // descriptor) when cancelling the context.
 func (s *Server) ServeWithContext(ctx context.Context, r io.Reader, w io.Writer) {
+	if err := s.notifyTransport(TransportKindPipe, nil); err != nil {
+		// Hook refused the binding; abort the serve. The error has
+		// already been logged inside notifyTransport.
+		return
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return
@@ -94,7 +99,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 	// lifetime of this dispatch and resolve the request batch through it
 	// (the request batch may itself be a pointer batch carrying the
 	// real parameters in the segment).
-	if seg := shmAttachFromMetadata(req.Metadata); seg != nil {
+	if seg := shmAttachFromMetadata(req.Metadata, false /* not HTTP */); seg != nil {
 		req.Shm = seg
 		defer func() {
 			_ = seg.Close()

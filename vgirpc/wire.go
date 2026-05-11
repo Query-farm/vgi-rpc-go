@@ -68,6 +68,15 @@ func ReadRequest(r io.Reader) (*Request, error) {
 	batch := reader.RecordBatch()
 	batch.Retain() // keep batch alive after reader is released
 
+	// Drain past the request stream's EOS *before* any validation that
+	// might fail. On pipe/subprocess transports the underlying reader is
+	// shared across requests, so a rejected request that left bytes in
+	// the IPC stream would corrupt the next request's framing and tear
+	// down the worker connection. Mirrors Python vgi-rpc aae29a4.
+	for reader.Next() {
+		// discard
+	}
+
 	// Extract custom metadata
 	var meta arrow.Metadata
 	if rb, ok := batch.(arrow.RecordBatchWithMetadata); ok {
@@ -116,11 +125,6 @@ func ReadRequest(r io.Reader) (*Request, error) {
 
 	requestID, _ := meta.GetValue(MetaRequestID)
 	logLevel, _ := meta.GetValue(MetaLogLevel)
-
-	// Drain remaining batches (read to EOS)
-	for reader.Next() {
-		// discard
-	}
 
 	// Convert metadata to map
 	metaMap := make(map[string]string)

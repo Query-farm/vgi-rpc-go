@@ -72,6 +72,7 @@ func enforceResponseBudgets(method string, wireBytes, externalBytes, wireCap, ex
 		return fmt.Errorf("HTTP body exceeds max_response_bytes (%d > %d) for method %q", wireBytes, wireCap, method)
 	}
 	if externalCap > 0 && externalBytes > externalCap {
+		//lint:ignore ST1005 wording must match the Python reference verbatim — cross-lang conformance asserts on the literal substring
 		return fmt.Errorf("Externalised payload exceeds max_externalized_response_bytes (%d > %d) for method %q", externalBytes, externalCap, method)
 	}
 	return nil

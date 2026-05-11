@@ -132,6 +132,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		Auth:              auth,
 		TransportMetadata: transportMeta,
 		Cookies:           buildHTTPCookies(r),
+		Kind:              TransportKindHTTP,
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
@@ -208,6 +209,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	if h.server.externalConfig != nil {
 		predicted := predictExternalizeBytes(resultBatch, h.server.externalConfig)
 		if h.maxExternalizedResponseBytes > 0 && predicted > h.maxExternalizedResponseBytes {
+			//lint:ignore ST1005 wording must match the Python reference verbatim — cross-lang conformance asserts on the literal substring
 			overshoot := fmt.Errorf("Externalised payload exceeds max_externalized_response_bytes (%d > %d) for method %q",
 				predicted, h.maxExternalizedResponseBytes, info.Name)
 			handlerErr = overshoot

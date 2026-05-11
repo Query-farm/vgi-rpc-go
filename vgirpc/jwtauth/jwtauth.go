@@ -55,7 +55,13 @@ func NewAuthenticateFunc(cfg JWTAuthConfig) (vgirpc.AuthenticateFunc, func(), er
 		return nil, nil, fmt.Errorf("jwtauth: jwks_uri is required")
 	}
 
-	// Create JWKS keyfunc with auto-refresh; cancel stops background goroutine
+	// Create JWKS keyfunc with auto-refresh; cancel stops background goroutine.
+	//
+	// NewDefaultCtx configures unknown-KID refresh via a token-bucket
+	// rate limiter (rate.Every(5*time.Minute), burst 1), which means the
+	// "refetch stampede during key rotation" failure mode the Python port
+	// had to patch (vgi-rpc ccf4058) is already prevented here: N
+	// concurrent unknown-KID JWTs cannot trigger N concurrent JWKS GETs.
 	ctx, cancel := context.WithCancel(context.Background())
 	k, err := keyfunc.NewDefaultCtx(ctx, []string{cfg.JWKSURI})
 	if err != nil {

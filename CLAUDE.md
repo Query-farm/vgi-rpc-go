@@ -37,3 +37,47 @@ This port tracks `vgi-rpc-python` for wire compatibility. Two surfaces matter:
 - **Access log** — every dispatch fires `AccessLogHook` (when installed), writing one JSONL record per call. The record shape conforms to `vgi_rpc/access_log.schema.json` in the Python repo and validates under `vgi-rpc-test --access-log <path>`. `DispatchInfo` carries `Protocol`, `ProtocolHash`, `ProtocolVersion`, `RemoteAddr`, `RequestData`, `StreamID`, `Cancelled`, and `HTTPStatus`; the access-log emitter maps these to the spec field names. Configure protocol-version via `Server.SetProtocolVersion(...)`.
 
 The conformance worker accepts `--access-log <path>` anywhere on the CLI to enable JSONL emission.
+
+### Access-log rotation
+
+Unlike the Python reference (which builds rotation and record truncation into `vgi_rpc/logging_utils.py`), Go's `AccessLogHook` writes to any `io.Writer` and leaves rotation to the caller. The recommended pattern wraps `lumberjack.Logger`:
+
+```go
+import "gopkg.in/natefinch/lumberjack.v2"
+
+writer := &lumberjack.Logger{
+    Filename:   "/var/log/vgi-rpc/access.jsonl",
+    MaxSize:    100,  // MB
+    MaxBackups: 10,
+    MaxAge:     14,   // days
+    Compress:   true,
+}
+hook := vgirpc.NewAccessLogHook(writer, serverVersion)
+server.SetDispatchHook(hook)
+```
+
+`AccessLogHook` serializes writes through an internal mutex, so wrapping a non-thread-safe writer is safe. For high-volume workloads, call `hook.SetDebug(true)` only when replay/audit needs the full base64 `request_data` field — at INFO the field is replaced with `original_request_bytes` + `truncated: true`, which typically halves record size.
+
+### Sentry integration
+
+`vgirpc/sentry/` is a separate Go module wrapping `getsentry/sentry-go`. It mirrors Python's `vgi_rpc/sentry.py` surface (error capture, scope tags, user mapping, optional transactions) and installs as a `DispatchHook`. Operators initialise the SDK themselves and then call `Instrument`:
+
+```go
+import (
+    "github.com/getsentry/sentry-go"
+    vgisentry "github.com/Query-farm/vgi-rpc/vgirpc/sentry"
+)
+
+sentry.Init(sentry.ClientOptions{Dsn: "https://..."})
+server := vgirpc.NewServer()
+vgisentry.Instrument(server, nil) // default config
+```
+
+Limitations vs Python:
+- No auto-attach on server construction — call `Instrument` explicitly.
+- No `record_params` / `tag_params` (per-call kwarg recording): vgi-rpc-go fires `OnDispatchStart` before parameter deserialisation, so the typed params struct isn't visible to the hook. The remaining surface (auth, claims, custom tags, error capture, transactions) is fully supported.
+- `SetDispatchHook` holds at most one hook in core; `Instrument` replaces it. For composite usage (AccessLog + Sentry + OTel) wrap them in a caller-side multiplexing `DispatchHook` before registering.
+
+### Race-detector pass
+
+`make race` builds the conformance worker with `go build -race` and runs the full 866-test suite under it (~5 minutes; ~3-5× slower than `make test`). The pytest-timeout plugin is disabled for this target because the upstream `_pytest_suite.py` declares `pytestmark = pytest.mark.timeout(5)` at module scope, which fires on the slower instrumented worker even when individual tests pass. Use `make race` before cutting releases.
