@@ -19,7 +19,6 @@ import (
 const (
 	arrowContentType   = "application/vnd.apache.arrow.stream"
 	rpcErrorHeader     = "X-VGI-RPC-Error"
-	hmacLen            = 32
 	defaultTokenTTL    = 5 * time.Minute
 	defaultMaxBodySize = 64 << 20 // 64 MB
 )
@@ -37,7 +36,7 @@ const (
 // [http.ListenAndServe] or mounted on an existing [http.ServeMux].
 type HttpServer struct {
 	server      *Server
-	signingKey  []byte
+	tokenKey  []byte
 	tokenTTL    time.Duration
 	maxBodySize             int64
 	maxDecompressedBodySize int64 // 0 = derive as maxBodySize*16
@@ -86,11 +85,11 @@ type HttpServer struct {
 func NewHttpServer(server *Server) *HttpServer {
 	key := make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
-		panic(fmt.Sprintf("vgirpc: failed to generate signing key: %v", err))
+		panic(fmt.Sprintf("vgirpc: failed to generate token key: %v", err))
 	}
 	h := &HttpServer{
 		server:      server,
-		signingKey:  key,
+		tokenKey:  key,
 		tokenTTL:    defaultTokenTTL,
 		maxBodySize: defaultMaxBodySize,
 		prefix:      "",
@@ -104,15 +103,19 @@ func NewHttpServer(server *Server) *HttpServer {
 	return h
 }
 
-// NewHttpServerWithKey creates a new HTTP server with a caller-provided signing key.
-// The key must be at least 16 bytes long.
-func NewHttpServerWithKey(server *Server, signingKey []byte) (*HttpServer, error) {
-	if len(signingKey) < 16 {
-		return nil, fmt.Errorf("vgirpc: signing key must be at least 16 bytes")
+// NewHttpServerWithKey creates a new HTTP server with a caller-provided
+// token key. The key must be at least 16 bytes; shorter inputs are rejected.
+// The state-token AEAD construction (XChaCha20-Poly1305) requires exactly
+// 32 bytes — keys of any other length are normalized via SHA-256 inside
+// the pack/unpack helpers so operator-supplied keys of any reasonable
+// length work.
+func NewHttpServerWithKey(server *Server, tokenKey []byte) (*HttpServer, error) {
+	if len(tokenKey) < 16 {
+		return nil, fmt.Errorf("vgirpc: token key must be at least 16 bytes")
 	}
 	h := &HttpServer{
 		server:      server,
-		signingKey:  signingKey,
+		tokenKey:  tokenKey,
 		tokenTTL:    defaultTokenTTL,
 		maxBodySize: defaultMaxBodySize,
 		prefix:      "",
@@ -490,7 +493,7 @@ func (h *HttpServer) SetOAuthPkce(config OAuthPkceConfig) error {
 	}
 
 	// Derive session key from signing key
-	sessKey := deriveSessionKey(h.signingKey)
+	sessKey := deriveSessionKey(h.tokenKey)
 
 	// Parse resource URL for scheme/host → secureCookie, redirectURI
 	resourceURL, err := url.Parse(h.oauthMetadata.Resource)
