@@ -34,7 +34,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	info, ok := h.server.methods[method]
 	if !ok {
 		h.writeHttpError(w, http.StatusNotFound,
-			&RpcError{Type: "AttributeError", Message: fmt.Sprintf("Unknown method: '%s'", method)}, nil)
+			&MethodNotImplementedError{Method: method}, nil)
 		return
 	}
 
@@ -46,7 +46,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 
 	body, err := h.readHTTPBody(r)
 	if err != nil {
-		h.writeHttpError(w, http.StatusBadRequest, err, nil)
+		h.writeBodyReadError(w, err, nil)
 		return
 	}
 
@@ -84,6 +84,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		RemoteAddr:        r.RemoteAddr,
 		RequestData:       reqBytes,
 		StreamID:          streamID,
+		Implementation:    h.server.implementation,
 	}
 
 	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
@@ -109,9 +110,24 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		TransportMetadata: transportMeta,
 		Cookies:           buildHTTPCookies(r),
 		Kind:              TransportKindHTTP,
+		Implementation:    h.server.implementation,
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
+	}
+
+	// Resolve sticky session token (when present) before the handler runs.
+	// Producer / exchange streams open their session on /init and resume
+	// it on every /exchange turn — see handleStreamExchange for the resume
+	// path. Wrapping the writer flushes VGI-Session / VGI-Session-Close on
+	// the response; ReleaseLock fires after the handler returns.
+	stickyCleanup, stickyErr := h.installStickyOnRequest(r, callCtx, auth)
+	defer stickyCleanup.ReleaseLock()
+	w = stickyCleanup.Wrap(w)
+	if stickyErr != nil {
+		handlerErr = stickyErr
+		h.writeHttpError(w, http.StatusInternalServerError, stickyErr, nil)
+		return
 	}
 
 	// Call stream handler
@@ -173,7 +189,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			h.logIPCWriteErr("log-batch", info.Name, writeLogBatch(writer, outputSchema, logMsg, h.server.serverID, ""))
 		}
 
-		finished, err := h.runProduceLoop(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, transportMeta, callCtx.Cookies)
+		finished, err := h.runProduceLoop(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, transportMeta, callCtx.Cookies, callCtx.stickySink)
 		handlerErr = err
 		if err == nil && !finished {
 			// Batch limit reached — append continuation token
@@ -241,13 +257,13 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	info, ok := h.server.methods[method]
 	if !ok {
 		h.writeHttpError(w, http.StatusNotFound,
-			&RpcError{Type: "AttributeError", Message: fmt.Sprintf("Unknown method: '%s'", method)}, nil)
+			&MethodNotImplementedError{Method: method}, nil)
 		return
 	}
 
 	body, err := h.readHTTPBody(r)
 	if err != nil {
-		h.writeHttpError(w, http.StatusBadRequest, err, nil)
+		h.writeBodyReadError(w, err, nil)
 		return
 	}
 
@@ -335,10 +351,26 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		RemoteAddr:        r.RemoteAddr,
 		StreamID:          streamID,
 		Cancelled:         cancelled,
+		Implementation:    h.server.implementation,
 	}
 
 	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
 	defer hookCleanup()
+
+	// Resolve sticky session token for the continuation/exchange request.
+	// Each /exchange turn re-enters the middleware so the per-session lock
+	// is acquired fresh — matches Python which runs sticky middleware on
+	// every HTTP request. Pre-built sink is threaded down to the three
+	// downstream dispatch paths so each CallContext sees the same view.
+	stickyCleanup, stickyErr := h.installStickyOnRequestNoCtx(r, auth)
+	defer stickyCleanup.ReleaseLock()
+	w = stickyCleanup.Wrap(w)
+	if stickyErr != nil {
+		handlerErr = stickyErr
+		h.writeHttpError(w, http.StatusInternalServerError, stickyErr, nil)
+		return
+	}
+	stickySinkForCtx := stickyCleanup.sink
 
 	// Determine mode: for MethodDynamic, check the concrete state type
 	var isProducer bool
@@ -370,14 +402,14 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	cookies := buildHTTPCookies(r)
 
 	if cancelled {
-		handlerErr = h.handleStreamCancel(ctx, w, outputSchema, tokenData.State, info, auth, transportMeta, cookies)
+		handlerErr = h.handleStreamCancel(ctx, w, outputSchema, tokenData.State, info, auth, transportMeta, cookies, stickySinkForCtx)
 		return
 	}
 
 	if isProducer {
-		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta, cookies, streamID)
+		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta, cookies, streamID, stickySinkForCtx)
 	} else {
-		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta, cookies, streamID)
+		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta, cookies, streamID, stickySinkForCtx)
 	}
 }
 
@@ -385,7 +417,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 // the optional StreamCanceller hook on the state and writes an empty IPC
 // stream (no state token) so the client knows the stream is finished.
 func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state interface{}, info *methodInfo, auth *AuthContext, transportMeta map[string]string, cookies map[string]string) error {
+	state interface{}, info *methodInfo, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, sink *stickySink) error {
 	if canceller, ok := state.(StreamCanceller); ok {
 		callCtx := &CallContext{
 			Ctx:               ctx,
@@ -396,6 +428,8 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 			TransportMetadata: transportMeta,
 			Cookies:           cookies,
 			Kind:              TransportKindHTTP,
+			Implementation:    h.server.implementation,
+			stickySink:        sink,
 		}
 		func() {
 			defer func() {
@@ -418,11 +452,11 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 // handleProducerContinuation runs the produce loop for a continuation request.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string) error {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, sink *stickySink) error {
 
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies)
+	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies, sink)
 	if err == nil && !finished {
 		// Batch limit reached — append continuation token
 		token, tokenErr := h.packStateToken(state, schema, auth, streamID)
@@ -446,7 +480,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 // handleExchangeCall processes one exchange and returns the result with updated token.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWriter, inputBatch arrow.RecordBatch,
-	schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string) error {
+	schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, sink *stickySink) error {
 
 	// Record input stats
 	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
@@ -462,6 +496,8 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		TransportMetadata: transportMeta,
 		Cookies:           cookies,
 		Kind:              TransportKindHTTP,
+		Implementation:    h.server.implementation,
+		stickySink:        sink,
 	}
 
 	var exchangeErr error
@@ -573,7 +609,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 // (false, nil) when the batch limit was reached (caller should emit a
 // continuation token), or (false, err) on error.
 func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string) (bool, error) {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, sink *stickySink) (bool, error) {
 
 	dataBatches := 0
 	for {
@@ -591,6 +627,8 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 			TransportMetadata: transportMeta,
 			Cookies:           cookies,
 			Kind:              TransportKindHTTP,
+			Implementation:    h.server.implementation,
+			stickySink:        sink,
 		}
 
 		var produceErr error

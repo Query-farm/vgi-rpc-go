@@ -274,6 +274,97 @@ func RegisterMethods(server *vgirpc.Server) {
 	vgirpc.Exchange(server, "cancellable_exchange", scaleOutputSchema, scaleInputSchema, cancellableExchange)
 	vgirpc.Unary(server, "cancel_probe_counters", cancelProbeCountersHandler)
 	vgirpc.UnaryVoid(server, "reset_cancel_probe", resetCancelProbeHandler)
+
+	// Sticky session methods (HTTP-only; raise RuntimeError on other
+	// transports). Mirror the Python conformance service's open_counter
+	// / increment_counter / close_counter trio.
+	vgirpc.Unary(server, "open_counter", openCounter)
+	vgirpc.Unary(server, "increment_counter", incrementCounter)
+	vgirpc.Unary(server, "close_counter", closeCounter)
+
+	// Sticky session streaming methods. Each producer turn / exchange
+	// round-trip is its own HTTP request, so these prove the sticky
+	// session contract holds across the multi-request shape of
+	// streaming RPCs (not just unary calls). Mirrors Python's
+	// stream_session_counter / exchange_session_counter.
+	vgirpc.Producer(server, "stream_session_counter", sessionCounterOutputSchema, streamSessionCounter)
+	vgirpc.Exchange(server, "exchange_session_counter", sessionCounterOutputSchema, sessionCounterExchangeInputSchema, exchangeSessionCounter)
+}
+
+// --- Sticky session handlers ---
+
+type openCounterParams struct {
+	Initial int64 `vgirpc:"initial"`
+}
+
+type incrementCounterParams struct {
+	By int64 `vgirpc:"by"`
+}
+
+type closeCounterParams struct{}
+
+// stickyCounter is the state object bound to a sticky session by
+// open_counter. Exposes Close() so the registry's eviction path
+// observes the cleanup contract; conformance tests don't read the
+// closed flag directly but it satisfies the io.Closer interface used
+// by closeSessionState.
+type stickyCounter struct {
+	value  int64
+	closed bool
+}
+
+func (c *stickyCounter) Close() error {
+	c.closed = true
+	return nil
+}
+
+func openCounter(_ context.Context, ctx *vgirpc.CallContext, p openCounterParams) (int64, error) {
+	if err := ctx.OpenSession(&stickyCounter{value: p.Initial}, 0); err != nil {
+		return 0, err
+	}
+	return p.Initial, nil
+}
+
+func incrementCounter(_ context.Context, ctx *vgirpc.CallContext, p incrementCounterParams) (int64, error) {
+	counter, ok := ctx.Session().(*stickyCounter)
+	if !ok {
+		return 0, &vgirpc.RpcError{Type: "RuntimeError", Message: "no sticky counter bound to this request"}
+	}
+	counter.value += p.By
+	return counter.value, nil
+}
+
+func closeCounter(_ context.Context, ctx *vgirpc.CallContext, _ closeCounterParams) (int64, error) {
+	counter, ok := ctx.Session().(*stickyCounter)
+	if !ok {
+		return 0, &vgirpc.RpcError{Type: "RuntimeError", Message: "no sticky counter bound to this request"}
+	}
+	final := counter.value
+	ctx.CloseSession()
+	return final, nil
+}
+
+// --- Sticky session streaming handlers ---
+
+type streamSessionCounterParams struct {
+	Count int64 `vgirpc:"count"`
+}
+
+type exchangeSessionCounterParams struct{}
+
+func streamSessionCounter(_ context.Context, _ *vgirpc.CallContext, p streamSessionCounterParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: sessionCounterOutputSchema,
+		State:        &sessionCounterProducerState{Count: int(p.Count)},
+	}, nil
+}
+
+func exchangeSessionCounter(_ context.Context, _ *vgirpc.CallContext, _ exchangeSessionCounterParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: sessionCounterOutputSchema,
+		InputSchema:  sessionCounterExchangeInputSchema,
+		State:        &sessionCounterExchangeState{},
+	}, nil
 }
 
 // --- Producer stream parameter structs ---

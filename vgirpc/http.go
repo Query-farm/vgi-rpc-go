@@ -79,6 +79,13 @@ type HttpServer struct {
 	// Response caps (advertised + enforced). 0 = unbounded.
 	maxResponseBytes             int64
 	maxExternalizedResponseBytes int64
+
+	// Sticky sessions (HTTP-only, opt-in). nil unless EnableSticky was called.
+	// Mirrors Python make_wsgi_app(enable_sticky=True). The registry's reaper
+	// goroutine is started lazily on the first sticky-aware request so it
+	// runs in the serve goroutine rather than at construction time.
+	stickyRegistry    *sessionRegistry
+	stickyEchoHeaders map[string]string
 }
 
 // NewHttpServer creates a new HTTP server wrapping an RPC server.
@@ -187,10 +194,11 @@ func (h *HttpServer) SetCorsMaxAge(seconds int) {
 // Capability advertisement header names. Mirror the Python reference
 // (vgi_rpc/http/_common.py) so cross-implementation clients agree.
 const (
-	maxRequestBytesHeader = "VGI-Max-Request-Bytes"
-	uploadURLHeader       = "VGI-Upload-URL-Support"
-	maxUploadBytesHeader  = "VGI-Max-Upload-Bytes"
-	capabilityCacheMaxAge = 300 // seconds; OPTIONS Cache-Control max-age
+	maxRequestBytesHeader     = "VGI-Max-Request-Bytes"
+	uploadURLHeader           = "VGI-Upload-URL-Support"
+	maxUploadBytesHeader      = "VGI-Max-Upload-Bytes"
+	supportedEncodingsHeader  = "VGI-Supported-Encodings"
+	capabilityCacheMaxAge     = 300 // seconds; OPTIONS Cache-Control max-age
 )
 
 // addCapabilityHeaders writes the advertised capability headers (when
@@ -198,6 +206,12 @@ const (
 // Cache-Control: public, max-age=N header is set so clients can cache
 // the discovered values for the advertised TTL.
 func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool) {
+	// Advertise the codec set the server can decode on requests AND
+	// produce on responses. Capability-aware clients cache this header
+	// and pick a codec from the intersection; absence is interpreted as
+	// {zstd} per the Python reference, so emitting both keeps gzip-only
+	// clients (e.g. environments without zstandard installed) working.
+	w.Header().Set(supportedEncodingsHeader, strings.Join(supportedEncodings, ", "))
 	if h.maxRequestBytes > 0 {
 		w.Header().Set(maxRequestBytesHeader, strconv.FormatInt(h.maxRequestBytes, 10))
 	}
@@ -220,6 +234,7 @@ func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool)
 			w.Header().Set(maxUploadBytesHeader, strconv.FormatInt(h.maxUploadBytes, 10))
 		}
 	}
+	h.addStickyCapabilityHeaders(w)
 	if isOptions {
 		w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", capabilityCacheMaxAge))
 	}
@@ -248,7 +263,7 @@ func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, isOptions bool) {
 		w.Header().Set("Access-Control-Allow-Origin", h.corsOrigins)
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, "+maxResponseBytesHeader+", "+maxExternalizedResponseBytesHeader+", "+externalizationEnabledHeader)
+		w.Header().Set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, "+maxResponseBytesHeader+", "+maxExternalizedResponseBytesHeader+", "+externalizationEnabledHeader+", "+supportedEncodingsHeader+", "+stickyEnabledHeader+", "+stickyDefaultTTLHeader+", "+stickyEchoHeadersHeader+", "+stickySessionHeader+", "+stickySessionCloseHeader)
 		if isOptions && h.corsMaxAge != "" {
 			w.Header().Set("Access-Control-Max-Age", h.corsMaxAge)
 		}
@@ -641,11 +656,13 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.zstdEncoderLevel > 0 && strings.Contains(r.Header.Get("Accept-Encoding"), "zstd") {
-		cw := &compressResponseWriter{ResponseWriter: w, encoderLevel: h.zstdEncoderLevel}
-		defer cw.finish()
-		h.mux.ServeHTTP(cw, r)
-		return
+	if h.zstdEncoderLevel > 0 {
+		if enc := chooseResponseEncoding(r.Header.Get("Accept-Encoding")); enc != "" {
+			cw := &compressResponseWriter{ResponseWriter: w, encoderLevel: h.zstdEncoderLevel, encoding: enc}
+			defer cw.finish()
+			h.mux.ServeHTTP(cw, r)
+			return
+		}
 	}
 	h.mux.ServeHTTP(w, r)
 }

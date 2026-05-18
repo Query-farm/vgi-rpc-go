@@ -5,16 +5,32 @@ package vgirpc
 
 import (
 	"bytes"
+	"compress/gzip"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/klauspost/compress/zstd"
 )
+
+// unsupportedEncodingError is returned by readHTTPBody when the request's
+// Content-Encoding names a codec the server cannot decode. Callers turn it
+// into an HTTP 415 response so capability-aware clients (which cache the
+// VGI-Supported-Encodings response header) can pick a different codec and
+// retry once. Mirrors Python _CompressionMiddleware's 415 behaviour.
+type unsupportedEncodingError struct {
+	Encoding string
+}
+
+func (e *unsupportedEncodingError) Error() string {
+	return fmt.Sprintf("Unsupported Content-Encoding: %q", e.Encoding)
+}
 
 func buildHTTPTransportMeta(ipcMeta map[string]string, r *http.Request) map[string]string {
 	meta := make(map[string]string, len(ipcMeta)+4)
@@ -77,7 +93,7 @@ func applyResponseCookies(w http.ResponseWriter, cookies []CookieSpec) {
 func (h *HttpServer) handleDescribe(w http.ResponseWriter, r *http.Request) {
 	body, err := h.readHTTPBody(r)
 	if err != nil {
-		h.writeHttpError(w, http.StatusBadRequest, err, nil)
+		h.writeBodyReadError(w, err, nil)
 		return
 	}
 
@@ -130,7 +146,11 @@ func (h *HttpServer) readHTTPBody(r *http.Request) ([]byte, error) {
 		return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Request body exceeds maximum size of %d bytes", limit)}
 	}
 
-	if r.Header.Get("Content-Encoding") == "zstd" {
+	encoding := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Encoding")))
+	switch encoding {
+	case "", "identity":
+		return body, nil
+	case "zstd":
 		decompressedCap := h.maxDecompressedBodySize
 		if decompressedCap <= 0 && limit > 0 {
 			decompressedCap = limit * 16
@@ -157,8 +177,36 @@ func (h *HttpServer) readHTTPBody(r *http.Request) ([]byte, error) {
 		if decompressedCap > 0 && int64(len(body)) > decompressedCap {
 			return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Decompressed body exceeds maximum size of %d bytes", decompressedCap)}
 		}
+		return body, nil
+	case "gzip":
+		decompressedCap := h.maxDecompressedBodySize
+		if decompressedCap <= 0 && limit > 0 {
+			decompressedCap = limit * 16
+		}
+
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return nil, fmt.Errorf("gzip decompression init: %w", err)
+		}
+		defer reader.Close()
+
+		// gzip's ISIZE footer carries mod 2^32 — never trust it for a
+		// bomb cap. Bounded streaming read, mirroring the Python codec.
+		if decompressedCap > 0 {
+			body, err = io.ReadAll(io.LimitReader(reader, decompressedCap+1))
+		} else {
+			body, err = io.ReadAll(reader)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("gzip decompression: %w", err)
+		}
+		if decompressedCap > 0 && int64(len(body)) > decompressedCap {
+			return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Decompressed body exceeds maximum size of %d bytes", decompressedCap)}
+		}
+		return body, nil
+	default:
+		return nil, &unsupportedEncodingError{Encoding: encoding}
 	}
-	return body, nil
 }
 
 func (h *HttpServer) writeHttpError(w http.ResponseWriter, statusCode int, err error, schema *arrow.Schema) {
@@ -168,6 +216,20 @@ func (h *HttpServer) writeHttpError(w http.ResponseWriter, statusCode int, err e
 	var buf bytes.Buffer
 	h.logIPCWriteErr("error-response", "", writeErrorResponse(&buf, schema, err, h.server.serverID, "", h.server.debugErrors))
 	h.writeArrow(w, statusCode, buf.Bytes())
+}
+
+// writeBodyReadError maps an error from readHTTPBody to the right HTTP
+// status code: 415 for unsupported Content-Encoding (capability-aware
+// clients can refresh VGI-Supported-Encodings and retry once), 400
+// otherwise. addCapabilityHeaders runs on every response, so the 415
+// response already carries the supported-encodings hint for retry.
+func (h *HttpServer) writeBodyReadError(w http.ResponseWriter, err error, schema *arrow.Schema) {
+	var unsup *unsupportedEncodingError
+	if errors.As(err, &unsup) {
+		h.writeHttpError(w, http.StatusUnsupportedMediaType, err, schema)
+		return
+	}
+	h.writeHttpError(w, http.StatusBadRequest, err, schema)
 }
 
 func (h *HttpServer) writeArrow(w http.ResponseWriter, statusCode int, data []byte) {

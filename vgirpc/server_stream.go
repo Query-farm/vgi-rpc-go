@@ -38,6 +38,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		Auth:              Anonymous(),
 		TransportMetadata: req.Metadata,
 		Kind:              s.TransportKind(),
+		Implementation:    s.implementation,
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace

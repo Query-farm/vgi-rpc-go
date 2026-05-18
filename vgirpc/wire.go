@@ -225,6 +225,12 @@ func writeErrorBatch(w *ipc.Writer, schema *arrow.Schema, err error, serverID, r
 		keys = append(keys, MetaRequestID)
 		vals = append(vals, requestID)
 	}
+	if carrier, ok := err.(errorKindCarrier); ok {
+		if kind := carrier.ErrorKind(); kind != "" {
+			keys = append(keys, MetaErrorKind)
+			vals = append(vals, kind)
+		}
+	}
 
 	meta := arrow.NewMetadata(keys, vals)
 	batch := emptyBatch(schema)

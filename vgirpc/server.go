@@ -87,6 +87,7 @@ type Server struct {
 	dispatchHook    DispatchHook
 	debugErrors     bool
 	externalConfig  *ExternalLocationConfig
+	implementation  any
 
 	// Transport binding state, set lazily by notifyTransport.
 	transportMu           sync.Mutex
@@ -121,6 +122,21 @@ func (s *Server) ServiceName() string {
 // ServerID returns the server identifier, or empty string if not set.
 func (s *Server) ServerID() string {
 	return s.serverID
+}
+
+// SetImplementation stores an opaque reference to the service implementation
+// so framework callbacks (CallContext.Implementation, DispatchInfo.Implementation)
+// can hand it to dispatch hooks and stream-state lifecycle callbacks.
+// Mirrors Python's `RpcServer(..., implementation=impl)` parameter. The value
+// is not consulted by the framework itself; it's a pass-through for callers.
+func (s *Server) SetImplementation(impl any) {
+	s.implementation = impl
+}
+
+// Implementation returns the value passed to [Server.SetImplementation],
+// or nil if none was set.
+func (s *Server) Implementation() any {
+	return s.implementation
 }
 
 // SetExternalLocation configures external storage for large batches.

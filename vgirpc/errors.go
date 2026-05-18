@@ -26,6 +26,11 @@ type RpcError struct {
 	// RequestID is the client-supplied request identifier, set when the
 	// error is written to a response batch.
 	RequestID string
+	// Kind is an optional, stable, machine-readable tag emitted as
+	// vgi_rpc.error_kind on the wire. Used by Python clients to
+	// distinguish typed sub-errors (e.g. MethodNotImplementedError)
+	// from generic AttributeError instances without substring matching.
+	Kind string
 }
 
 // Error returns a string of the form "Type: Message".
@@ -38,6 +43,91 @@ func (e *RpcError) Is(target error) bool {
 	_, ok := target.(*RpcError)
 	return ok
 }
+
+// ErrorKind returns the value to advertise as vgi_rpc.error_kind on the
+// wire when this error becomes an EXCEPTION batch. Empty means "no
+// classification" — the metadata key is omitted in that case so older
+// clients that don't recognise the key see no change. Mirrors Python's
+// error_kind class attribute mechanism.
+func (e *RpcError) ErrorKind() string {
+	return e.Kind
+}
+
+// errorKindCarrier is satisfied by errors that want to advertise a
+// machine-readable kind on the wire. Both *RpcError and the typed
+// MethodNotImplementedError sentinel implement it.
+type errorKindCarrier interface {
+	ErrorKind() string
+}
+
+// MethodNotImplementedError marks a request for a method the service
+// does not expose. The framework writes vgi_rpc.error_kind =
+// "MethodNotImplementedError" so callers can distinguish "method gone"
+// from other AttributeError-class failures without parsing the message.
+type MethodNotImplementedError struct {
+	Method  string
+	Message string
+}
+
+func (e *MethodNotImplementedError) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	return fmt.Sprintf("Unknown method: '%s'", e.Method)
+}
+
+// ErrorKind returns the stable tag emitted on the wire.
+func (e *MethodNotImplementedError) ErrorKind() string {
+	return "MethodNotImplementedError"
+}
+
+// ErrorType is the "exception_type" string lifted into the error envelope
+// — kept as "AttributeError" so existing Python clients that match on it
+// continue to work. The new error_kind metadata key is the typed sibling.
+func (e *MethodNotImplementedError) ErrorType() string {
+	return "AttributeError"
+}
+
+// SessionLostError surfaces from the sticky session machinery when a
+// presented VGI-Session token cannot be resolved to a live registry
+// entry — malformed token, AAD mismatch (cross-principal replay),
+// server_id mismatch (wrong worker), registry miss, TTL expiry. Wire
+// shape mirrors Python: 200 + X-VGI-RPC-Error + EXCEPTION batch with
+// vgi_rpc.error_kind = "session_lost" so cross-language clients can
+// match on the metadata key.
+type SessionLostError struct {
+	Reason string
+}
+
+func (e *SessionLostError) Error() string {
+	if e.Reason != "" {
+		return e.Reason
+	}
+	return "session lost"
+}
+
+// ErrorKind returns the wire-stable kind for SessionLostError.
+func (e *SessionLostError) ErrorKind() string { return "session_lost" }
+
+// ErrorType is the exception type name that Python's typed exception
+// class surfaces as.
+func (e *SessionLostError) ErrorType() string { return "SessionLostError" }
+
+// ServerDrainingError surfaces from ctx.OpenSession when the server
+// is in drain mode and refusing new sessions. Existing-session calls
+// continue to serve until TTL or explicit close.
+type ServerDrainingError struct{}
+
+func (e *ServerDrainingError) Error() string {
+	return "server is draining — new sessions are rejected"
+}
+
+// ErrorKind returns the wire-stable kind for ServerDrainingError.
+func (e *ServerDrainingError) ErrorKind() string { return "server_draining" }
+
+// ErrorType is the exception type name that Python's typed exception
+// class surfaces as.
+func (e *ServerDrainingError) ErrorType() string { return "ServerDrainingError" }
 
 // stackFrame represents a single frame in a Go stack trace,
 // matching the Python wire format for error batch log_extra.
@@ -62,9 +152,16 @@ type errorExtra struct {
 func buildErrorExtra(err error, debug bool) string {
 	errType := fmt.Sprintf("%T", err)
 
-	// Try to get a more specific type name
-	if rpcErr, ok := err.(*RpcError); ok {
-		errType = rpcErr.Type
+	// Prefer the wire-stable class name for typed errors.
+	switch e := err.(type) {
+	case *RpcError:
+		errType = e.Type
+	case *MethodNotImplementedError:
+		errType = e.ErrorType()
+	case *SessionLostError:
+		errType = e.ErrorType()
+	case *ServerDrainingError:
+		errType = e.ErrorType()
 	}
 
 	extra := errorExtra{

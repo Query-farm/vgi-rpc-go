@@ -50,6 +50,11 @@ const (
 	// MetaLocationSHA256 carries a hex-encoded SHA-256 checksum of the raw
 	// (pre-compression) IPC bytes for integrity verification.
 	MetaLocationSHA256 = "vgi_rpc.location.sha256"
+	// MetaErrorKind carries a stable, machine-readable tag for the error
+	// category (e.g. "MethodNotImplementedError") so callers can match
+	// without substring-searching the human-readable message. Optional —
+	// absent for unclassified errors.
+	MetaErrorKind = "vgi_rpc.error_kind"
 
 	// MetaTraceparent carries the W3C traceparent header for distributed tracing.
 	MetaTraceparent = "traceparent"

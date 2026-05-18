@@ -46,7 +46,19 @@ type CallContext struct {
 	// before the first request is dispatched. Use this for per-call
 	// branching (e.g. attach HTTP-specific tracing attributes only when
 	// Kind == TransportKindHTTP).
-	Kind              TransportKind
+	Kind TransportKind
+	// Implementation is an optional caller-supplied reference to the service
+	// implementation, set via [Server.SetImplementation]. Mirrors Python's
+	// CallContext.implementation — framework-driven callbacks (cancel hooks,
+	// stream state lifecycle) read it to dispatch through helper methods on
+	// the impl without holding their own captured reference. nil by default.
+	Implementation    any
+	// stickySink is the per-request bridge to the HTTP sticky session
+	// machinery. nil on non-HTTP transports and on HTTP servers without
+	// sticky enabled — CallContext.OpenSession / CloseSession check for
+	// this and raise RuntimeError when nil. Mirrors Python's
+	// _current_sticky_sink contextvar pattern.
+	stickySink        *stickySink
 	logs              []LogMessage
 	responseCookies   []CookieSpec
 	cookieSinkEnabled bool

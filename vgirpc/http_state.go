@@ -48,19 +48,29 @@ const (
 	stateTokenMinLen   = 1 + stateTokenNonceLen + stateTokenTagLen
 )
 
-// stateTokenAad builds the AEAD associated data that binds a state token to
-// the authenticated caller. Anonymous and authenticated tokens produce
-// distinct AAD strings, so an anonymous token cannot be opened by a named
-// principal (and vice versa). A token sealed for principal A fails
-// decryption when presented by principal B.
+// stateTokenAad builds the AEAD associated data that binds a state token
+// to the authenticated caller. Mirrors Python's _compute_aad in
+// vgi_rpc/http/server/_state_token.py byte-for-byte: anonymous tokens
+// carry b"\x00anonymous"; authenticated tokens carry
+// b"\x01" + domain + b"\x00" + principal.
+//
+// The domain MUST appear between the 0x01 byte and the principal even
+// when empty — Python emits b"\x01\x00" + principal in that case, so
+// dropping the separator breaks cross-port decryption AND lets a token
+// sealed under one auth domain be opened by the same principal under
+// another (cross-domain replay). Anonymous and authenticated branches
+// produce non-overlapping byte strings so an anonymous token cannot be
+// opened by a named principal and vice versa.
 func stateTokenAad(auth *AuthContext) []byte {
 	prefix := []byte("vgi_rpc.state.v4\x00")
-	if auth == nil || auth.Principal == "" {
+	if auth == nil || !auth.Authenticated {
 		return append(prefix, []byte("\x00anonymous")...)
 	}
-	out := make([]byte, 0, len(prefix)+1+len(auth.Principal))
+	out := make([]byte, 0, len(prefix)+1+len(auth.Domain)+1+len(auth.Principal))
 	out = append(out, prefix...)
 	out = append(out, 0x01)
+	out = append(out, auth.Domain...)
+	out = append(out, 0x00)
 	out = append(out, auth.Principal...)
 	return out
 }

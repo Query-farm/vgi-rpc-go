@@ -38,7 +38,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	info, ok := h.server.methods[method]
 	if !ok {
 		h.writeHttpError(w, http.StatusNotFound,
-			&RpcError{Type: "AttributeError", Message: fmt.Sprintf("Unknown method: '%s'", method)}, nil)
+			&MethodNotImplementedError{Method: method}, nil)
 		return
 	}
 
@@ -50,7 +50,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 
 	body, err := h.readHTTPBody(r)
 	if err != nil {
-		h.writeHttpError(w, http.StatusBadRequest, err, nil)
+		h.writeBodyReadError(w, err, nil)
 		return
 	}
 
@@ -108,6 +108,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		Auth:              auth,
 		RemoteAddr:        r.RemoteAddr,
 		RequestData:       reqBytes,
+		Implementation:    h.server.implementation,
 	}
 
 	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
@@ -133,32 +134,63 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		TransportMetadata: transportMeta,
 		Cookies:           buildHTTPCookies(r),
 		Kind:              TransportKindHTTP,
+		Implementation:    h.server.implementation,
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
 	}
 	callCtx.enableCookieSink()
 
-	// Call handler
+	// Resolve sticky session token (when present) before dispatch.
+	// On token-resolution failure (session_lost) surface as an
+	// EXCEPTION batch on the response and skip the handler entirely.
+	// The wrapped writer flushes VGI-Session / VGI-Session-Close /
+	// VGI-Echo-* headers on the first WriteHeader; ReleaseLock fires
+	// after the handler returns to release the per-session lock.
+	stickyCleanup, stickyErr := h.installStickyOnRequest(r, callCtx, auth)
+	defer stickyCleanup.ReleaseLock()
+	w = stickyCleanup.Wrap(w)
+	if stickyErr != nil {
+		handlerErr = stickyErr
+		h.writeHttpError(w, http.StatusInternalServerError, stickyErr, info.ResultSchema)
+		return
+	}
+
+	// Call handler. Wrap in recover so a panic after a successful
+	// ctx.OpenSession still flushes the VGI-Session header via
+	// stickyResponseWriter (the cleanup writer fires on the next
+	// WriteHeader/Write); without this, the panic would propagate to
+	// net/http's default recover, the response would be empty, and the
+	// client would never learn about the session that was just registered
+	// — leaving the entry to leak until TTL eviction.
 	var resultVal reflect.Value
 	var callErr error
-
-	if info.ResultType == nil {
-		results := info.Handler.Call([]reflect.Value{
-			reflect.ValueOf(ctx), reflect.ValueOf(callCtx), params,
-		})
-		if !results[0].IsNil() {
-			callErr = results[0].Interface().(error)
+	func() {
+		defer func() {
+			if rv := recover(); rv != nil {
+				callErr = &RpcError{
+					Type:    "RuntimeError",
+					Message: fmt.Sprintf("handler panicked: %v", rv),
+				}
+			}
+		}()
+		if info.ResultType == nil {
+			results := info.Handler.Call([]reflect.Value{
+				reflect.ValueOf(ctx), reflect.ValueOf(callCtx), params,
+			})
+			if !results[0].IsNil() {
+				callErr = results[0].Interface().(error)
+			}
+		} else {
+			results := info.Handler.Call([]reflect.Value{
+				reflect.ValueOf(ctx), reflect.ValueOf(callCtx), params,
+			})
+			resultVal = results[0]
+			if !results[1].IsNil() {
+				callErr = results[1].Interface().(error)
+			}
 		}
-	} else {
-		results := info.Handler.Call([]reflect.Value{
-			reflect.ValueOf(ctx), reflect.ValueOf(callCtx), params,
-		})
-		resultVal = results[0]
-		if !results[1].IsNil() {
-			callErr = results[1].Interface().(error)
-		}
-	}
+	}()
 
 	logs := callCtx.drainLogs()
 	responseCookies := callCtx.drainCookies()

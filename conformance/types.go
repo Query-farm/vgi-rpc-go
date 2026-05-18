@@ -404,3 +404,18 @@ var counterSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "index", Type: arrow.PrimitiveTypes.Int64},
 	{Name: "value", Type: arrow.PrimitiveTypes.Int64},
 }, nil)
+
+// sessionCounterOutputSchema is the schema for the sticky-session
+// producer / exchange counter streams: a single value column carrying
+// the post-update counter value. Matches Python's
+// _SESSION_COUNTER_OUTPUT_SCHEMA.
+var sessionCounterOutputSchema = arrow.NewSchema([]arrow.Field{
+	{Name: "value", Type: arrow.PrimitiveTypes.Int64},
+}, nil)
+
+// sessionCounterExchangeInputSchema is the schema for
+// exchange_session_counter's input batches: a single ``by`` column
+// whose values are summed into the bound _StickyCounter.
+var sessionCounterExchangeInputSchema = arrow.NewSchema([]arrow.Field{
+	{Name: "by", Type: arrow.PrimitiveTypes.Int64},
+}, nil)

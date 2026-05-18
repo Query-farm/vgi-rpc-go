@@ -38,6 +38,7 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 		Auth:              Anonymous(),
 		TransportMetadata: req.Metadata,
 		Kind:              s.TransportKind(),
+		Implementation:    s.implementation,
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace // default: allow all, client filters

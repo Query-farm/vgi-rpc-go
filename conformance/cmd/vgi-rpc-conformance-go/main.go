@@ -230,6 +230,30 @@ func main() {
 			httpServer.SetMaxResponseBytes(maxResponseBytes)
 			httpServer.SetMaxExternalizedResponseBytes(maxExternalizedResponseBytes)
 		}
+		// Enable sticky sessions on every HTTP conformance variant.
+		// Mirrors the Python conformance worker's `enable_sticky=True`
+		// default in tests/serve_conformance_http.py, so the canonical
+		// TestSticky conformance group runs against the Go worker via
+		// `conformance_http_port`. The default TTL (zero) falls back to
+		// 300 seconds matching Python's `sticky_default_ttl`.
+		httpServer.EnableSticky(0)
+		// The conformance suite's test_echo_header_round_trip probes for
+		// a fixed marker echo header; advertise it under the same name
+		// as the Python worker (x-vgi-conformance-echo) so cross-language
+		// clients exercise the same contract.
+		httpServer.SetStickyEchoHeaders(map[string]string{
+			"x-vgi-conformance-echo": "conformance-fixed-marker",
+		})
+		// Mount the test-only admin endpoint that flips the drain flag
+		// over the wire. TestSticky::test_drain_rejects_new_opens needs
+		// this to test drain semantics without sending SIGTERM. Routes:
+		//   POST /__test_drain__  → drain.Drain()
+		//   DELETE /__test_drain__ → drain.ClearDrain()
+		// Both 204. Not exposed in production make_wsgi_app paths.
+		if drain := httpServer.DrainHandle(); drain != nil {
+			httpServer.Handle("POST /__test_drain__", testDrainHandler(drain, true))
+			httpServer.Handle("DELETE /__test_drain__", testDrainHandler(drain, false))
+		}
 		if err := httpServer.SetCompressionLevel(3); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to set compression level: %v\n", err)
 			os.Exit(1)
@@ -321,4 +345,19 @@ func findFlagValue(args []string, name string) string {
 		}
 	}
 	return ""
+}
+
+// testDrainHandler returns an http.HandlerFunc that flips the sticky
+// drain flag. POST drain, DELETE undrain — both 204. Mirrors the
+// Python conformance worker's _TestDrainResource in
+// tests/serve_conformance_http.py. Not exposed in production paths.
+func testDrainHandler(handle *vgirpc.DrainHandle, drain bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if drain {
+			handle.Drain()
+		} else {
+			handle.ClearDrain()
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
 }

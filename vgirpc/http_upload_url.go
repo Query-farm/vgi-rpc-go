@@ -46,7 +46,7 @@ func (h *HttpServer) handleUploadURLInit(w http.ResponseWriter, r *http.Request)
 
 	body, err := h.readHTTPBody(r)
 	if err != nil {
-		h.writeHttpError(w, http.StatusBadRequest, err, uploadURLSchema)
+		h.writeBodyReadError(w, err, uploadURLSchema)
 		return
 	}
 

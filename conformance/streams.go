@@ -33,6 +33,8 @@ func init() {
 	vgirpc.RegisterStateType(&zeroColumnExchangeState{})
 	vgirpc.RegisterStateType(&cancellableProducerState{})
 	vgirpc.RegisterStateType(&cancellableExchangeState{})
+	vgirpc.RegisterStateType(&sessionCounterProducerState{})
+	vgirpc.RegisterStateType(&sessionCounterExchangeState{})
 }
 
 // --- Cancel probe (process-wide counters for cancel conformance tests) ---
@@ -78,6 +80,70 @@ func (s *cancellableProducerState) OnCancel(_ context.Context, callCtx *vgirpc.C
 	cancelOnCancelCalls++
 	cancelProbeMu.Unlock()
 	return nil
+}
+
+// sessionCounterProducerState emits the sticky-session counter
+// ``count`` times. Each Produce call resolves the counter via
+// ctx.Session(), increments it by one, and emits a one-row batch with
+// the new value. Across HTTP turns ``Current`` rides in the
+// continuation token while ctx.Session is rebound by the sticky
+// middleware on every request — mirrors Python's
+// SessionCounterProducerState in vgi_rpc/conformance/_types.py.
+type sessionCounterProducerState struct {
+	Count   int
+	Current int
+}
+
+func (s *sessionCounterProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+	if s.Current >= s.Count {
+		return out.Finish()
+	}
+	counter, ok := callCtx.Session().(*stickyCounter)
+	if !ok {
+		return &vgirpc.RpcError{Type: "RuntimeError", Message: "no sticky counter bound to this request"}
+	}
+	counter.value++
+	if err := emitSessionCounterValue(out, counter.value); err != nil {
+		return err
+	}
+	s.Current++
+	return nil
+}
+
+// sessionCounterExchangeState is an exchange stream that, for every
+// turn, sums the input ``by`` column into the bound _StickyCounter and
+// emits the post-update value. Mirrors Python's
+// SessionCounterExchangeState.
+type sessionCounterExchangeState struct{}
+
+func (s *sessionCounterExchangeState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+	counter, ok := callCtx.Session().(*stickyCounter)
+	if !ok {
+		return &vgirpc.RpcError{Type: "RuntimeError", Message: "no sticky counter bound to this request"}
+	}
+	col := input.Column(0).(*array.Int64)
+	var sum int64
+	for i := 0; i < col.Len(); i++ {
+		if col.IsValid(i) {
+			sum += col.Value(i)
+		}
+	}
+	counter.value += sum
+	return emitSessionCounterValue(out, counter.value)
+}
+
+// emitSessionCounterValue writes a one-row batch with the supplied
+// value into out. Uses EmitArrays so the OutputCollector wraps the
+// arrays under its own schema pointer (Arrow IPC requires identity
+// match, not just structural equality — see CLAUDE.md).
+func emitSessionCounterValue(out *vgirpc.OutputCollector, value int64) error {
+	mem := memory.NewGoAllocator()
+	b := array.NewInt64Builder(mem)
+	defer b.Release()
+	b.Append(value)
+	arr := b.NewArray()
+	defer arr.Release()
+	return out.EmitArrays([]arrow.Array{arr}, 1)
 }
 
 // cancellableExchangeState is an echo exchange that records cancel observations.

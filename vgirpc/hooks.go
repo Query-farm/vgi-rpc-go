@@ -42,6 +42,13 @@ type DispatchInfo struct {
 	RequestData       []byte            // Self-contained Arrow IPC stream of the request batch (unary + stream init only).
 	StreamID          string            // Stream lifecycle identifier (32-char lowercase hex); empty on unary.
 	Cancelled         bool              // True when a stream was cancelled by the client.
+	// Implementation is an optional caller-supplied reference to the service
+	// implementation handling this dispatch (set via Server.SetImplementation).
+	// Mirrors Python CallContext.implementation: framework-driven callbacks
+	// (cancel hooks, stream-state callbacks, dispatch hooks) read it when they
+	// need to call other methods on the impl without holding their own
+	// reference. Zero wire impact — observability only.
+	Implementation any
 }
 
 // CallStatistics holds per-call I/O counters matching the Python CallStatistics.

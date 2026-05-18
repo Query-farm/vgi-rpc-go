@@ -142,10 +142,9 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		available := s.availableMethods()
 		errMsg := fmt.Sprintf("Unknown method: '%s'. Available methods: %v", req.Method, available)
 		emptySchema := arrow.NewSchema(nil, nil)
-		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, emptySchema, &RpcError{
-			Type:    "AttributeError",
-			Message: errMsg,
-		}, s.serverID, req.RequestID, s.debugErrors))
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, emptySchema,
+			&MethodNotImplementedError{Method: req.Method, Message: errMsg},
+			s.serverID, req.RequestID, s.debugErrors))
 		return nil
 	}
 
@@ -176,6 +175,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		Auth:              Anonymous(),
 		RequestData:       reqBytes,
 		StreamID:          streamID,
+		Implementation:    s.implementation,
 	}
 
 	var hookToken HookToken
