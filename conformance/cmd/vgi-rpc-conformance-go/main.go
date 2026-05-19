@@ -34,16 +34,10 @@ func main() {
 	server.SetDebugErrors(true)
 	server.SetServiceName("ConformanceService")
 	server.SetServerID("conformance-go")
-	// NOTE: SetProtocolVersion("1.0.0") is intentionally NOT called here
-	// yet. The Go server's dispatch-boundary check is wired and ready, but
-	// CI installs vgi-rpc from PyPI and the released package (<= 0.17.1)
-	// doesn't yet send the vgi_rpc.protocol_version request metadata key.
-	// Enabling enforcement here would reject every request with a
-	// "Client: <not declared>" ProtocolVersionError. Re-enable once a PyPI
-	// release containing the client-side change (Python 416c0d1) is the
-	// CI minimum — at which point uncomment the line below to match
-	// ConformanceService.protocol_version on the Python side.
-	//   server.SetProtocolVersion("1.0.0")
+	// Match Python ConformanceService.protocol_version. Requires
+	// vgi-rpc >= 0.18.0 on the client (sends the vgi_rpc.protocol_version
+	// request metadata key) — see ci.yml.
+	server.SetProtocolVersion("1.0.0")
 	conformance.RegisterMethods(server)
 
 	// Cross-language conformance: --access-log <path> may appear anywhere

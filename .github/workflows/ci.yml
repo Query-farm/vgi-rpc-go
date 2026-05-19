@@ -51,7 +51,10 @@ jobs:
         run: go build -cover -covermode=atomic -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
 
       - name: Install Python dependencies
-        run: pip install "vgi-rpc[http,cli]>=0.1.13" pytest pytest-timeout
+        # external extras (aiohttp etc.) added in 0.18.0 and required by the
+        # externalize-always HTTP conformance variant; protocol_version
+        # client send-side also lives in >= 0.18.0.
+        run: pip install "vgi-rpc[http,cli,external]>=0.18.0" pytest pytest-timeout
 
       - name: Create coverage directory
         run: mkdir -p _covdata
