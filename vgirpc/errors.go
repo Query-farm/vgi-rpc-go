@@ -88,6 +88,27 @@ func (e *MethodNotImplementedError) ErrorType() string {
 	return "AttributeError"
 }
 
+// ProtocolVersionError surfaces when the client's declared
+// ``vgi_rpc.protocol_version`` is incompatible with the server's
+// (or absent / malformed). The framework writes
+// ``vgi_rpc.error_kind = "protocol_version_mismatch"`` and the
+// message text is directional — it tells the reader which side to
+// upgrade. Mirrors Python's ProtocolVersionError (subclass of
+// VersionError). Wraps as HTTP 400 on the HTTP transport.
+type ProtocolVersionError struct {
+	Message string
+}
+
+func (e *ProtocolVersionError) Error() string {
+	return e.Message
+}
+
+// ErrorKind returns the wire-stable kind for ProtocolVersionError.
+func (e *ProtocolVersionError) ErrorKind() string { return "protocol_version_mismatch" }
+
+// ErrorType is the exception type name surfaced to Python clients.
+func (e *ProtocolVersionError) ErrorType() string { return "ProtocolVersionError" }
+
 // SessionLostError surfaces from the sticky session machinery when a
 // presented VGI-Session token cannot be resolved to a live registry
 // entry — malformed token, AAD mismatch (cross-principal replay),
@@ -161,6 +182,8 @@ func buildErrorExtra(err error, debug bool) string {
 	case *SessionLostError:
 		errType = e.ErrorType()
 	case *ServerDrainingError:
+		errType = e.ErrorType()
+	case *ProtocolVersionError:
 		errType = e.ErrorType()
 	}
 

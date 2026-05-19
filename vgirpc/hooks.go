@@ -33,7 +33,7 @@ type DispatchInfo struct {
 	ServerID          string            // Server identifier
 	Protocol          string            // Logical service / protocol name (server.SetServiceName)
 	ProtocolHash      string            // SHA-256 hex of canonical __describe__ payload (always required in access log)
-	ProtocolVersion   string            // Operator-supplied free-form protocol-contract label (optional)
+	ProtocolVersion   string            // Application protocol surface version (canonical semver) declared via Server.SetProtocolVersion; empty when opted out
 	RequestID         string            // Client-supplied request identifier
 	TransportMetadata map[string]string // Transport-level metadata (IPC custom metadata or HTTP headers)
 	Auth              *AuthContext      // Auth context for this dispatch; never nil

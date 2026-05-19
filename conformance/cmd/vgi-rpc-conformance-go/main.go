@@ -34,6 +34,11 @@ func main() {
 	server.SetDebugErrors(true)
 	server.SetServiceName("ConformanceService")
 	server.SetServerID("conformance-go")
+	// Match the Python ConformanceService.protocol_version. The conformance
+	// runner's describe_protocol_version + protocol_version categories
+	// assert that this is surfaced on every transport and enforced at the
+	// dispatch boundary.
+	server.SetProtocolVersion("1.0.0")
 	conformance.RegisterMethods(server)
 
 	// Cross-language conformance: --access-log <path> may appear anywhere

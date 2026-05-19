@@ -178,6 +178,25 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		Implementation:    s.implementation,
 	}
 
+	// Application-protocol-version gate. Fires only when the operator
+	// declared a protocol_version via [Server.SetProtocolVersion].
+	// ``__describe__`` is exempt (it's the diagnostic path a mismatched
+	// client uses to introspect the server's expected version, and that
+	// short-circuit already ran above). Mirrors Python's
+	// ``RpcServer.serve_one`` check at the same point.
+	if s.protocolVersionSet {
+		clientVersion, present := req.Metadata[MetaProtocolVersion]
+		if pverr := s.checkProtocolVersion(clientVersion, present); pverr != nil {
+			errSchema := info.ResultSchema
+			if errSchema == nil || methodTypeString(info.Type) != DispatchMethodUnary {
+				errSchema = arrow.NewSchema(nil, nil)
+			}
+			s.logIPCWriteErr("error-response", req.Method,
+				writeErrorResponse(w, errSchema, pverr, s.serverID, req.RequestID, s.debugErrors))
+			return nil
+		}
+	}
+
 	var hookToken HookToken
 	var hookActive bool
 	stats := &CallStatistics{}

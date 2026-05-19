@@ -3,6 +3,12 @@
 
 package vgirpc
 
+import (
+	"fmt"
+	"regexp"
+	"strconv"
+)
+
 // Well-known metadata keys used in the vgi_rpc wire protocol.
 // These appear as custom_metadata on Arrow IPC RecordBatch messages.
 const (
@@ -55,6 +61,14 @@ const (
 	// without substring-searching the human-readable message. Optional —
 	// absent for unclassified errors.
 	MetaErrorKind = "vgi_rpc.error_kind"
+	// MetaProtocolVersion carries the application protocol surface version
+	// declared by the Protocol class on every request batch. Format:
+	// canonical semver MAJOR.MINOR.PATCH (see [semverRegex]). The server
+	// enforces an exact major+minor match at the dispatch boundary; patch
+	// is ignored. Mismatches surface as ProtocolVersionError with a
+	// directional message. Distinct from [MetaRequestVersion] (wire framing
+	// version, currently "1") — this layer versions the *protocol surface*.
+	MetaProtocolVersion = "vgi_rpc.protocol_version"
 
 	// MetaTraceparent carries the W3C traceparent header for distributed tracing.
 	MetaTraceparent = "traceparent"
@@ -64,3 +78,30 @@ const (
 	// ProtocolVersion is the current protocol version string.
 	ProtocolVersion = "1"
 )
+
+// semverRegex matches canonical semver MAJOR.MINOR.PATCH with non-negative
+// integers and no leading zeros (except literal "0"). No prerelease tags
+// (1.0.0-rc1) and no build metadata (1.0.0+foo) — mirrors Python's
+// vgi_rpc.metadata.SEMVER_REGEX byte-for-byte.
+var semverRegex = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`)
+
+// parseSemver parses a canonical semver string into (major, minor, patch).
+// Returns an error for any input that isn't ``MAJOR.MINOR.PATCH`` with
+// non-negative integers and no leading zeros (except literal ``0``). No
+// prereleases (``1.0.0-rc1``) and no build metadata (``1.0.0+foo``).
+// Mirrors Python's vgi_rpc.metadata.parse_version.
+func parseSemver(value string) (major, minor, patch int, err error) {
+	m := semverRegex.FindStringSubmatch(value)
+	if m == nil {
+		//lint:ignore ST1005 message text mirrors Python's parse_version() verbatim for cross-language parity
+		return 0, 0, 0, fmt.Errorf(
+			"Invalid protocol version %q: expected canonical semver "+
+				"MAJOR.MINOR.PATCH with non-negative integers and no leading zeros "+
+				"(no prereleases or build metadata).",
+			value)
+	}
+	major, _ = strconv.Atoi(m[1])
+	minor, _ = strconv.Atoi(m[2])
+	patch, _ = strconv.Atoi(m[3])
+	return major, minor, patch, nil
+}

@@ -79,15 +79,17 @@ type methodInfo struct {
 
 // Server is the RPC server that dispatches incoming requests to registered methods.
 type Server struct {
-	methods         map[string]*methodInfo
-	serverID        string
-	serviceName     string
-	protocolVersion string
-	protocolHash    string
-	dispatchHook    DispatchHook
-	debugErrors     bool
-	externalConfig  *ExternalLocationConfig
-	implementation  any
+	methods              map[string]*methodInfo
+	serverID             string
+	serviceName          string
+	protocolVersion      string // canonical semver MAJOR.MINOR.PATCH, or "" when opted out
+	protocolVersionParts [3]int // parsed (major, minor, patch); used when protocolVersion != ""
+	protocolVersionSet   bool   // true when SetProtocolVersion was called with a non-empty value
+	protocolHash         string
+	dispatchHook         DispatchHook
+	debugErrors          bool
+	externalConfig       *ExternalLocationConfig
+	implementation       any
 
 	// Transport binding state, set lazily by notifyTransport.
 	transportMu           sync.Mutex
@@ -235,16 +237,95 @@ func capabilitiesEqual(a, b map[string]bool) bool {
 	return true
 }
 
-// SetProtocolVersion stores an operator-supplied free-form protocol-contract
-// version string. Reported in access-log records as ``protocol_version``;
-// complementary to (build) ``server_version``.
+// SetProtocolVersion declares the application protocol surface version
+// the server advertises and enforces. ``v`` must be canonical semver
+// MAJOR.MINOR.PATCH (e.g. ``"1.0.0"``); the empty string opts back out.
+//
+// When set, the server:
+//   - surfaces ``v`` under ``vgi_rpc.protocol_version`` in the
+//     ``__describe__`` response custom_metadata (so a mismatched client
+//     can introspect the expected version), and
+//   - enforces an exact major+minor match against the client's
+//     ``vgi_rpc.protocol_version`` request metadata at the dispatch
+//     boundary. Patch is ignored. Mismatch raises
+//     [ProtocolVersionError] (vgi_rpc.error_kind =
+//     ``protocol_version_mismatch``) with a directional message.
+//
+// ``__describe__`` requests are exempt from the dispatch check so a
+// mismatched client can discover the server's version. Mirrors Python's
+// ``RpcServer(protocol)`` reading ``Protocol.protocol_version``.
+//
+// Panics if ``v`` is non-empty and not canonical semver. Pre-flight
+// validation here keeps the malformed-config failure mode close to the
+// configuration call site rather than surfacing on first dispatch.
 func (s *Server) SetProtocolVersion(v string) {
+	if v == "" {
+		s.protocolVersion = ""
+		s.protocolVersionSet = false
+		s.protocolVersionParts = [3]int{}
+		return
+	}
+	major, minor, patch, err := parseSemver(v)
+	if err != nil {
+		panic(err)
+	}
 	s.protocolVersion = v
+	s.protocolVersionParts = [3]int{major, minor, patch}
+	s.protocolVersionSet = true
 }
 
-// ProtocolVersion returns the operator-supplied protocol version string.
+// ProtocolVersion returns the application protocol surface version the
+// server advertises and enforces, or the empty string when none is set
+// (opt-out — no dispatch-boundary check fires).
 func (s *Server) ProtocolVersion() string {
 	return s.protocolVersion
+}
+
+// checkProtocolVersion validates a client's declared protocol_version
+// against the server's. Returns a *ProtocolVersionError on mismatch
+// (including missing / malformed / undecodable) or nil on match. Caller
+// is responsible for invoking only when ``s.protocolVersionSet`` is true.
+// Mirrors Python's RpcServer._check_protocol_version directional-message
+// format byte-for-byte.
+func (s *Server) checkProtocolVersion(clientVersion string, present bool) *ProtocolVersionError {
+	if !present {
+		return &ProtocolVersionError{
+			Message: "VGI client/worker protocol_version mismatch.\n" +
+				"  Client: <not declared>\n" +
+				"  Server: " + s.protocolVersion + "\n" +
+				"  Direction: the client did not send a vgi_rpc.protocol_version " +
+				"metadata key. This is either a vgi-rpc framework bug or a " +
+				"non-VGI client connecting to a VGI worker.",
+		}
+	}
+	major, minor, _, err := parseSemver(clientVersion)
+	if err != nil {
+		return &ProtocolVersionError{
+			Message: "VGI client/worker protocol_version mismatch.\n" +
+				"  Client: " + clientVersion + "\n" +
+				"  Server: " + s.protocolVersion + "\n" +
+				"  Direction: client sent a malformed protocol_version. " +
+				"Expected canonical semver MAJOR.MINOR.PATCH.",
+		}
+	}
+	serverMajor, serverMinor := s.protocolVersionParts[0], s.protocolVersionParts[1]
+	if major == serverMajor && minor == serverMinor {
+		return nil
+	}
+	var direction string
+	if major < serverMajor || (major == serverMajor && minor < serverMinor) {
+		direction = "client is too old; upgrade the VGI extension/client to a " +
+			"version supporting protocol_version " + s.protocolVersion + "."
+	} else {
+		direction = "server is too old; upgrade the VGI worker to a version " +
+			"supporting protocol_version " + clientVersion + "."
+	}
+	return &ProtocolVersionError{
+		Message: "VGI client/worker protocol_version mismatch.\n" +
+			"  Client: " + clientVersion + "\n" +
+			"  Server: " + s.protocolVersion + "\n" +
+			"  Direction: " + direction,
+	}
 }
 
 // ProtocolHash returns the SHA-256 hex digest of the canonical __describe__

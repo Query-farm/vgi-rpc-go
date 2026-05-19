@@ -114,6 +114,22 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
 	defer hookCleanup()
 
+	// Application-protocol-version gate. HTTP doesn't route through
+	// server.serveOne — the check has to be wired in independently at
+	// the same point in the dispatch boundary (after method lookup,
+	// before deserialize). ``__describe__`` is exempt (handled above
+	// via h.handleDescribe). Mismatch surfaces as a 400 EXCEPTION batch
+	// carrying vgi_rpc.error_kind = "protocol_version_mismatch" with the
+	// directional message intact.
+	if h.server.protocolVersionSet {
+		clientVersion, present := req.Metadata[MetaProtocolVersion]
+		if pverr := h.server.checkProtocolVersion(clientVersion, present); pverr != nil {
+			handlerErr = pverr
+			h.writeHttpError(w, http.StatusBadRequest, pverr, info.ResultSchema)
+			return
+		}
+	}
+
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
 		handlerErr = &RpcError{Type: "TypeError", Message: fmt.Sprintf("parameter deserialization: %v", err)}

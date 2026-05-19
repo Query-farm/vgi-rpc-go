@@ -194,6 +194,15 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 		keys = append(keys, MetaServerID)
 		vals = append(vals, s.serverID)
 	}
+	// Surface the application protocol surface version (opt-in via
+	// Server.SetProtocolVersion) so a mismatched client can introspect
+	// the server's expected version by calling __describe__. Not part of
+	// the protocol_hash payload — protocol_hash is the wire-shape
+	// fingerprint; this is a separate cross-language compatibility gate.
+	if s.protocolVersionSet {
+		keys = append(keys, MetaProtocolVersion)
+		vals = append(vals, s.protocolVersion)
+	}
 
 	meta := arrow.NewMetadata(keys, vals)
 	return batch, meta

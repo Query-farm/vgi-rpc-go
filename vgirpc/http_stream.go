@@ -90,6 +90,19 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
 	defer hookCleanup()
 
+	// Application-protocol-version gate. Same as the HTTP unary path —
+	// stream init dispatches directly here without going through
+	// server.serveOne. Stream methods never include ``__describe__``,
+	// but the exemption is kept for symmetry with the unary path.
+	if h.server.protocolVersionSet {
+		clientVersion, present := req.Metadata[MetaProtocolVersion]
+		if pverr := h.server.checkProtocolVersion(clientVersion, present); pverr != nil {
+			handlerErr = pverr
+			h.writeHttpError(w, http.StatusBadRequest, pverr, nil)
+			return
+		}
+	}
+
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
 		handlerErr = &RpcError{Type: "TypeError", Message: err.Error()}
