@@ -11,3 +11,4 @@ _covdata/
 coverage-go.txt
 _vgi-rpc-python/
 .pytest_cache/
+.claude/
