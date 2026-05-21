@@ -394,6 +394,10 @@ func setListField(field reflect.Value, fieldType reflect.Type, isPtr bool, listA
 
 func setStructField(field reflect.Value, fieldType reflect.Type, isPtr bool, structArr *array.Struct, idx int) error {
 	// Note: fieldType is already dereferenced by the caller (setFieldFromArrow)
+	if fieldType.Kind() != reflect.Struct {
+		return fmt.Errorf("cannot decode Arrow struct %s into Go %s field (expected a struct type)",
+			structArr.DataType(), fieldType)
+	}
 	result := reflect.New(fieldType).Elem()
 	structType := structArr.DataType().(*arrow.StructType)
 
