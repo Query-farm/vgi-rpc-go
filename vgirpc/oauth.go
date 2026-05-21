@@ -16,8 +16,8 @@ type OAuthResourceMetadata struct {
 	Resource             string   `json:"resource"`
 	AuthorizationServers []string `json:"authorization_servers"`
 
-	ScopesSupported                  []string `json:"scopes_supported,omitempty"`
-	BearerMethodsSupported           []string `json:"bearer_methods_supported,omitempty"`
+	ScopesSupported                   []string `json:"scopes_supported,omitempty"`
+	BearerMethodsSupported            []string `json:"bearer_methods_supported,omitempty"`
 	ResourceSigningAlgValuesSupported []string `json:"resource_signing_alg_values_supported,omitempty"`
 
 	ResourceName          string `json:"resource_name,omitempty"`

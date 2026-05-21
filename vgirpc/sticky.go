@@ -17,11 +17,11 @@ import (
 
 // Sticky session token format mirrors Python's vgi_rpc/http/server/_sticky.py:
 //
-//   wire:      version:u8(1) | nonce:bytes(24) | ciphertext+tag
-//   plaintext: created_at:u64 LE | server_id_len:u8 | server_id_bytes |
-//              session_id:bytes(12) | expires_at:u64 LE
-//   AAD:       same as stream tokens — b"vgi_rpc.state.v4\x00" + principal tail
-//   encoding:  base64url, no padding
+//	wire:      version:u8(1) | nonce:bytes(24) | ciphertext+tag
+//	plaintext: created_at:u64 LE | server_id_len:u8 | server_id_bytes |
+//	           session_id:bytes(12) | expires_at:u64 LE
+//	AAD:       same as stream tokens — b"vgi_rpc.state.v4\x00" + principal tail
+//	encoding:  base64url, no padding
 const (
 	sessionTokenVersion = 0x01
 	sessionIDLen        = 12 // bytes; 24 hex chars
@@ -142,14 +142,14 @@ type sessionEntry struct {
 // Safe for concurrent use. Eviction is TTL-driven via the reaper goroutine
 // and inline on get() when an expired entry is observed.
 type sessionRegistry struct {
-	defaultTTL  time.Duration
-	mu          sync.Mutex
-	entries     map[[sessionIDLen]byte]*sessionEntry
-	draining    bool
-	reaperStop  chan struct{}
-	reaperOnce  sync.Once
-	reaperWg    sync.WaitGroup
-	reaperTick  time.Duration
+	defaultTTL time.Duration
+	mu         sync.Mutex
+	entries    map[[sessionIDLen]byte]*sessionEntry
+	draining   bool
+	reaperStop chan struct{}
+	reaperOnce sync.Once
+	reaperWg   sync.WaitGroup
+	reaperTick time.Duration
 }
 
 // newSessionRegistry constructs an empty registry with the given default TTL.

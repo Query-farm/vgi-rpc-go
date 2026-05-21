@@ -135,8 +135,11 @@ func (o *OutputCollector) EmitWithMetadata(batch arrow.RecordBatch, meta map[str
 			return err
 		}
 	}
-	// Re-wrap with the output schema if schemas differ by pointer
-	if batch.Schema() != o.schema {
+	// Re-wrap with the output schema if schemas differ by pointer. Only when
+	// the column counts match: an EmitInterceptor may have projected the batch
+	// to fewer columns than the declared output schema (projection pushdown),
+	// in which case the (narrower) interceptor result is authoritative.
+	if batch.Schema() != o.schema && int(batch.NumCols()) == len(o.schema.Fields()) {
 		original := batch
 		batch = array.NewRecordBatch(o.schema, batch.Columns(), batch.NumRows())
 		original.Release()

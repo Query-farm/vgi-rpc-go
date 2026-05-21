@@ -238,24 +238,24 @@ func capabilitiesEqual(a, b map[string]bool) bool {
 }
 
 // SetProtocolVersion declares the application protocol surface version
-// the server advertises and enforces. ``v`` must be canonical semver
-// MAJOR.MINOR.PATCH (e.g. ``"1.0.0"``); the empty string opts back out.
+// the server advertises and enforces. “v“ must be canonical semver
+// MAJOR.MINOR.PATCH (e.g. “"1.0.0"“); the empty string opts back out.
 //
 // When set, the server:
-//   - surfaces ``v`` under ``vgi_rpc.protocol_version`` in the
-//     ``__describe__`` response custom_metadata (so a mismatched client
+//   - surfaces “v“ under “vgi_rpc.protocol_version“ in the
+//     “__describe__“ response custom_metadata (so a mismatched client
 //     can introspect the expected version), and
 //   - enforces an exact major+minor match against the client's
-//     ``vgi_rpc.protocol_version`` request metadata at the dispatch
+//     “vgi_rpc.protocol_version“ request metadata at the dispatch
 //     boundary. Patch is ignored. Mismatch raises
 //     [ProtocolVersionError] (vgi_rpc.error_kind =
-//     ``protocol_version_mismatch``) with a directional message.
+//     “protocol_version_mismatch“) with a directional message.
 //
-// ``__describe__`` requests are exempt from the dispatch check so a
+// “__describe__“ requests are exempt from the dispatch check so a
 // mismatched client can discover the server's version. Mirrors Python's
-// ``RpcServer(protocol)`` reading ``Protocol.protocol_version``.
+// “RpcServer(protocol)“ reading “Protocol.protocol_version“.
 //
-// Panics if ``v`` is non-empty and not canonical semver. Pre-flight
+// Panics if “v“ is non-empty and not canonical semver. Pre-flight
 // validation here keeps the malformed-config failure mode close to the
 // configuration call site rather than surfacing on first dispatch.
 func (s *Server) SetProtocolVersion(v string) {
@@ -284,7 +284,7 @@ func (s *Server) ProtocolVersion() string {
 // checkProtocolVersion validates a client's declared protocol_version
 // against the server's. Returns a *ProtocolVersionError on mismatch
 // (including missing / malformed / undecodable) or nil on match. Caller
-// is responsible for invoking only when ``s.protocolVersionSet`` is true.
+// is responsible for invoking only when “s.protocolVersionSet“ is true.
 // Mirrors Python's RpcServer._check_protocol_version directional-message
 // format byte-for-byte.
 func (s *Server) checkProtocolVersion(clientVersion string, present bool) *ProtocolVersionError {

@@ -507,8 +507,8 @@ func TestFullRoundtrip(t *testing.T) {
 
 	// Override storage to use test server URLs
 	testStorage := &redirectStorage{
-		inner:      storage,
-		serverURL:  server.URL,
+		inner:     storage,
+		serverURL: server.URL,
 	}
 
 	config := &ExternalLocationConfig{
@@ -689,8 +689,8 @@ func TestSHA256_RoundtripWithCompression(t *testing.T) {
 	config := &ExternalLocationConfig{
 		Storage:                   storage,
 		ExternalizeThresholdBytes: 10,
-		Compression:              &Compression{Algorithm: "zstd", Level: 3},
-		URLValidator:             nil,
+		Compression:               &Compression{Algorithm: "zstd", Level: 3},
+		URLValidator:              nil,
 	}
 	batch := makeBatch(100)
 	defer batch.Release()
@@ -742,7 +742,7 @@ func TestSHA256_IsPreCompression(t *testing.T) {
 	config := &ExternalLocationConfig{
 		Storage:                   storage,
 		ExternalizeThresholdBytes: 10,
-		Compression:              &Compression{Algorithm: "zstd", Level: 3},
+		Compression:               &Compression{Algorithm: "zstd", Level: 3},
 	}
 	batch := makeBatch(100)
 	defer batch.Release()

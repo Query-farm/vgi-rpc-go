@@ -12,9 +12,9 @@ import (
 // Response-cap header names. Mirror Python's vgi_rpc/http/_common.py so
 // cross-implementation clients can probe capabilities consistently.
 const (
-	maxResponseBytesHeader              = "VGI-Max-Response-Bytes"
-	maxExternalizedResponseBytesHeader  = "VGI-Max-Externalized-Response-Bytes"
-	externalizationEnabledHeader        = "VGI-Externalization-Enabled"
+	maxResponseBytesHeader             = "VGI-Max-Response-Bytes"
+	maxExternalizedResponseBytesHeader = "VGI-Max-Externalized-Response-Bytes"
+	externalizationEnabledHeader       = "VGI-Externalization-Enabled"
 )
 
 // SetMaxResponseBytes caps the HTTP body size (the bytes that literally

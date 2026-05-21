@@ -23,22 +23,22 @@ import (
 // in "accept opens" mode and ctx.OpenSession() succeeds.
 type stickySink struct {
 	// Configured on entry by HTTP middleware:
-	registry     *sessionRegistry
-	tokenKey     []byte
-	echoHeaders  map[string]string
-	serverID     string
-	auth         *AuthContext
-	acceptOpens  bool // VGI-Session-Accept: true on the request
-	transport    TransportKind
+	registry    *sessionRegistry
+	tokenKey    []byte
+	echoHeaders map[string]string
+	serverID    string
+	auth        *AuthContext
+	acceptOpens bool // VGI-Session-Accept: true on the request
+	transport   TransportKind
 
 	// Pre-populated by middleware when an existing session was resumed:
-	entry     *sessionEntry // the resumed entry, nil when no token presented
-	sessionID [sessionIDLen]byte
+	entry      *sessionEntry // the resumed entry, nil when no token presented
+	sessionID  [sessionIDLen]byte
 	hasSession bool
 
 	// Mutated during dispatch by CallContext.OpenSession / CloseSession:
-	mintedToken string // base64url; emitted as VGI-Session on the response
-	closed      bool   // true after CloseSession; emits VGI-Session-Close: true
+	mintedToken  string // base64url; emitted as VGI-Session on the response
+	closed       bool   // true after CloseSession; emits VGI-Session-Close: true
 	sessionIDHex string // 24-char hex; for access-log / debugging
 }
 

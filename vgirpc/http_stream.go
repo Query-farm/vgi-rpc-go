@@ -556,9 +556,10 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	for i, ab := range out.batches {
 		isDataBatch := (i == out.dataBatchIdx)
 		if ab.meta != nil {
-			// Log batch — write as-is
+			// Use the batch's own (possibly projection-narrowed) schema and
+			// attach the custom metadata on top.
 			batchWithMeta := array.NewRecordBatchWithMetadata(
-				schema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
+				ab.batch.Schema(), ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
 			if werr := writer.Write(batchWithMeta); werr != nil {
 				h.logIPCWriteErr("log-batch", info.Name, werr)
 				if writeErr == nil {

@@ -52,7 +52,7 @@ type CallContext struct {
 	// CallContext.implementation — framework-driven callbacks (cancel hooks,
 	// stream state lifecycle) read it to dispatch through helper methods on
 	// the impl without holding their own captured reference. nil by default.
-	Implementation    any
+	Implementation any
 	// stickySink is the per-request bridge to the HTTP sticky session
 	// machinery. nil on non-HTTP transports and on HTTP servers without
 	// sticky enabled — CallContext.OpenSession / CloseSession check for

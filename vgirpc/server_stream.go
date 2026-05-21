@@ -328,8 +328,11 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		for i, ab := range out.batches {
 			var writeErr error
 			if ab.meta != nil {
+				// Use the batch's own schema (it may be narrower than the
+				// declared output schema after projection pushdown); attach
+				// the custom metadata on top.
 				batchWithMeta := array.NewRecordBatchWithMetadata(
-					outputSchema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
+					ab.batch.Schema(), ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
 				writeErr = outputWriter.Write(batchWithMeta)
 				batchWithMeta.Release()
 				ab.batch.Release()

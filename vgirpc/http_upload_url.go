@@ -14,8 +14,8 @@ import (
 )
 
 const (
-	uploadURLMethod    = "__upload_url__"
-	maxUploadURLCount  = 100
+	uploadURLMethod   = "__upload_url__"
+	maxUploadURLCount = 100
 )
 
 // uploadURLSchema is the response schema for the __upload_url__/init
@@ -135,4 +135,3 @@ func extractCount(batch arrow.RecordBatch) int {
 	}
 	return 1
 }
-

@@ -86,9 +86,9 @@ const (
 var semverRegex = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`)
 
 // parseSemver parses a canonical semver string into (major, minor, patch).
-// Returns an error for any input that isn't ``MAJOR.MINOR.PATCH`` with
-// non-negative integers and no leading zeros (except literal ``0``). No
-// prereleases (``1.0.0-rc1``) and no build metadata (``1.0.0+foo``).
+// Returns an error for any input that isn't “MAJOR.MINOR.PATCH“ with
+// non-negative integers and no leading zeros (except literal “0“). No
+// prereleases (“1.0.0-rc1“) and no build metadata (“1.0.0+foo“).
 // Mirrors Python's vgi_rpc.metadata.parse_version.
 func parseSemver(value string) (major, minor, patch int, err error) {
 	m := semverRegex.FindStringSubmatch(value)

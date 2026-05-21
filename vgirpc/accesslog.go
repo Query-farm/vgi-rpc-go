@@ -20,8 +20,8 @@ import (
 
 // AccessLogHook is a [DispatchHook] that emits one JSON record per RPC call
 // to an io.Writer, conforming to the cross-language vgi-rpc access-log
-// specification (see ``docs/access-log-spec.md`` and
-// ``vgi_rpc/access_log.schema.json`` in the Python reference repo).
+// specification (see “docs/access-log-spec.md“ and
+// “vgi_rpc/access_log.schema.json“ in the Python reference repo).
 //
 // Records are written as JSON-Lines (NDJSON), UTF-8 encoded, with one
 // record per RPC call. The hook is safe for concurrent use across
@@ -38,12 +38,12 @@ type AccessLogHook struct {
 }
 
 // NewAccessLogHook returns an [AccessLogHook] that writes records to w.
-// serverVersion is reported in the optional ``server_version`` field;
+// serverVersion is reported in the optional “server_version“ field;
 // pass an empty string to omit it.
 //
 // By default the hook emits records at the equivalent of "INFO" level:
-// ``request_data`` is replaced with ``original_request_bytes`` plus
-// ``truncated: true`` because the full base64-encoded payload typically
+// “request_data“ is replaced with “original_request_bytes“ plus
+// “truncated: true“ because the full base64-encoded payload typically
 // dominates the record (8+ KiB per call) and most audit consumers care
 // about who/what/when rather than the raw bytes. Call [AccessLogHook.SetDebug]
 // to re-enable the full payload for replay/audit workloads.
@@ -52,13 +52,13 @@ func NewAccessLogHook(w io.Writer, serverVersion string) *AccessLogHook {
 }
 
 // SetDebug toggles emission of the full base64-encoded request payload
-// in the ``request_data`` field. When true, the record carries the
+// in the “request_data“ field. When true, the record carries the
 // payload (suitable for replay/audit). When false (default), the
-// payload is omitted and the record is marked ``truncated: true`` with
-// ``original_request_bytes`` set so the access-log schema's
+// payload is omitted and the record is marked “truncated: true“ with
+// “original_request_bytes“ set so the access-log schema's
 // "unary requires request_data unless truncated" invariant still holds.
 //
-// Mirrors Python's ``_access_logger.isEnabledFor(logging.DEBUG)``
+// Mirrors Python's “_access_logger.isEnabledFor(logging.DEBUG)“
 // gating introduced in vgi-rpc e7ee750.
 func (h *AccessLogHook) SetDebug(debug bool) {
 	h.mu.Lock()
@@ -185,7 +185,7 @@ func (h *AccessLogHook) OnDispatchEnd(_ context.Context, token HookToken, info D
 
 // SerializeRequestBatch produces a self-contained Arrow IPC stream
 // (one schema message + one record batch message) suitable for the
-// access-log ``request_data`` field.
+// access-log “request_data“ field.
 //
 // The returned bytes round-trip through any Arrow library's IPC stream
 // reader to a logically-equal RecordBatch, satisfying the access-log

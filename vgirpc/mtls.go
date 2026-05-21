@@ -421,12 +421,11 @@ func MtlsAuthenticateSubject(cfg MtlsAuthenticateSubjectConfig) (AuthenticateFun
 				Authenticated: true,
 				Principal:     cn,
 				Claims: map[string]any{
-					"subject_dn":     subjectDN,
-					"serial":         serialHex,
+					"subject_dn":      subjectDN,
+					"serial":          serialHex,
 					"not_valid_after": notValidAfter,
 				},
 			}, nil
 		},
 	})
 }
-

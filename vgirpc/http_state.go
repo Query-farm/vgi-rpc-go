@@ -42,7 +42,7 @@ type stateTokenData struct {
 
 // stateTokenVersion is the on-wire version byte for state tokens. v4 = AEAD.
 const (
-	stateTokenVersion = 0x04
+	stateTokenVersion  = 0x04
 	stateTokenNonceLen = chacha20poly1305.NonceSizeX // 24 bytes for XChaCha20-Poly1305
 	stateTokenTagLen   = chacha20poly1305.Overhead   // 16 bytes Poly1305 tag
 	stateTokenMinLen   = 1 + stateTokenNonceLen + stateTokenTagLen

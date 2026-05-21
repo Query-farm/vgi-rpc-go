@@ -35,14 +35,14 @@ const (
 // HttpServer implements [http.Handler] and can be used directly with
 // [http.ListenAndServe] or mounted on an existing [http.ServeMux].
 type HttpServer struct {
-	server      *Server
-	tokenKey  []byte
-	tokenTTL    time.Duration
+	server                  *Server
+	tokenKey                []byte
+	tokenTTL                time.Duration
 	maxBodySize             int64
 	maxDecompressedBodySize int64 // 0 = derive as maxBodySize*16
 	prefix                  string
-	mux         *http.ServeMux
-	zstdEncoderLevel int // > 0 when response compression is enabled
+	mux                     *http.ServeMux
+	zstdEncoderLevel        int // > 0 when response compression is enabled
 
 	rehydrateFunc      RehydrateFunc    // called after unpacking state tokens
 	producerBatchLimit int              // max data batches per producer response; 0 = unlimited
@@ -96,7 +96,7 @@ func NewHttpServer(server *Server) *HttpServer {
 	}
 	h := &HttpServer{
 		server:      server,
-		tokenKey:  key,
+		tokenKey:    key,
 		tokenTTL:    defaultTokenTTL,
 		maxBodySize: defaultMaxBodySize,
 		prefix:      "",
@@ -122,7 +122,7 @@ func NewHttpServerWithKey(server *Server, tokenKey []byte) (*HttpServer, error) 
 	}
 	h := &HttpServer{
 		server:      server,
-		tokenKey:  tokenKey,
+		tokenKey:    tokenKey,
 		tokenTTL:    defaultTokenTTL,
 		maxBodySize: defaultMaxBodySize,
 		prefix:      "",
@@ -194,11 +194,11 @@ func (h *HttpServer) SetCorsMaxAge(seconds int) {
 // Capability advertisement header names. Mirror the Python reference
 // (vgi_rpc/http/_common.py) so cross-implementation clients agree.
 const (
-	maxRequestBytesHeader     = "VGI-Max-Request-Bytes"
-	uploadURLHeader           = "VGI-Upload-URL-Support"
-	maxUploadBytesHeader      = "VGI-Max-Upload-Bytes"
-	supportedEncodingsHeader  = "VGI-Supported-Encodings"
-	capabilityCacheMaxAge     = 300 // seconds; OPTIONS Cache-Control max-age
+	maxRequestBytesHeader    = "VGI-Max-Request-Bytes"
+	uploadURLHeader          = "VGI-Upload-URL-Support"
+	maxUploadBytesHeader     = "VGI-Max-Upload-Bytes"
+	supportedEncodingsHeader = "VGI-Supported-Encodings"
+	capabilityCacheMaxAge    = 300 // seconds; OPTIONS Cache-Control max-age
 )
 
 // addCapabilityHeaders writes the advertised capability headers (when

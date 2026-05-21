@@ -51,7 +51,7 @@ func TestFetchOAuthResourceMetadata(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	result, err := FetchOAuthResourceMetadata(ts.URL+"/vgi")
+	result, err := FetchOAuthResourceMetadata(ts.URL + "/vgi")
 	if err != nil {
 		t.Fatal(err)
 	}

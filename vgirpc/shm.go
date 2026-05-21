@@ -837,4 +837,3 @@ func shmAttachFromMetadata(reqMeta map[string]string, isHTTP bool) *ShmSegment {
 	}
 	return seg
 }
-

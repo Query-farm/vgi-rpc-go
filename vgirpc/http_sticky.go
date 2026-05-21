@@ -13,13 +13,13 @@ import (
 
 // Header names for sticky sessions. Mirrors Python vgi_rpc/http/_common.py.
 const (
-	stickySessionHeader      = "VGI-Session"
+	stickySessionHeader       = "VGI-Session"
 	stickySessionAcceptHeader = "VGI-Session-Accept"
-	stickySessionCloseHeader = "VGI-Session-Close"
-	stickyEnabledHeader      = "VGI-Sticky-Enabled"
-	stickyDefaultTTLHeader   = "VGI-Sticky-Default-TTL"
-	stickyEchoHeadersHeader  = "VGI-Sticky-Echo-Headers"
-	stickyEchoHeaderPrefix   = "VGI-Echo-"
+	stickySessionCloseHeader  = "VGI-Session-Close"
+	stickyEnabledHeader       = "VGI-Sticky-Enabled"
+	stickyDefaultTTLHeader    = "VGI-Sticky-Default-TTL"
+	stickyEchoHeadersHeader   = "VGI-Sticky-Echo-Headers"
+	stickyEchoHeaderPrefix    = "VGI-Echo-"
 )
 
 // EnableSticky enables HTTP sticky sessions on this server with the given

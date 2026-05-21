@@ -89,9 +89,9 @@ func (e *MethodNotImplementedError) ErrorType() string {
 }
 
 // ProtocolVersionError surfaces when the client's declared
-// ``vgi_rpc.protocol_version`` is incompatible with the server's
+// “vgi_rpc.protocol_version“ is incompatible with the server's
 // (or absent / malformed). The framework writes
-// ``vgi_rpc.error_kind = "protocol_version_mismatch"`` and the
+// “vgi_rpc.error_kind = "protocol_version_mismatch"“ and the
 // message text is directional — it tells the reader which side to
 // upgrade. Mirrors Python's ProtocolVersionError (subclass of
 // VersionError). Wraps as HTTP 400 on the HTTP transport.
