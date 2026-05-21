@@ -118,6 +118,13 @@ func (o *OutputCollector) setBudgets(remaining, remainingExternal int64, externa
 // batch is created with the output schema to ensure IPC writer compatibility.
 // If EmitInterceptor is set, it is called on the batch before storing.
 func (o *OutputCollector) Emit(batch arrow.RecordBatch) error {
+	return o.EmitWithMetadata(batch, nil)
+}
+
+// EmitWithMetadata is Emit with custom key/value metadata attached to the
+// emitted batch (carried as Arrow schema metadata over the wire). Used for
+// per-batch annotations such as vgi_batch_index and vgi_partition_values#b64.
+func (o *OutputCollector) EmitWithMetadata(batch arrow.RecordBatch, meta map[string]string) error {
 	if o.dataBatchIdx >= 0 {
 		return fmt.Errorf("OutputCollector: only one data batch may be emitted per call")
 	}
@@ -134,8 +141,19 @@ func (o *OutputCollector) Emit(batch arrow.RecordBatch) error {
 		batch = array.NewRecordBatch(o.schema, batch.Columns(), batch.NumRows())
 		original.Release()
 	}
+	ab := annotatedBatch{batch: batch}
+	if len(meta) > 0 {
+		keys := make([]string, 0, len(meta))
+		vals := make([]string, 0, len(meta))
+		for k, v := range meta {
+			keys = append(keys, k)
+			vals = append(vals, v)
+		}
+		m := arrow.NewMetadata(keys, vals)
+		ab.meta = &m
+	}
 	o.dataBatchIdx = len(o.batches)
-	o.batches = append(o.batches, annotatedBatch{batch: batch})
+	o.batches = append(o.batches, ab)
 	return nil
 }
 
