@@ -258,12 +258,27 @@ func (h *HttpServer) isMaxBytesExempt(path string) bool {
 
 // addCorsHeaders adds CORS response headers when cors is enabled.
 // When isOptions is true, the Access-Control-Max-Age header is included.
-func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, isOptions bool) {
+//
+// Access-Control-Allow-Headers echoes the preflight's
+// Access-Control-Request-Headers when present (so any client request header is
+// permitted under a wildcard origin), falling back to the common pair. This
+// matches the Python vgi-rpc worker; r may be nil for non-preflight responses.
+func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, r *http.Request, isOptions bool) {
 	if h.corsOrigins != "" {
 		w.Header().Set("Access-Control-Allow-Origin", h.corsOrigins)
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		allowHeaders := "Content-Type, Authorization"
+		if r != nil {
+			if requested := r.Header.Get("Access-Control-Request-Headers"); requested != "" {
+				allowHeaders = requested
+			}
+		}
+		w.Header().Set("Access-Control-Allow-Headers", allowHeaders)
 		w.Header().Set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, "+maxResponseBytesHeader+", "+maxExternalizedResponseBytesHeader+", "+externalizationEnabledHeader+", "+supportedEncodingsHeader+", "+stickyEnabledHeader+", "+stickyDefaultTTLHeader+", "+stickyEchoHeadersHeader+", "+stickySessionHeader+", "+stickySessionCloseHeader)
+		// Opt responses into cross-origin embedding so the service is usable
+		// from cross-origin-isolated pages (COEP: require-corp), e.g. browsers
+		// running multithreaded WASM (DuckDB-WASM) against this worker.
+		w.Header().Set("Cross-Origin-Resource-Policy", "cross-origin")
 		if isOptions && h.corsMaxAge != "" {
 			w.Header().Set("Access-Control-Max-Age", h.corsMaxAge)
 		}
@@ -637,13 +652,13 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.handleOAuthTokenProxy(w, r)
 			return
 		}
-		h.addCorsHeaders(w, true)
+		h.addCorsHeaders(w, r, true)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	// Add CORS headers to all non-OPTIONS responses.
-	h.addCorsHeaders(w, false)
+	h.addCorsHeaders(w, r, false)
 
 	// Enforce the advertised max_request_bytes cap on RPC routes (the
 	// upload-URL and health routes are exempt because their payloads
