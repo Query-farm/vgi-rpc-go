@@ -131,9 +131,29 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 		}
 	}
 
+	// Defensive: a pointer batch with no attached segment means the client used
+	// shm without honoring the __transport_options__ negotiation (e.g. a server
+	// that reported shm-unavailable, or a capable server whose attach failed).
+	// Fail loudly rather than silently mis-deserializing the zero-row pointer.
+	if req.Shm == nil && IsShmPointerBatch(req.Batch) {
+		rpcErr := &RpcError{
+			Type:    "IOError",
+			Message: "received shm pointer batch but no segment is attached (transport negotiation mismatch)",
+		}
+		emptySchema := arrow.NewSchema(nil, nil)
+		s.logIPCWriteErr("error-response", req.Method,
+			writeErrorResponse(w, emptySchema, rpcErr, s.serverID, req.RequestID, s.debugErrors))
+		return nil
+	}
+
 	// Handle __describe__ introspection
 	if req.Method == "__describe__" {
 		return s.serveDescribe(w, req)
+	}
+
+	// Handle __transport_options__ transport capability negotiation
+	if req.Method == "__transport_options__" {
+		return s.serveTransportOptions(w)
 	}
 
 	// Look up method
@@ -299,6 +319,34 @@ func (s *Server) serveDescribe(w io.Writer, req *Request) error {
 	defer writer.Close()
 
 	return writer.Write(batchWithMeta)
+}
+
+// serveTransportOptions handles the __transport_options__ capability handshake:
+// a framework-level negotiation (parallel to __describe__) through which the
+// client discovers whether the shared-memory side-channel may be used. The
+// worker's capabilities ride as response metadata under vgi_rpc.transport.*;
+// the response batch is empty. shm is offered only when this build supports it.
+func (s *Server) serveTransportOptions(w io.Writer) error {
+	emptySchema := arrow.NewSchema(nil, nil)
+	shmVal := "false"
+	if shmSupported {
+		shmVal = "true"
+	}
+	keys := []string{MetaTransportShm, MetaRequestVersion}
+	vals := []string{shmVal, ProtocolVersion}
+	if s.serverID != "" {
+		keys = append(keys, MetaServerID)
+		vals = append(vals, s.serverID)
+	}
+	meta := arrow.NewMetadata(keys, vals)
+
+	rec := array.NewRecordBatchWithMetadata(emptySchema, nil, 0, meta)
+	defer rec.Release()
+
+	writer := ipc.NewWriter(w, ipc.WithSchema(emptySchema))
+	defer writer.Close()
+
+	return writer.Write(rec)
 }
 
 // isTransportClosed returns true for errors that indicate the transport was closed normally.

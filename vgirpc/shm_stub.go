@@ -15,6 +15,10 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 )
 
+// shmSupported reports whether this build can use the POSIX shared-memory
+// side-channel. False on non-unix platforms (see shm.go for the unix build).
+const shmSupported = false
+
 // ShmHeaderSize is exported as a public constant on every platform; the
 // stub still defines the same value so user code can reference it
 // portably (e.g. for sizing decisions).

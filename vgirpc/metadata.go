@@ -51,6 +51,10 @@ const (
 	// MetaShmSource is set on a materialized batch after a pointer batch
 	// has been resolved, carrying the segment name. Diagnostic only.
 	MetaShmSource = "vgi_rpc.shm_source"
+	// MetaTransportShm carries the shared-memory capability ("true"/"false")
+	// in the __transport_options__ request (client) and response (server)
+	// metadata, under the vgi_rpc.transport.* namespace.
+	MetaTransportShm = "vgi_rpc.transport.shm"
 	// MetaLocation carries a URI for external pointer references.
 	MetaLocation = "vgi_rpc.location"
 	// MetaLocationSHA256 carries a hex-encoded SHA-256 checksum of the raw
