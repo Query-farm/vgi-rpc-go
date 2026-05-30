@@ -29,6 +29,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strconv"
@@ -100,6 +101,20 @@ type ShmSegment struct {
 	// data after Close would dereference a nil slice. Close swaps it,
 	// public methods short-circuit when set.
 	closed atomic.Bool
+
+	// schemaCache memoises the wire bytes of the per-schema "schema
+	// message" (continuation token + flatbuffer + padding, no trailing
+	// EOS) so that AllocateAndWrite's fast path can prepend the schema
+	// to each batch's record-batch payload via a single memcpy rather
+	// than rebuilding the schema flatbuffer per call.
+	//
+	// Keyed by *arrow.Schema identity (sync.Map's only option). Within
+	// a stream the same schema instance is reused across batches, so
+	// identity matches content; if a stream re-deserialises a schema
+	// every batch the cache will miss but the cost is a single
+	// schema-message encode, which the legacy path was paying every
+	// batch anyway.
+	schemaCache sync.Map
 }
 
 // ShmCreate creates a new POSIX shm segment of `size` bytes (must be
@@ -302,7 +317,99 @@ func (s *ShmSegment) Reset() {
 // capacity check before the (potentially expensive) IPC serialization
 // so that requests that obviously won't fit fall back to the pipe
 // without paying serialization cost.
+//
+// Fast path (non-dictionary schemas, the common case):
+//
+//   - Build the record-batch payload ONCE via ipc.GetRecordBatchPayload.
+//     This runs the encoder (flatbuffer metadata + body buffer
+//     collection) exactly once, with no intermediate byte buffer.
+//   - Compute the exact wire size by passing a counting io.Writer to
+//     Payload.WritePayload. Cheap: walks meta length + body buffer
+//     lengths; doesn't move any data.
+//   - Allocate a single SHM slot of exactly that size and write
+//     directly into the mapped region by wrapping the slice as an
+//     io.Writer and re-calling Payload.WritePayload.
+//   - Prepend the cached schema-message bytes (memoised per
+//     {@link arrow.Schema} on the first call) and append the 8-byte
+//     EOS marker, both as single memcpys into the SHM slot.
+//
+// The legacy bytes.Buffer + memcpy path (allocateAndWriteLegacy) is
+// kept for dict-encoded schemas because the dict-batch ordering and
+// the stripped-schema layout used on the reader side
+// (see ReadBatch dict path) need careful treatment that the
+// payload-level helpers don't expose directly.
 func (s *ShmSegment) AllocateAndWrite(batch arrow.RecordBatch) (uint64, int, bool, error) {
+	if s.closed.Load() {
+		return 0, 0, false, ErrShmClosed
+	}
+	if schemaHasDictionary(batch.Schema()) {
+		// Dictionary schemas — strip-leading-schema / strip-trailing-EOS
+		// layout requires the existing serializeForShm path. Falls
+		// through to the legacy implementation unchanged.
+		return s.allocateAndWriteLegacy(batch)
+	}
+
+	// Cheap capacity pre-check before the (still cheap, but not free)
+	// encoder pass. The estimate is an upper bound.
+	s.mu.Lock()
+	canFit := s.canFitLocked(estimateSerializedSize(batch))
+	s.mu.Unlock()
+	if !canFit {
+		return 0, 0, false, nil
+	}
+
+	payload, err := ipc.GetRecordBatchPayload(batch, ipc.WithAllocator(defaultAllocator()))
+	if err != nil {
+		return 0, 0, false, err
+	}
+	defer payload.Release()
+
+	// Count exact payload bytes (continuation + meta + padding + body +
+	// per-buffer padding) without moving data. Counter discards writes,
+	// just sums lengths.
+	sizer := &shmCountWriter{}
+	if _, err := payload.WritePayload(sizer); err != nil {
+		return 0, 0, false, err
+	}
+	payloadSize := sizer.n
+
+	schemaBytes, err := s.cachedSchemaBytes(batch.Schema())
+	if err != nil {
+		return 0, 0, false, err
+	}
+
+	total := len(schemaBytes) + payloadSize + len(ipcEOS)
+
+	s.mu.Lock()
+	if s.closed.Load() {
+		s.mu.Unlock()
+		return 0, 0, false, ErrShmClosed
+	}
+	offset, ok := s.allocateLocked(total)
+	s.mu.Unlock()
+	if !ok {
+		return 0, 0, false, nil
+	}
+
+	// Write the three regions directly into the SHM slice. No
+	// intermediate heap buffer, no final memcpy.
+	dst := s.data[offset : offset+uint64(total)]
+	cursor := copy(dst, schemaBytes)
+	sw := &shmSliceWriter{buf: dst[cursor:]}
+	if _, err := payload.WritePayload(sw); err != nil {
+		return 0, 0, false, err
+	}
+	cursor += sw.n
+	copy(dst[cursor:], ipcEOS[:])
+
+	return offset, total, true, nil
+}
+
+// allocateAndWriteLegacy is the pre-payload-API path. Retained for
+// dict-encoded schemas (see AllocateAndWrite for why) and as the
+// fallback if the fast path ever needs to bail. Byte-equivalent to the
+// historical AllocateAndWrite.
+func (s *ShmSegment) allocateAndWriteLegacy(batch arrow.RecordBatch) (uint64, int, bool, error) {
 	if s.closed.Load() {
 		return 0, 0, false, ErrShmClosed
 	}
@@ -327,6 +434,59 @@ func (s *ShmSegment) AllocateAndWrite(batch arrow.RecordBatch) (uint64, int, boo
 	}
 	copy(s.data[offset:offset+uint64(len(buf))], buf)
 	return offset, len(buf), true, nil
+}
+
+// cachedSchemaBytes returns the wire bytes for the IPC schema message
+// (continuation + flatbuffer + padding, NO trailing EOS) for the given
+// schema, computing them on first request and memoising per-schema
+// thereafter. Identity-keyed; see schemaCache field doc.
+func (s *ShmSegment) cachedSchemaBytes(schema *arrow.Schema) ([]byte, error) {
+	if v, ok := s.schemaCache.Load(schema); ok {
+		return v.([]byte), nil
+	}
+	// Build a schema-only stream (schema message + EOS) then strip the
+	// EOS — that gives us just the schema message bytes which is what
+	// we want to prepend to each batch payload.
+	full, err := writeSchemaOnlyStream(schema)
+	if err != nil {
+		return nil, err
+	}
+	if len(full) < len(ipcEOS) || !bytes.HasSuffix(full, ipcEOS[:]) {
+		return nil, fmt.Errorf("schema-only stream missing trailing EOS marker")
+	}
+	msg := full[:len(full)-len(ipcEOS)]
+	// LoadOrStore so concurrent first-callers don't race; whichever
+	// stored value wins, the bytes are content-identical.
+	actual, _ := s.schemaCache.LoadOrStore(schema, msg)
+	return actual.([]byte), nil
+}
+
+// shmCountWriter is an io.Writer that discards bytes and accumulates a
+// count. Used to size the record-batch payload before allocating the
+// SHM slot.
+type shmCountWriter struct{ n int }
+
+func (c *shmCountWriter) Write(p []byte) (int, error) {
+	c.n += len(p)
+	return len(p), nil
+}
+
+// shmSliceWriter is an io.Writer that writes into a pre-allocated
+// []byte slice. Returns io.ErrShortWrite if the caller exceeds the
+// slice's capacity — which shouldn't happen because the slot is sized
+// from a prior counting pass.
+type shmSliceWriter struct {
+	buf []byte
+	n   int
+}
+
+func (w *shmSliceWriter) Write(p []byte) (int, error) {
+	if w.n+len(p) > len(w.buf) {
+		return 0, io.ErrShortWrite
+	}
+	n := copy(w.buf[w.n:], p)
+	w.n += n
+	return n, nil
 }
 
 // canFitLocked reports whether a contiguous gap of `size` bytes exists.
