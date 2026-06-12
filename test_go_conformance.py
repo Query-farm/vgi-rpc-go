@@ -14,6 +14,7 @@ import pytest
 
 from vgi_rpc.conformance import ConformanceService
 from vgi_rpc.http import http_connect
+from vgi_rpc.introspect import ServiceDescription
 from vgi_rpc.log import Message
 from vgi_rpc.rpc import SubprocessTransport, _RpcProxy, unix_connect
 
@@ -293,6 +294,54 @@ def conformance_conn(
             return _conn()
 
     return factory
+
+
+@pytest.fixture(params=["pipe", "subprocess", "shm", "http", "http_externalize_always", "unix"])
+def conformance_describe(
+    request: pytest.FixtureRequest,
+    go_transport: SubprocessTransport,
+    go_http_port: int,
+    go_unix_path: str,
+) -> ServiceDescription:
+    """Return a ``ServiceDescription`` from a real ``__describe__`` over the wire.
+
+    Parallels ``conformance_conn`` — same transport matrix — but instead of a
+    proxy it sends an actual ``__describe__`` request to the Go worker under
+    test and parses the response, so ``TestDescribeConformance`` validates
+    introspection against the running Go server (not a throwaway in-process
+    Python one).  The Go server always exposes ``__describe__``.
+    """
+    from vgi_rpc.http import http_introspect
+    from vgi_rpc.introspect import introspect
+    from vgi_rpc.rpc import UnixTransport
+
+    param = request.param
+    if param in ("pipe", "shm"):
+        # No describe-specific side channel needed; a fresh stdio worker is the
+        # faithful equivalent of Python's fresh in-process pipe server.
+        transport = SubprocessTransport([GO_WORKER])
+        try:
+            return introspect(transport)
+        finally:
+            transport.close()
+    if param == "subprocess":
+        return introspect(go_transport)
+    if param == "unix":
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            sock.connect(go_unix_path)
+        except BaseException:
+            sock.close()
+            raise
+        transport = UnixTransport(sock)
+        try:
+            return introspect(transport)
+        finally:
+            transport.close()
+    if param == "http_externalize_always":
+        ext_port: int = request.getfixturevalue("conformance_http_externalize_always_port")
+        return http_introspect(base_url=f"http://127.0.0.1:{ext_port}")
+    return http_introspect(base_url=f"http://127.0.0.1:{go_http_port}")
 
 
 # Import all tests from the conformance test module (PyPI package)

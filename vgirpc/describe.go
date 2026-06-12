@@ -139,18 +139,14 @@ func (s *Server) buildDescribeBatch() (arrow.RecordBatch, arrow.Metadata) {
 		}
 		headerSchemaIPC = append(headerSchemaIPC, headerBytes)
 
-		var isExchangeFlag int8 = -1
-		switch info.Type {
-		case MethodExchange:
-			isExchangeBuilder.Append(true)
-			isExchangeFlag = 1
-		case MethodProducer:
-			isExchangeBuilder.Append(false)
-			isExchangeFlag = 0
-		default:
-			isExchangeBuilder.AppendNull()
-		}
-		isExchanges = append(isExchanges, isExchangeFlag)
+		// The wire describe (v4) always emits a null is_exchange — matching
+		// the Python reference, whose RpcMethodInfo.is_exchange resolves to
+		// None for the conformance service (the Stream type parameter isn't a
+		// direct ExchangeState/ProducerState subclass it can detect). The
+		// conformance suite's describe_stream_properties.is_exchange_none check
+		// enforces null for every method.
+		isExchangeBuilder.AppendNull()
+		isExchanges = append(isExchanges, -1)
 	}
 
 	cols := make([]arrow.Array, 8)

@@ -16,7 +16,7 @@ make coverage  # run tests with Go coverage instrumentation
 The conformance tests require the `vgi-rpc` package from PyPI:
 
 ```bash
-pip install "vgi-rpc[http,cli,external]>=0.18.0" pytest pytest-timeout
+pip install "vgi-rpc[http,cli,external]>=0.20.0" pytest pytest-timeout
 ```
 
 The Makefile defaults to `python3`. Override with `PYTHON=/path/to/python make test` if your `vgi-rpc` install lives in a different environment.
