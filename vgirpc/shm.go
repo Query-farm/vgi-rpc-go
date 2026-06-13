@@ -342,11 +342,17 @@ func (s *ShmSegment) AllocateAndWrite(batch arrow.RecordBatch) (uint64, int, boo
 	if s.closed.Load() {
 		return 0, 0, false, ErrShmClosed
 	}
-	if schemaHasDictionary(batch.Schema()) {
-		// Dictionary schemas — strip-leading-schema / strip-trailing-EOS
-		// layout requires the existing serializeForShm path. Falls
-		// through to the legacy implementation unchanged.
-		return s.allocateAndWriteLegacy(batch)
+	if schemaHasTopLevelDictionary(batch.Schema()) {
+		// Top-level-dictionary schemas — strip-leading-schema /
+		// strip-trailing-EOS layout (serializeForShm); the reader
+		// reconstructs schema + EOS.
+		return s.allocateAndWriteSerialized(batch, serializeForShm)
+	}
+	if schemaHasNestedDictionary(batch.Schema()) {
+		// Nested-dictionary schemas — stored as a complete self-contained
+		// stream (serializeForShmFull) so the DictionaryBatch messages are
+		// present; the GetRecordBatchPayload fast path below would omit them.
+		return s.allocateAndWriteSerialized(batch, serializeForShmFull)
 	}
 
 	// Cheap capacity pre-check before the (still cheap, but not free)
@@ -409,7 +415,7 @@ func (s *ShmSegment) AllocateAndWrite(batch arrow.RecordBatch) (uint64, int, boo
 // dict-encoded schemas (see AllocateAndWrite for why) and as the
 // fallback if the fast path ever needs to bail. Byte-equivalent to the
 // historical AllocateAndWrite.
-func (s *ShmSegment) allocateAndWriteLegacy(batch arrow.RecordBatch) (uint64, int, bool, error) {
+func (s *ShmSegment) allocateAndWriteSerialized(batch arrow.RecordBatch, serialize func(arrow.RecordBatch) ([]byte, error)) (uint64, int, bool, error) {
 	if s.closed.Load() {
 		return 0, 0, false, ErrShmClosed
 	}
@@ -419,7 +425,7 @@ func (s *ShmSegment) allocateAndWriteLegacy(batch arrow.RecordBatch) (uint64, in
 	if !canFit {
 		return 0, 0, false, nil
 	}
-	buf, err := serializeForShm(batch)
+	buf, err := serialize(batch)
 	if err != nil {
 		return 0, 0, false, err
 	}
@@ -543,11 +549,14 @@ func (s *ShmSegment) ReadBatch(offset uint64, length int, schema *arrow.Schema) 
 		return nil, ErrShmClosed
 	}
 	region := s.data[offset:end]
-	if !schemaHasDictionary(schema) {
+	if !schemaHasTopLevelDictionary(schema) {
+		// Non-top-level-dictionary schemas (including nested-dictionary ones)
+		// are stored as complete self-contained streams; read directly.
 		return readIPCStream(region)
 	}
-	// Dictionary path: synthesize a stream by prepending the schema
-	// message and appending EOS, mirroring Rust/Python.
+	// Top-level-dictionary path: the region holds only the dictionary +
+	// record-batch messages. Synthesize a stream by prepending the schema
+	// message and appending EOS, mirroring Rust/Python and the C++ reader.
 	schemaOnly, err := writeSchemaOnlyStream(schema)
 	if err != nil {
 		return nil, err
@@ -725,7 +734,13 @@ func MaybeWriteToShm(batch arrow.RecordBatch, seg *ShmSegment) (out arrow.Record
 // IPC (de)serialization helpers
 // ----------------------------------------------------------------------
 
-func schemaHasDictionary(schema *arrow.Schema) bool {
+// schemaHasTopLevelDictionary reports whether any top-level field is a
+// dictionary. This MUST match the discriminator the readers use
+// (vgi_shm_segment.cpp / vgi_rpc.shm): a top-level dictionary schema is stored
+// stripped (dict + record-batch messages only) and the reader reconstructs the
+// schema + EOS; every other schema is stored as a complete self-contained
+// stream the reader opens directly.
+func schemaHasTopLevelDictionary(schema *arrow.Schema) bool {
 	for _, f := range schema.Fields() {
 		if _, ok := f.Type.(*arrow.DictionaryType); ok {
 			return true
@@ -734,10 +749,48 @@ func schemaHasDictionary(schema *arrow.Schema) bool {
 	return false
 }
 
-// serializeForShm writes batch as a full IPC stream. For dict-encoded
-// schemas the leading schema message and trailing EOS are stripped so
-// the SHM region holds dictionary messages + record-batch message only.
-func serializeForShm(batch arrow.RecordBatch) ([]byte, error) {
+// schemaHasNestedDictionary reports whether a dictionary appears only below the
+// top level (inside a struct/list/map/union), with no top-level dictionary
+// field. Such batches are NOT stripped — the reader treats them as ordinary
+// (non-top-level-dictionary) streams and opens the region directly — but they
+// still carry DictionaryBatch messages, so they must be serialized with the
+// full IPC writer rather than the GetRecordBatchPayload fast path (which omits
+// dictionary messages). This is the case that previously corrupted, e.g.,
+// struct<state: dictionary<…>> from a DuckDB ENUM nested in a STRUCT.
+func schemaHasNestedDictionary(schema *arrow.Schema) bool {
+	if schemaHasTopLevelDictionary(schema) {
+		return false
+	}
+	for _, f := range schema.Fields() {
+		if typeHasDictionary(f.Type) {
+			return true
+		}
+	}
+	return false
+}
+
+// typeHasDictionary reports whether dt is a dictionary type or contains one
+// anywhere in its nested children (struct fields, list/map elements, union
+// members).
+func typeHasDictionary(dt arrow.DataType) bool {
+	if _, ok := dt.(*arrow.DictionaryType); ok {
+		return true
+	}
+	if nested, ok := dt.(interface{ Fields() []arrow.Field }); ok {
+		for _, f := range nested.Fields() {
+			if typeHasDictionary(f.Type) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// serializeForShmFull writes batch as a complete, self-contained IPC stream:
+// schema + any (possibly nested) dictionary messages + record-batch + EOS. Used
+// for nested-dictionary schemas, which the reader opens directly and which the
+// GetRecordBatchPayload fast path can't serialize (it omits dictionary messages).
+func serializeForShmFull(batch arrow.RecordBatch) ([]byte, error) {
 	var buf bytes.Buffer
 	w := ipc.NewWriter(&buf, ipc.WithSchema(batch.Schema()))
 	if err := w.Write(batch); err != nil {
@@ -746,10 +799,20 @@ func serializeForShm(batch arrow.RecordBatch) ([]byte, error) {
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
-	if !schemaHasDictionary(batch.Schema()) {
-		return buf.Bytes(), nil
+	return buf.Bytes(), nil
+}
+
+// serializeForShm writes batch as an IPC stream with the leading schema message
+// and trailing EOS stripped, so the SHM region holds only the dictionary +
+// record-batch messages. Used for top-level-dictionary schemas, where the
+// reader reconstructs the schema (it keys the dictionary off the pointer
+// batch's schema) and appends EOS. Mirrors Python/Rust and the C++ reader's
+// top-level-dictionary path.
+func serializeForShm(batch arrow.RecordBatch) ([]byte, error) {
+	full, err := serializeForShmFull(batch)
+	if err != nil {
+		return nil, err
 	}
-	full := buf.Bytes()
 	afterSchema, err := skipOneIPCMessage(full)
 	if err != nil {
 		return nil, err
