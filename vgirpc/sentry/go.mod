@@ -3,7 +3,7 @@ module github.com/Query-farm/vgi-rpc/vgirpc/sentry
 go 1.25.0
 
 require (
-	github.com/Query-farm/vgi-rpc v0.0.0
+	github.com/Query-farm/vgi-rpc v0.9.0
 	github.com/getsentry/sentry-go v0.32.0
 )
 
@@ -33,4 +33,3 @@ require (
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 )
 
-replace github.com/Query-farm/vgi-rpc => ../..
