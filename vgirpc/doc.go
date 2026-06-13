@@ -76,5 +76,5 @@
 // # Reference implementation
 //
 // The Python reference implementation lives at
-// https://github.com/Query-farm/vgi-rpc.
+// https://github.com/Query-farm/vgi-rpc-go.
 package vgirpc

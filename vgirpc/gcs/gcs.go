@@ -21,7 +21,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/google/uuid"
 
-	"github.com/Query-farm/vgi-rpc/vgirpc"
+	"github.com/Query-farm/vgi-rpc-go/vgirpc"
 )
 
 // GCSConfig configures the GCS storage backend.

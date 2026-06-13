@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"os"
 
-	"github.com/Query-farm/vgi-rpc/vgirpc"
+	"github.com/Query-farm/vgi-rpc-go/vgirpc"
 )
 
 type GreetParams struct {

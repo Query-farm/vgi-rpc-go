@@ -1,9 +1,9 @@
-module github.com/Query-farm/vgi-rpc/vgirpc/sentry
+module github.com/Query-farm/vgi-rpc-go/vgirpc/sentry
 
 go 1.25.0
 
 require (
-	github.com/Query-farm/vgi-rpc v0.9.0
+	github.com/Query-farm/vgi-rpc-go v0.9.0
 	github.com/getsentry/sentry-go v0.32.0
 )
 

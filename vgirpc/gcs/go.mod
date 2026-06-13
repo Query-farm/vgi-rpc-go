@@ -1,10 +1,10 @@
-module github.com/Query-farm/vgi-rpc/vgirpc/gcs
+module github.com/Query-farm/vgi-rpc-go/vgirpc/gcs
 
 go 1.25.0
 
 require (
 	cloud.google.com/go/storage v1.52.0
-	github.com/Query-farm/vgi-rpc v0.9.0
+	github.com/Query-farm/vgi-rpc-go v0.9.0
 	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/google/uuid v1.6.0
 )

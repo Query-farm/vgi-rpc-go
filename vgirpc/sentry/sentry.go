@@ -11,7 +11,7 @@
 //
 //	import (
 //	    "github.com/getsentry/sentry-go"
-//	    vgisentry "github.com/Query-farm/vgi-rpc/vgirpc/sentry"
+//	    vgisentry "github.com/Query-farm/vgi-rpc-go/vgirpc/sentry"
 //	)
 //
 //	sentry.Init(sentry.ClientOptions{Dsn: "https://..."})
@@ -48,7 +48,7 @@ import (
 	"encoding/hex"
 	"fmt"
 
-	"github.com/Query-farm/vgi-rpc/vgirpc"
+	"github.com/Query-farm/vgi-rpc-go/vgirpc"
 	"github.com/getsentry/sentry-go"
 )
 
