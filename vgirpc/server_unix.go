@@ -125,11 +125,14 @@ func (s *Server) serveUnixConn(ctx context.Context, conn net.Conn) {
 	if err := s.notifyTransport(TransportKindUnix, nil); err != nil {
 		return
 	}
+	// Per-connection shared-memory segment cache (see ServeWithContext).
+	shmConn := &shmConnState{}
+	defer shmConn.close()
 	for {
 		if err := ctx.Err(); err != nil {
 			return
 		}
-		if err := s.serveOne(ctx, conn, conn); err != nil {
+		if err := s.serveOne(ctx, conn, conn, shmConn); err != nil {
 			if err != io.EOF && !isTransportClosed(err) {
 				slog.Error("unix serve loop error", "err", err)
 			}

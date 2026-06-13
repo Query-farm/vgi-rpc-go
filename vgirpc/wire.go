@@ -110,12 +110,13 @@ func ReadRequest(r io.Reader) (*Request, error) {
 		}
 	}
 
-	// Validate row count. External-location pointer batches are zero-row
-	// by construction (the real parameters are fetched from the URL); the
-	// caller is expected to resolve them and re-validate against the
-	// inner batch.
+	// Validate row count. External-location and shared-memory pointer batches
+	// are zero-row by construction (the real parameters are fetched from the URL
+	// or resolved from the shm segment in serveOne); the caller resolves them
+	// and re-validates against the inner batch.
 	_, isExternal := meta.GetValue(MetaLocation)
-	if batch.Schema().NumFields() > 0 && batch.NumRows() != 1 && !isExternal {
+	isShmPointer := IsShmPointerBatch(batch)
+	if batch.Schema().NumFields() > 0 && batch.NumRows() != 1 && !isExternal && !isShmPointer {
 		batch.Release()
 		return nil, &RpcError{
 			Type:    "ProtocolError",

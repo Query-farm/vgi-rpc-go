@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -18,6 +19,52 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
+
+// shmConnState caches the shared-memory segment for one pipe/stdio connection.
+// The client advertises (segment_name, segment_size) once on init requests and
+// then references the segment by offset on later data requests (e.g.
+// table_buffering_process), so the worker attaches the segment the first time it
+// is advertised and reuses it for the rest of the connection, closing it when
+// the serve loop ends. A no-op on connections that never use shm.
+type shmConnState struct {
+	seg  *ShmSegment
+	name string
+	size int
+}
+
+// ensure attaches the segment advertised in reqMeta (if any) or returns the
+// already-attached segment. Returns nil when no segment has been advertised on
+// this connection yet (the caller treats a pointer batch with no segment as a
+// negotiation mismatch).
+func (c *shmConnState) ensure(reqMeta map[string]string) *ShmSegment {
+	name, hasName := reqMeta[MetaShmSegmentName]
+	sizeStr, hasSize := reqMeta[MetaShmSegmentSize]
+	if !hasName || !hasSize {
+		return c.seg
+	}
+	size, err := strconv.Atoi(sizeStr)
+	if err != nil || size <= ShmHeaderSize {
+		return c.seg
+	}
+	if c.seg != nil && c.name == name && c.size == size {
+		return c.seg
+	}
+	// A new or changed segment was advertised — (re)attach and cache it.
+	c.close()
+	seg, err := ShmAttach(name, size, false /* track */)
+	if err != nil {
+		return nil
+	}
+	c.seg, c.name, c.size = seg, name, size
+	return c.seg
+}
+
+func (c *shmConnState) close() {
+	if c.seg != nil {
+		_ = c.seg.Close()
+		c.seg = nil
+	}
+}
 
 func (s *Server) RunStdio() {
 	// Ignore SIGPIPE so writes to closed pipes (stderr logging, stdout IPC)
@@ -60,11 +107,16 @@ func (s *Server) ServeWithContext(ctx context.Context, r io.Reader, w io.Writer)
 		// already been logged inside notifyTransport.
 		return
 	}
+	// The shared-memory segment is advertised once (on init requests) and then
+	// referenced by offset on later data requests, so it is attached once and
+	// cached for the lifetime of this connection rather than per request.
+	shmConn := &shmConnState{}
+	defer shmConn.close()
 	for {
 		if err := ctx.Err(); err != nil {
 			return
 		}
-		err := s.serveOne(ctx, r, w)
+		err := s.serveOne(ctx, r, w, shmConn)
 		if err != nil {
 			if err == io.EOF {
 				return
@@ -79,7 +131,7 @@ func (s *Server) ServeWithContext(ctx context.Context, r io.Reader, w io.Writer)
 }
 
 // serveOne handles one complete RPC request-response cycle.
-func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
+func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn *shmConnState) error {
 	req, err := ReadRequest(r)
 	if err != nil {
 		if err == io.EOF {
@@ -95,16 +147,15 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 	}
 	defer req.Batch.Release()
 
-	// If the client advertised a shared-memory segment, attach it for the
-	// lifetime of this dispatch and resolve the request batch through it
-	// (the request batch may itself be a pointer batch carrying the
-	// real parameters in the segment).
-	if seg := shmAttachFromMetadata(req.Metadata, false /* not HTTP */); seg != nil {
-		req.Shm = seg
-		defer func() {
-			_ = seg.Close()
-		}()
-		if IsShmPointerBatch(req.Batch) {
+	// Attach (or reuse) the shared-memory segment for this connection. The
+	// client advertises (segment_name, segment_size) once on init requests and
+	// then references the segment by offset on subsequent data requests, so the
+	// segment is cached on shmConn across calls rather than attached per request.
+	// Resolve the request batch through it when it is a pointer batch carrying
+	// the real parameters in the segment.
+	if seg := shmConn.ensure(req.Metadata); seg != nil {
+		reqWasPointer := IsShmPointerBatch(req.Batch)
+		if reqWasPointer {
 			resolved, releaseOff, release, rerr := ResolveShmBatch(req.Batch, seg)
 			if rerr != nil {
 				// Unrecoverable: the pointer batch carries no usable
@@ -129,13 +180,25 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer) error {
 				_ = seg.FreeOffset(releaseOff)
 			}
 		}
+		// Expose the segment to the dispatch (for response shm-write and
+		// streaming continuation-input resolution) only when the client engaged
+		// shm on THIS request — it advertised the segment (init) or sent a
+		// pointer batch (data exchange). Control RPCs that neither advertise nor
+		// reference the segment keep req.Shm nil so their small responses are
+		// written inline, matching the per-request behaviour clients expect.
+		_, hasSegName := req.Metadata[MetaShmSegmentName]
+		if hasSegName || reqWasPointer {
+			req.Shm = seg
+		}
 	}
 
-	// Defensive: a pointer batch with no attached segment means the client used
-	// shm without honoring the __transport_options__ negotiation (e.g. a server
-	// that reported shm-unavailable, or a capable server whose attach failed).
-	// Fail loudly rather than silently mis-deserializing the zero-row pointer.
-	if req.Shm == nil && IsShmPointerBatch(req.Batch) {
+	// Defensive: a pointer batch the worker could not resolve (no segment was
+	// ever advertised on this connection) means the client used shm without
+	// honoring the __transport_options__ negotiation. Fail loudly rather than
+	// silently mis-deserializing the zero-row pointer. (A resolved pointer is no
+	// longer a pointer batch here, so this only fires when resolution was
+	// impossible.)
+	if IsShmPointerBatch(req.Batch) {
 		rpcErr := &RpcError{
 			Type:    "IOError",
 			Message: "received shm pointer batch but no segment is attached (transport negotiation mismatch)",
