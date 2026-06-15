@@ -13,9 +13,9 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/Query-farm/vgi-rpc/conformance"
-	"github.com/Query-farm/vgi-rpc/vgirpc"
-	vgiotel "github.com/Query-farm/vgi-rpc/vgirpc/otel"
+	"github.com/Query-farm/vgi-rpc-go/conformance"
+	"github.com/Query-farm/vgi-rpc-go/vgirpc"
+	vgiotel "github.com/Query-farm/vgi-rpc-go/vgirpc/otel"
 
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
