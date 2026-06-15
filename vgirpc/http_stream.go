@@ -669,9 +669,33 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 			}
 		}
 
-		// Flush output
-		for _, ab := range out.batches {
-			if ab.meta != nil {
+		// Flush output. The data batch is the one at out.dataBatchIdx; it may
+		// carry per-batch metadata (e.g. vgi_batch_index, vgi_partition_values)
+		// yet must still count as a data batch and toward producerBatchLimit.
+		// Classifying purely by "has metadata" mis-files an annotated data batch
+		// as a log batch, so it never counts toward the limit and a single
+		// producer turn drains the whole stream — which over HTTP collapses a
+		// multi-worker scan onto one connection (no parallelism).
+		for i, ab := range out.batches {
+			isDataBatch := i == out.dataBatchIdx
+			if isDataBatch {
+				stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
+				toWrite := ab.batch
+				if ab.meta != nil {
+					toWrite = array.NewRecordBatchWithMetadata(
+						schema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
+				}
+				werr := writer.Write(toWrite)
+				if ab.meta != nil {
+					toWrite.Release()
+				}
+				if werr != nil {
+					h.logIPCWriteErr("data-batch", info.Name, werr)
+					ab.batch.Release()
+					return false, werr
+				}
+				dataBatches++
+			} else if ab.meta != nil {
 				batchWithMeta := array.NewRecordBatchWithMetadata(
 					schema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
 				if werr := writer.Write(batchWithMeta); werr != nil {
@@ -682,14 +706,11 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 				}
 				batchWithMeta.Release()
 			} else {
-				// Data batch — record output stats
-				stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
 				if werr := writer.Write(ab.batch); werr != nil {
-					h.logIPCWriteErr("data-batch", info.Name, werr)
+					h.logIPCWriteErr("batch", info.Name, werr)
 					ab.batch.Release()
 					return false, werr
 				}
-				dataBatches++
 			}
 			ab.batch.Release()
 		}
