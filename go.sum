@@ -1,5 +1,5 @@
-github.com/Query-farm/vgi-rpc-go/vgirpc/otel v0.9.0 h1:mN57ptY6/C3ODvrniISeKXIqlE4Vfjjyc2WccC8uOkQ=
-github.com/Query-farm/vgi-rpc-go/vgirpc/otel v0.9.0/go.mod h1:YIusnGh/xRUSCZ8cDowzo+qVxuOEfK5Gx6ZALBJ8i0o=
+github.com/Query-farm/vgi-rpc-go/vgirpc/otel v0.9.3 h1:Ecq2i9yksaPMmVtiPG7BTLD03CRXlvZFWIKJSex4lOc=
+github.com/Query-farm/vgi-rpc-go/vgirpc/otel v0.9.3/go.mod h1:0T7MhR1pSafnqOxgqcmB/+yikIX7j78zJDmCy+Es4cg=
 github.com/andybalholm/brotli v1.2.0 h1:ukwgCxwYrmACq68yiUqwIWnGY0cTPox/M94sVwToPjQ=
 github.com/andybalholm/brotli v1.2.0/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/apache/arrow-go/v18 v18.5.2 h1:3uoHjoaEie5eVsxx/Bt64hKwZx4STb+beAkqKOlq/lY=
