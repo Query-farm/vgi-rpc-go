@@ -3,7 +3,7 @@ module github.com/Query-farm/vgi-rpc-go/vgirpc/s3
 go 1.25.0
 
 require (
-	github.com/Query-farm/vgi-rpc-go v0.9.0
+	github.com/Query-farm/vgi-rpc-go v0.9.3
 	github.com/apache/arrow-go/v18 v18.5.2
 	github.com/aws/aws-sdk-go-v2 v1.36.3
 	github.com/aws/aws-sdk-go-v2/config v1.29.14
