@@ -29,6 +29,11 @@ const (
 	TransportKindHTTP TransportKind = "http"
 	// TransportKindUnix identifies AF_UNIX socket transports.
 	TransportKindUnix TransportKind = "unix"
+	// TransportKindTcp identifies raw AF_INET (TCP) socket transports.
+	// This speaks the same raw Arrow-IPC framing as the Unix transport over
+	// a bare TCP socket — there is NO authentication or TLS, so it is for
+	// trusted networks only (use TransportKindHTTP for untrusted networks).
+	TransportKindTcp TransportKind = "tcp"
 )
 
 // TransportCapabilityShm signals the transport supports zero-copy

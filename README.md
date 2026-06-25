@@ -43,6 +43,7 @@ func main() {
 - **Client-directed logging** at configurable levels
 - **`context.Context` support** for cancellation and deadlines
 - **HTTP transport** with signed state tokens and zstd decompression
+- **Raw Unix/TCP socket transports** (`Server.RunUnix` / `Server.RunTcp`) speaking the lean Arrow-IPC framing for co-located workers. Raw TCP carries no auth/TLS and defaults to loopback (`127.0.0.1`) — trusted networks only; use the HTTP transport otherwise.
 - **ArrowSerializable** interface for complex nested types
 - **OpenTelemetry support** via optional `vgirpc/otel` module (tracing + metrics)
 

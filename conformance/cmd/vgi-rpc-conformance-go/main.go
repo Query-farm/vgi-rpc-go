@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/Query-farm/vgi-rpc-go/conformance"
@@ -334,6 +335,46 @@ func main() {
 			conn.Close()
 		}
 		os.Remove(path)
+	} else if len(os.Args) > 2 && os.Args[1] == "--tcp" {
+		// Raw-TCP transport: same Arrow-IPC framing as --unix, only the
+		// listening socket differs. Address is [HOST:]PORT; host defaults to
+		// 127.0.0.1 (loopback only) and PORT may be 0 to auto-select.
+		//
+		// SECURITY: raw TCP carries no authentication or TLS — trusted
+		// networks only. Use --http for untrusted networks.
+		addr := os.Args[2]
+		host, portStr := "127.0.0.1", addr
+		if i := strings.LastIndex(addr, ":"); i >= 0 {
+			if addr[:i] != "" {
+				host = addr[:i]
+			}
+			portStr = addr[i+1:]
+		}
+		port, err := strconv.Atoi(portStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "--tcp expects [HOST:]PORT, got %q\n", addr)
+			os.Exit(2)
+		}
+
+		// SIGTERM/SIGINT exits cleanly so coverage data (and the leak-check
+		// summary) flush on shutdown, mirroring the --http path.
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+		go func() {
+			<-sigCh
+			os.Exit(0)
+		}()
+
+		// RunTcp prints the launcher readiness marker "TCP:<host>:<port>" in
+		// onBound (after bind succeeds; the actual port is reported when
+		// port==0). After this line the worker MUST NOT write more to stdout.
+		if err := server.RunTcp(host, port, 0, func(boundHost string, boundPort int) {
+			fmt.Printf("TCP:%s:%d\n", boundHost, boundPort)
+			os.Stdout.Sync()
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "tcp serve error: %v\n", err)
+			os.Exit(1)
+		}
 	} else {
 		server.RunStdio()
 	}

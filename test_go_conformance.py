@@ -16,7 +16,7 @@ from vgi_rpc.conformance import ConformanceService
 from vgi_rpc.http import http_connect
 from vgi_rpc.introspect import ServiceDescription
 from vgi_rpc.log import Message
-from vgi_rpc.rpc import SubprocessTransport, _RpcProxy, unix_connect
+from vgi_rpc.rpc import SubprocessTransport, _RpcProxy, tcp_connect, unix_connect
 
 GO_WORKER = os.environ.get(
     "GO_CONFORMANCE_WORKER",
@@ -188,6 +188,41 @@ def go_unix_path() -> Iterator[str]:
         proc.wait(timeout=_WORKER_TEARDOWN_TIMEOUT)
 
 
+def _wait_for_tcp(host: str, port: int, timeout: float = 5.0) -> None:
+    """Poll until a TCP socket is accepting connections."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            sock = socket.create_connection((host, port), timeout=1.0)
+            sock.close()
+            return
+        except (ConnectionRefusedError, OSError):
+            time.sleep(0.1)
+    raise TimeoutError(f"TCP socket at {host}:{port} did not start within {timeout}s")
+
+
+@pytest.fixture(scope="session")
+def go_tcp_addr() -> Iterator[tuple[str, int]]:
+    """Start Go conformance raw-TCP server on a loopback auto-selected port."""
+    proc = subprocess.Popen(
+        [GO_WORKER, "--tcp", "127.0.0.1:0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("TCP:"), f"Expected TCP:<host>:<port>, got: {line!r}"
+        host_part, _, port_part = line[len("TCP:") :].rpartition(":")
+        host = host_part or "127.0.0.1"
+        port = int(port_part)
+        _wait_for_tcp(host, port)
+        yield (host, port)
+    finally:
+        proc.terminate()
+        proc.wait(timeout=_WORKER_TEARDOWN_TIMEOUT)
+
+
 ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]
 
 
@@ -222,12 +257,13 @@ class _ShmAdapter:
         self._inner.close()
 
 
-@pytest.fixture(params=["pipe", "subprocess", "shm", "http", "http_externalize_always", "unix"])
+@pytest.fixture(params=["pipe", "subprocess", "shm", "http", "http_externalize_always", "unix", "tcp"])
 def conformance_conn(
     request: pytest.FixtureRequest,
     go_transport: SubprocessTransport,
     go_http_port: int,
     go_unix_path: str,
+    go_tcp_addr: tuple[str, int],
 ) -> ConnFactory:
     def factory(
         on_log: Callable[[Message], None] | None = None,
@@ -285,6 +321,13 @@ def conformance_conn(
                 go_unix_path,
                 on_log=on_log,
             )
+        elif request.param == "tcp":
+            return tcp_connect(
+                ConformanceService,
+                go_tcp_addr[0],
+                go_tcp_addr[1],
+                on_log=on_log,
+            )
         else:
             # "subprocess" — shared transport
             @contextlib.contextmanager
@@ -296,12 +339,13 @@ def conformance_conn(
     return factory
 
 
-@pytest.fixture(params=["pipe", "subprocess", "shm", "http", "http_externalize_always", "unix"])
+@pytest.fixture(params=["pipe", "subprocess", "shm", "http", "http_externalize_always", "unix", "tcp"])
 def conformance_describe(
     request: pytest.FixtureRequest,
     go_transport: SubprocessTransport,
     go_http_port: int,
     go_unix_path: str,
+    go_tcp_addr: tuple[str, int],
 ) -> ServiceDescription:
     """Return a ``ServiceDescription`` from a real ``__describe__`` over the wire.
 
@@ -313,7 +357,7 @@ def conformance_describe(
     """
     from vgi_rpc.http import http_introspect
     from vgi_rpc.introspect import introspect
-    from vgi_rpc.rpc import UnixTransport
+    from vgi_rpc.rpc import TcpTransport, UnixTransport
 
     param = request.param
     if param in ("pipe", "shm"):
@@ -334,6 +378,13 @@ def conformance_describe(
             sock.close()
             raise
         transport = UnixTransport(sock)
+        try:
+            return introspect(transport)
+        finally:
+            transport.close()
+    if param == "tcp":
+        tcp_sock = socket.create_connection(go_tcp_addr)
+        transport = TcpTransport(tcp_sock)
         try:
             return introspect(transport)
         finally:
