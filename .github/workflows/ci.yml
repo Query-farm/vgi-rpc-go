@@ -50,14 +50,20 @@ jobs:
       - name: Build conformance worker with coverage
         run: go build -cover -covermode=atomic -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
 
+      # The Go worker tracks the *unreleased* Python reference (the TCP
+      # transport — tcp_connect / --tcp — lands on main ahead of PyPI), so
+      # install vgi_rpc from source off the default branch rather than
+      # `pip install vgi-rpc`. external extras (aiohttp etc.) are required by
+      # the externalize-always HTTP conformance variant; the host
+      # conformance_describe fixture (test_go_conformance.py) runs __describe__
+      # against the real Go worker across every transport.
+      - name: Clone vgi-rpc-python reference
+        run: git clone --depth 1 https://github.com/Query-farm/vgi-rpc-python.git "$RUNNER_TEMP/vgi-rpc-python"
+
       - name: Install Python dependencies
-        # external extras (aiohttp etc.) added in 0.18.0 and required by the
-        # externalize-always HTTP conformance variant; protocol_version
-        # client send-side also lives in >= 0.18.0. 0.20.0 makes
-        # TestDescribeConformance consume the host conformance_describe fixture
-        # (provided by test_go_conformance.py), running __describe__ against the
-        # real Go worker across every transport.
-        run: pip install "vgi-rpc[http,cli,external]>=0.20.0" pytest pytest-timeout
+        run: |
+          python -m pip install --upgrade pip
+          pip install "${RUNNER_TEMP}/vgi-rpc-python[http,cli,external]" pytest pytest-timeout
 
       - name: Create coverage directory
         run: mkdir -p _covdata
