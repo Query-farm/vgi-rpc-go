@@ -620,9 +620,9 @@ var shmMinBatchBytesVal int64
 // shmMinBatchBytes is the smallest batch (bytes) worth shipping through shm;
 // below this the pipe wins, because shm's fixed per-batch cost (slot allocation
 // + pointer round trip + the peer's resolve/free) outweighs the copy it saves.
-// The crossover is platform-specific: POSIX shm_open/mmap is cheap (~64KB) while
-// Windows' page-file mapping plus the fast overlapped-pipe read push it to
-// ~1.5MB. Overridable with VGI_RPC_SHM_MIN_BATCH_BYTES. Mirrors the same gate in
+// The crossover is platform-specific: POSIX shm_open/mmap overtakes the pipe
+// around 64-256KB, while Windows' page-file mapping plus the fast overlapped-pipe
+// read push it to ~0.5-1MB. Overridable with VGI_RPC_SHM_MIN_BATCH_BYTES. Mirrors the same gate in
 // the C++ engine and the Python/Rust/Java SDK output paths.
 func shmMinBatchBytes() int64 {
 	shmMinBatchBytesOnce.Do(func() {
@@ -635,7 +635,7 @@ func shmMinBatchBytes() int64 {
 		if runtime.GOOS == "windows" {
 			shmMinBatchBytesVal = 1024 * 1024 // 1 MiB
 		} else {
-			shmMinBatchBytesVal = 64 * 1024 // 64 KiB
+			shmMinBatchBytesVal = 128 * 1024 // 128 KiB
 		}
 	})
 	return shmMinBatchBytesVal
