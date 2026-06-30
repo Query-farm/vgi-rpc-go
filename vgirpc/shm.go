@@ -62,12 +62,14 @@ var (
 //   - Server side: ShmAttach (track=false) per request → use → Close
 //     (does not unlink; the client owns the OS object).
 type ShmSegment struct {
-	name   string
-	size   int
-	data   []byte  // mmap'd region; len == size
-	handle uintptr // Windows: file-mapping HANDLE (0 on POSIX)
-	addr   uintptr // Windows: MapViewOfFile base (0 on POSIX)
-	track  bool    // true = own the OS object, unlink on Close
+	name string
+	size int
+	data []byte // mmap'd region; len == size
+	//lint:ignore U1000 Windows-only: file-mapping HANDLE, set+closed in shm_windows.go; 0 on POSIX.
+	handle uintptr
+	//lint:ignore U1000 Windows-only: MapViewOfFile base, set+unmapped in shm_windows.go; 0 on POSIX.
+	addr  uintptr
+	track bool // true = own the OS object, unlink on Close
 
 	// mu serializes allocator header writes. The protocol's lockstep
 	// invariant (only one of client/server is touching the segment at a
@@ -895,6 +897,10 @@ var shmNameCounter atomic.Uint64
 // crashes on multi-tenant hosts.  HTTP dispatch does not currently
 // call this helper; the rejection is defence-in-depth against future
 // refactors that might wire it differently.
+//
+// caller; the HTTP-rejection branch must exist before anything wires it.
+//
+//lint:ignore U1000 retained as defence-in-depth scaffolding for a future
 func shmAttachFromMetadata(reqMeta map[string]string, isHTTP bool) *ShmSegment {
 	if isHTTP {
 		if name, ok := reqMeta[MetaShmSegmentName]; ok {
