@@ -1,7 +1,7 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !unix
+//go:build !unix && !windows
 
 // Stub implementation of the shared-memory side-channel for non-POSIX
 // platforms. Functions return nil/false so callers transparently fall
