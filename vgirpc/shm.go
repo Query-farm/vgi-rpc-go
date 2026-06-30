@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -611,8 +613,40 @@ func ResolveShmBatch(batch arrow.RecordBatch, seg *ShmSegment) (resolved arrow.R
 // surrounding RPC dispatch can fall back to the pipe transport rather
 // than crashing the worker. Callers that want stricter behavior should
 // avoid this wrapper.
+
+var shmMinBatchBytesOnce sync.Once
+var shmMinBatchBytesVal int64
+
+// shmMinBatchBytes is the smallest batch (bytes) worth shipping through shm;
+// below this the pipe wins, because shm's fixed per-batch cost (slot allocation
+// + pointer round trip + the peer's resolve/free) outweighs the copy it saves.
+// The crossover is platform-specific: POSIX shm_open/mmap is cheap (~64KB) while
+// Windows' page-file mapping plus the fast overlapped-pipe read push it to
+// ~1.5MB. Overridable with VGI_RPC_SHM_MIN_BATCH_BYTES. Mirrors the same gate in
+// the C++ engine and the Python/Rust/Java SDK output paths.
+func shmMinBatchBytes() int64 {
+	shmMinBatchBytesOnce.Do(func() {
+		if e := os.Getenv("VGI_RPC_SHM_MIN_BATCH_BYTES"); e != "" {
+			if v, err := strconv.ParseInt(e, 10, 64); err == nil {
+				shmMinBatchBytesVal = v
+				return
+			}
+		}
+		if runtime.GOOS == "windows" {
+			shmMinBatchBytesVal = 1024 * 1024 // 1 MiB
+		} else {
+			shmMinBatchBytesVal = 64 * 1024 // 64 KiB
+		}
+	})
+	return shmMinBatchBytesVal
+}
+
 func MaybeWriteToShm(batch arrow.RecordBatch, seg *ShmSegment) (out arrow.RecordBatch, replaced bool, err error) {
 	if seg == nil || batch.NumRows() == 0 {
+		return batch, false, nil
+	}
+	// Small batches are cheaper over the pipe than through shm.
+	if batchBufferSize(batch) < shmMinBatchBytes() {
 		return batch, false, nil
 	}
 	defer func() {
