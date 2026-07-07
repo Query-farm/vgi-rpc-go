@@ -4,7 +4,6 @@
 package vgirpc
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -159,6 +158,11 @@ func (h *HttpServer) SetRepoURL(url string) {
 // HTML landing page. Enabled by default.
 func (h *HttpServer) SetEnableLandingPage(enabled bool) {
 	h.enableLandingPage = enabled
+}
+
+// Prefix returns the URL path prefix under which routes are mounted.
+func (h *HttpServer) Prefix() string {
+	return h.prefix
 }
 
 // SetEnableDescribePage controls whether GET {prefix}/describe serves an
@@ -367,10 +371,6 @@ func (h *HttpServer) InitPages() {
 
 	if h.enableDescribePage {
 		h.describeHTML = buildDescribeHTML(h.server, h.prefix, name, h.repoURL)
-		if h.pkce != nil {
-			h.describeHTML = bytes.Replace(h.describeHTML, []byte("</body>"),
-				append(append([]byte{}, h.pkce.userInfoHTML...), []byte("\n</body>")...), 1)
-		}
 		describeHandler := h.handleDescribePage
 		if h.pkce != nil {
 			describeHandler = h.wrapPageWithPkce(h.handleDescribePage)
@@ -384,10 +384,6 @@ func (h *HttpServer) InitPages() {
 			describePath = h.prefix + "/describe"
 		}
 		h.landingHTML = buildLandingHTML(h.prefix, name, serverID, describePath, h.repoURL)
-		if h.pkce != nil {
-			h.landingHTML = bytes.Replace(h.landingHTML, []byte("</body>"),
-				append(append([]byte{}, h.pkce.userInfoHTML...), []byte("\n</body>")...), 1)
-		}
 		landingPattern := fmt.Sprintf("GET %s", h.prefix)
 		if h.prefix == "" {
 			landingPattern = "GET /{$}"
@@ -548,9 +544,6 @@ func (h *HttpServer) SetOAuthPkce(config OAuthPkceConfig) error {
 		allowedOrigins[origin] = true
 	}
 
-	// Build user info HTML
-	userInfoHTML := buildUserInfoHTML(h.prefix)
-
 	// Chain cookie authenticate with the original auth func
 	origAuth := h.authenticateFunc
 	h.authenticateFunc = ChainAuthenticate(origAuth, CookieAuthenticate(origAuth, authCookieName))
@@ -566,7 +559,6 @@ func (h *HttpServer) SetOAuthPkce(config OAuthPkceConfig) error {
 		prefix:               h.prefix,
 		scope:                scope,
 		allowedReturnOrigins: allowedOrigins,
-		userInfoHTML:         userInfoHTML,
 	}
 
 	// When a client_secret is configured, advertise the token-proxy URL in the

@@ -111,7 +111,7 @@ func (h *HttpServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Exchange code for token
-	token, tokenMaxAge, refreshToken, err := exchangeCodeForToken(
+	token, tokenMaxAge, refreshToken, idToken, err := exchangeCodeForToken(
 		tokenEndpoint, code, pkce.redirectURI, codeVerifier,
 		pkce.clientID, pkce.clientSecret, pkce.useIDToken,
 	)
@@ -186,6 +186,20 @@ func (h *HttpServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 		HttpOnly: false,
 		SameSite: http.SameSiteLaxMode,
 	})
+	// Display-identity cookie for the shared landing page (JS-readable). Set
+	// from the id_token so the page shows email/name even when the bearer is an
+	// access token that carries no profile claims.
+	if identity := identityCookieValue(idToken); identity != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name:     identityCookieName,
+			Value:    identity,
+			MaxAge:   tokenMaxAge,
+			Path:     cookiePath,
+			Secure:   pkce.secureCookie,
+			HttpOnly: false,
+			SameSite: http.SameSiteLaxMode,
+		})
+	}
 	// Clear session cookie
 	http.SetCookie(w, clearSessionCookie)
 
@@ -208,6 +222,14 @@ func (h *HttpServer) handleOAuthLogout(w http.ResponseWriter, r *http.Request) {
 
 	http.SetCookie(w, &http.Cookie{
 		Name:     authCookieName,
+		Value:    "",
+		MaxAge:   -1,
+		Path:     cookiePath,
+		Secure:   pkce.secureCookie,
+		HttpOnly: false,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     identityCookieName,
 		Value:    "",
 		MaxAge:   -1,
 		Path:     cookiePath,

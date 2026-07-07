@@ -66,7 +66,6 @@ type oauthPkceState struct {
 	prefix               string
 	scope                string
 	allowedReturnOrigins map[string]bool
-	userInfoHTML         []byte
 }
 
 // ---------------------------------------------------------------------------

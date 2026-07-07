@@ -71,7 +71,10 @@ func createOIDCDiscovery(issuer string) func() (string, string, bool) {
 
 // exchangeCodeForToken exchanges an authorization code for a token.
 // Returns (token, maxAge, refreshToken, err).
-func exchangeCodeForToken(tokenEndpoint, code, redirectURI, codeVerifier, clientID, clientSecret string, useIDToken bool) (token string, maxAge int, refreshToken string, err error) {
+// The returned idToken is the raw OIDC id_token when the token response carried
+// one (independent of useIDToken); it is used to derive the display-identity
+// cookie for the shared landing page.
+func exchangeCodeForToken(tokenEndpoint, code, redirectURI, codeVerifier, clientID, clientSecret string, useIDToken bool) (token string, maxAge int, refreshToken, idToken string, err error) {
 	formData := url.Values{
 		"grant_type":    {"authorization_code"},
 		"code":          {code},
@@ -86,17 +89,17 @@ func exchangeCodeForToken(tokenEndpoint, code, redirectURI, codeVerifier, client
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.PostForm(tokenEndpoint, formData)
 	if err != nil {
-		return "", 0, "", fmt.Errorf("token exchange failed: %w", err)
+		return "", 0, "", "", fmt.Errorf("token exchange failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", 0, "", fmt.Errorf("token exchange failed: reading response: %w", err)
+		return "", 0, "", "", fmt.Errorf("token exchange failed: reading response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return "", 0, "", fmt.Errorf("token exchange failed: HTTP %d: %s", resp.StatusCode, string(body))
+		return "", 0, "", "", fmt.Errorf("token exchange failed: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	var tokenResp struct {
@@ -106,31 +109,97 @@ func exchangeCodeForToken(tokenEndpoint, code, redirectURI, codeVerifier, client
 		ExpiresIn    *int   `json:"expires_in"`
 	}
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return "", 0, "", fmt.Errorf("token exchange failed: parsing response: %w", err)
+		return "", 0, "", "", fmt.Errorf("token exchange failed: parsing response: %w", err)
 	}
 
 	refreshToken = tokenResp.RefreshToken
+	idToken = tokenResp.IDToken
 
 	if useIDToken {
 		token = tokenResp.IDToken
 		if token == "" {
-			return "", 0, "", fmt.Errorf("token response missing id_token")
+			return "", 0, "", "", fmt.Errorf("token response missing id_token")
 		}
 		// Derive max_age from the id_token's exp claim
 		maxAge = deriveIDTokenMaxAge(token)
-		return token, maxAge, refreshToken, nil
+		return token, maxAge, refreshToken, idToken, nil
 	}
 
 	token = tokenResp.AccessToken
 	if token == "" {
-		return "", 0, "", fmt.Errorf("token response missing access_token")
+		return "", 0, "", "", fmt.Errorf("token response missing access_token")
 	}
 	if tokenResp.ExpiresIn != nil {
 		maxAge = *tokenResp.ExpiresIn
 	} else {
 		maxAge = authCookieDefaultMaxAge
 	}
-	return token, maxAge, refreshToken, nil
+	return token, maxAge, refreshToken, idToken, nil
+}
+
+// ---------------------------------------------------------------------------
+// Display-identity cookie (JS-readable) for the shared landing page
+// ---------------------------------------------------------------------------
+
+// identityCookieName is the JS-readable cookie the shared landing.html reads to
+// render the signed-in identity. It is derived from the OIDC id_token at the
+// OAuth callback (display-only; the validated bearer remains the security
+// boundary) so the page shows the signed-in email/name regardless of whether
+// the bearer cookie holds an access or id token.
+const identityCookieName = "_vgi_identity"
+
+// identityClaims are the display claims copied out of the id_token into the
+// identity cookie.
+var identityClaims = []string{"sub", "email", "preferred_username", "name", "picture"}
+
+// decodeJWTPayload best-effort decodes a JWT payload (no signature verification).
+func decodeJWTPayload(token string) map[string]any {
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		return nil
+	}
+	payload := parts[1]
+	if m := len(payload) % 4; m != 0 {
+		payload += strings.Repeat("=", 4-m)
+	}
+	decoded, err := base64.URLEncoding.DecodeString(payload)
+	if err != nil {
+		decoded, err = base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			return nil
+		}
+	}
+	var claims map[string]any
+	if err := json.Unmarshal(decoded, &claims); err != nil {
+		return nil
+	}
+	return claims
+}
+
+// identityCookieValue returns base64url(JSON) of the display-identity claims
+// extracted from an id_token, or "" when the token is absent or carries none.
+func identityCookieValue(idToken string) string {
+	if idToken == "" {
+		return ""
+	}
+	claims := decodeJWTPayload(idToken)
+	if claims == nil {
+		return ""
+	}
+	ident := make(map[string]any, len(identityClaims))
+	for _, k := range identityClaims {
+		if v, ok := claims[k]; ok && v != nil {
+			ident[k] = v
+		}
+	}
+	if len(ident) == 0 {
+		return ""
+	}
+	raw, err := json.Marshal(ident)
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(raw)
 }
 
 // deriveIDTokenMaxAge extracts the exp claim from a JWT id_token and returns
