@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"sort"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -202,7 +203,10 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			h.logIPCWriteErr("log-batch", info.Name, writeLogBatch(writer, outputSchema, logMsg, h.server.serverID, ""))
 		}
 
-		finished, err := h.runProduceLoop(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, transportMeta, callCtx.Cookies, callCtx.stickySink)
+		// The producer's first turn folds into this /init request, so the init
+		// request's custom metadata is what the pipe transports would have
+		// delivered on the first tick batch.
+		finished, err := h.runProduceLoop(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, transportMeta, callCtx.Cookies, callCtx.stickySink, requestMetadata(req))
 		handlerErr = err
 		if err == nil && !finished {
 			// Batch limit reached — append continuation token
@@ -469,7 +473,9 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies, sink)
+	// A continuation turn is not the producer's first tick, so it carries no
+	// first-tick metadata.
+	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies, sink, arrow.Metadata{})
 	if err == nil && !finished {
 		// Batch limit reached — append continuation token
 		token, tokenErr := h.packStateToken(state, schema, auth, streamID)
@@ -618,14 +624,40 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	return writeErr
 }
 
+// requestMetadata renders a decoded request's custom metadata as arrow.Metadata,
+// the shape CallContext.InputMetadata takes on the pipe transports. Keys are
+// sorted so the result is deterministic.
+func requestMetadata(req *Request) arrow.Metadata {
+	if req == nil || len(req.Metadata) == 0 {
+		return arrow.Metadata{}
+	}
+	keys := make([]string, 0, len(req.Metadata))
+	for k := range req.Metadata {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	values := make([]string, len(keys))
+	for i, k := range keys {
+		values[i] = req.Metadata[k]
+	}
+	return arrow.NewMetadata(keys, values)
+}
+
 // runProduceLoop runs the producer state machine until completion or the batch
 // limit is reached. Returns (true, nil) when the producer has finished,
 // (false, nil) when the batch limit was reached (caller should emit a
 // continuation token), or (false, err) on error.
+//
+// firstTickMeta is surfaced as CallContext.InputMetadata on the FIRST Produce
+// call only. On the pipe transports a producer's first turn is a distinct tick
+// batch whose custom metadata reaches the worker; over HTTP that turn folds
+// into the /init request, so without this the metadata a client attached to
+// /init would never be seen. Pass nil (an empty Metadata) on continuation turns.
 func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, sink *stickySink) (bool, error) {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, sink *stickySink, firstTickMeta arrow.Metadata) (bool, error) {
 
 	dataBatches := 0
+	firstTick := true
 	for {
 		if err := ctx.Err(); err != nil {
 			return true, nil
@@ -643,6 +675,10 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 			Kind:              TransportKindHTTP,
 			Implementation:    h.server.implementation,
 			stickySink:        sink,
+		}
+		if firstTick {
+			callCtx.InputMetadata = firstTickMeta
+			firstTick = false
 		}
 
 		var produceErr error
