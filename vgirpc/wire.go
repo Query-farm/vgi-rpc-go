@@ -266,7 +266,15 @@ func WriteUnaryResponse(w io.Writer, schema *arrow.Schema, logs []LogMessage,
 // Stack traces and file paths are included in the response for debugging.
 // Use [Server.SetDebugErrors] to control this behavior when using the built-in
 // server; this function always includes debug details.
+//
+// This is also the wire shape an intermediary returns to deny or abort a
+// call in-band — the client decodes it back into a raised error. A nil
+// schema defaults to an empty schema, matching the Python reference's
+// wire.build_error_stream.
 func WriteErrorResponse(w io.Writer, schema *arrow.Schema, err error, serverID, requestID string) error {
+	if schema == nil {
+		schema = arrow.NewSchema(nil, nil)
+	}
 	return writeErrorResponse(w, schema, err, serverID, requestID, true)
 }
 
