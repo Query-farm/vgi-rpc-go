@@ -5,7 +5,6 @@ package vgirpc
 
 import (
 	"bytes"
-	"compress/gzip"
 	"errors"
 	"fmt"
 	"io"
@@ -16,7 +15,6 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
-	"github.com/klauspost/compress/zstd"
 )
 
 // unsupportedEncodingError is returned by readHTTPBody when the request's
@@ -150,60 +148,12 @@ func (h *HttpServer) readHTTPBody(r *http.Request) ([]byte, error) {
 	switch encoding {
 	case "", "identity":
 		return body, nil
-	case "zstd":
+	case "zstd", "gzip":
 		decompressedCap := h.maxDecompressedBodySize
 		if decompressedCap <= 0 && limit > 0 {
 			decompressedCap = limit * 16
 		}
-
-		opts := []zstd.DOption{}
-		if decompressedCap > 0 {
-			opts = append(opts, zstd.WithDecoderMaxMemory(uint64(decompressedCap)))
-		}
-		reader, err := zstd.NewReader(bytes.NewReader(body), opts...)
-		if err != nil {
-			return nil, fmt.Errorf("zstd decompression init: %w", err)
-		}
-		defer reader.Close()
-
-		if decompressedCap > 0 {
-			body, err = io.ReadAll(io.LimitReader(reader, decompressedCap+1))
-		} else {
-			body, err = io.ReadAll(reader)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("zstd decompression: %w", err)
-		}
-		if decompressedCap > 0 && int64(len(body)) > decompressedCap {
-			return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Decompressed body exceeds maximum size of %d bytes", decompressedCap)}
-		}
-		return body, nil
-	case "gzip":
-		decompressedCap := h.maxDecompressedBodySize
-		if decompressedCap <= 0 && limit > 0 {
-			decompressedCap = limit * 16
-		}
-
-		reader, err := gzip.NewReader(bytes.NewReader(body))
-		if err != nil {
-			return nil, fmt.Errorf("gzip decompression init: %w", err)
-		}
-		defer reader.Close()
-
-		// gzip's ISIZE footer carries mod 2^32 — never trust it for a
-		// bomb cap. Bounded streaming read, mirroring the Python codec.
-		if decompressedCap > 0 {
-			body, err = io.ReadAll(io.LimitReader(reader, decompressedCap+1))
-		} else {
-			body, err = io.ReadAll(reader)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("gzip decompression: %w", err)
-		}
-		if decompressedCap > 0 && int64(len(body)) > decompressedCap {
-			return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Decompressed body exceeds maximum size of %d bytes", decompressedCap)}
-		}
-		return body, nil
+		return decompressBounded(encoding, body, decompressedCap)
 	default:
 		return nil, &unsupportedEncodingError{Encoding: encoding}
 	}

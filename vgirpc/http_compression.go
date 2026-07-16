@@ -45,6 +45,83 @@ func (h *HttpServer) SetCompressionLevel(level int) error {
 	return nil
 }
 
+// decompressBounded decompresses data with the named coding ("zstd" or
+// "gzip"), enforcing maxOutput as a decompressed-size cap when > 0. The
+// gzip ISIZE footer carries the size mod 2^32 — never trust it for a bomb
+// cap — so both paths use a bounded streaming read, mirroring the Python
+// codec.
+func decompressBounded(encoding string, data []byte, maxOutput int64) ([]byte, error) {
+	var reader io.Reader
+	switch encoding {
+	case "zstd":
+		opts := []zstd.DOption{}
+		if maxOutput > 0 {
+			opts = append(opts, zstd.WithDecoderMaxMemory(uint64(maxOutput)))
+		}
+		zr, err := zstd.NewReader(bytes.NewReader(data), opts...)
+		if err != nil {
+			return nil, fmt.Errorf("zstd decompression init: %w", err)
+		}
+		defer zr.Close()
+		reader = zr
+	case "gzip":
+		gr, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("gzip decompression init: %w", err)
+		}
+		defer gr.Close()
+		reader = gr
+	default:
+		return nil, &unsupportedEncodingError{Encoding: encoding}
+	}
+
+	var out []byte
+	var err error
+	if maxOutput > 0 {
+		out, err = io.ReadAll(io.LimitReader(reader, maxOutput+1))
+	} else {
+		out, err = io.ReadAll(reader)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s decompression: %w", encoding, err)
+	}
+	if maxOutput > 0 && int64(len(out)) > maxOutput {
+		return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Decompressed body exceeds maximum size of %d bytes", maxOutput)}
+	}
+	return out, nil
+}
+
+// DecodeContentEncoding decodes an HTTP body per its Content-Encoding
+// header value, or returns it unchanged when nothing applies.
+//
+// Handles the codings vgi-rpc speaks (zstd, gzip); the header may list
+// several applied in order, which are decoded in reverse. Unknown and
+// identity codings are left as-is. Intended for an intermediary
+// (proxy/gateway) that must read a compressed request/response body to
+// inspect or rewrite it. maxOutputSize caps the decompressed size per
+// coding when > 0.
+func DecodeContentEncoding(data []byte, contentEncoding string, maxOutputSize int64) ([]byte, error) {
+	if contentEncoding == "" {
+		return data, nil
+	}
+	result := data
+	codings := strings.Split(contentEncoding, ",")
+	for i := len(codings) - 1; i >= 0; i-- {
+		name := strings.ToLower(strings.TrimSpace(codings[i]))
+		switch name {
+		case "zstd", "gzip":
+			decoded, err := decompressBounded(name, result, maxOutputSize)
+			if err != nil {
+				return nil, err
+			}
+			result = decoded
+		default:
+			// identity / unknown coding — leave as-is.
+		}
+	}
+	return result, nil
+}
+
 // parseAcceptEncoding returns the codec tokens from an Accept-Encoding
 // header in the client's stated preference order. Tokens are lowercased,
 // trimmed, and ;q=<weight> suffixes stripped (weight ordering is not

@@ -283,6 +283,12 @@ const (
 | Function | Description |
 |---|---|
 | `ReadRequest(r io.Reader) (*Request, error)` | Read one IPC stream and parse the request |
+| `WriteRequest(w, method, params, protocolVersion)` | Frame a request for forwarding (intermediaries) |
 | `WriteUnaryResponse(w, schema, logs, result, serverID, requestID)` | Write a unary response |
-| `WriteErrorResponse(w, schema, err, serverID, requestID)` | Write an error response |
+| `WriteErrorResponse(w, schema, err, serverID, requestID)` | Write an error response (nil schema = empty) |
 | `WriteVoidResponse(w, logs, serverID, requestID)` | Write a void response |
+| `FindStateToken(data) []byte` | Extract the stream-state continuation token (intermediaries) |
+| `FindProtocolVersion(data) string` | Recover the stamped application protocol_version (intermediaries) |
+| `ReadUnaryResult(data) (schema, result, ok)` | Unwrap a unary response envelope without a typed decode |
+| `WriteUnaryResult(w, envelopeSchema, resultBytes)` | Rewrap raw result bytes as a unary response |
+| `DecodeContentEncoding(data, contentEncoding, maxOutputSize)` | Decode an HTTP body per its Content-Encoding (zstd/gzip) |
