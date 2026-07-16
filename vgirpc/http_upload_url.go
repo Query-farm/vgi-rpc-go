@@ -13,15 +13,31 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
 
+// The public __upload_url__ wire contract. An intermediary that terminates
+// or serves the upload-URL flow needs the method name, both schemas, and
+// the count cap; exporting them here means it doesn't have to copy them.
+// Mirrors the Python reference's vgi_rpc.http exports (UPLOAD_URL_METHOD /
+// UPLOAD_URL_PARAMS_SCHEMA / UPLOAD_URL_RESPONSE_SCHEMA /
+// MAX_UPLOAD_URL_COUNT).
 const (
-	uploadURLMethod   = "__upload_url__"
-	maxUploadURLCount = 100
+	// UploadURLMethod is the synthetic method name a client sends to
+	// POST {prefix}/__upload_url__/init.
+	UploadURLMethod = "__upload_url__"
+	// MaxUploadURLCount caps the number of URL pairs generated per request.
+	MaxUploadURLCount = 100
 )
 
-// uploadURLSchema is the response schema for the __upload_url__/init
+// UploadURLParamsSchema is the request schema for the __upload_url__/init
+// endpoint: a single int64 "count" column with the number of URL pairs to
+// generate. Mirrors the Python _UPLOAD_URL_PARAMS_SCHEMA.
+var UploadURLParamsSchema = arrow.NewSchema([]arrow.Field{
+	{Name: "count", Type: arrow.PrimitiveTypes.Int64},
+}, nil)
+
+// UploadURLResponseSchema is the response schema for the __upload_url__/init
 // endpoint. Mirrors the Python _UPLOAD_URL_SCHEMA so cross-language
 // clients can decode the response.
-var uploadURLSchema = arrow.NewSchema([]arrow.Field{
+var UploadURLResponseSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "upload_url", Type: arrow.BinaryTypes.String},
 	{Name: "download_url", Type: arrow.BinaryTypes.String},
 	{Name: "expires_at", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
@@ -40,28 +56,28 @@ func (h *HttpServer) handleUploadURLInit(w http.ResponseWriter, r *http.Request)
 	}
 	if ct := r.Header.Get("Content-Type"); ct != arrowContentType {
 		h.writeHttpError(w, http.StatusUnsupportedMediaType,
-			fmt.Errorf("unsupported content type: %s", ct), uploadURLSchema)
+			fmt.Errorf("unsupported content type: %s", ct), UploadURLResponseSchema)
 		return
 	}
 
 	body, err := h.readHTTPBody(r)
 	if err != nil {
-		h.writeBodyReadError(w, err, uploadURLSchema)
+		h.writeBodyReadError(w, err, UploadURLResponseSchema)
 		return
 	}
 
 	req, err := ReadRequest(bytes.NewReader(body))
 	if err != nil {
-		h.writeHttpError(w, http.StatusBadRequest, err, uploadURLSchema)
+		h.writeHttpError(w, http.StatusBadRequest, err, UploadURLResponseSchema)
 		return
 	}
 	defer req.Batch.Release()
 
-	if req.Method != uploadURLMethod {
+	if req.Method != UploadURLMethod {
 		h.writeHttpError(w, http.StatusBadRequest, &RpcError{
 			Type:    "TypeError",
-			Message: fmt.Sprintf("Method mismatch: expected %q, got %q", uploadURLMethod, req.Method),
-		}, uploadURLSchema)
+			Message: fmt.Sprintf("Method mismatch: expected %q, got %q", UploadURLMethod, req.Method),
+		}, UploadURLResponseSchema)
 		return
 	}
 
@@ -69,15 +85,15 @@ func (h *HttpServer) handleUploadURLInit(w http.ResponseWriter, r *http.Request)
 	if count < 1 {
 		count = 1
 	}
-	if count > maxUploadURLCount {
-		count = maxUploadURLCount
+	if count > MaxUploadURLCount {
+		count = MaxUploadURLCount
 	}
 
 	urls := make([]UploadURL, 0, count)
 	for range count {
 		u, gerr := h.uploadURLProvider.GenerateUploadURL(arrow.NewSchema(nil, nil))
 		if gerr != nil {
-			h.writeHttpError(w, http.StatusInternalServerError, gerr, uploadURLSchema)
+			h.writeHttpError(w, http.StatusInternalServerError, gerr, UploadURLResponseSchema)
 			return
 		}
 		urls = append(urls, u)
@@ -104,17 +120,17 @@ func (h *HttpServer) handleUploadURLInit(w http.ResponseWriter, r *http.Request)
 	expiresArr := expiresB.NewArray()
 	defer expiresArr.Release()
 
-	resultBatch := array.NewRecordBatch(uploadURLSchema,
+	resultBatch := array.NewRecordBatch(UploadURLResponseSchema,
 		[]arrow.Array{uploadArr, downloadArr, expiresArr}, int64(len(urls)))
 	defer resultBatch.Release()
 
 	var buf bytes.Buffer
-	writer := ipc.NewWriter(&buf, ipc.WithSchema(uploadURLSchema))
+	writer := ipc.NewWriter(&buf, ipc.WithSchema(UploadURLResponseSchema))
 	if werr := writer.Write(resultBatch); werr != nil {
-		h.logIPCWriteErr("upload-url-batch", uploadURLMethod, werr)
+		h.logIPCWriteErr("upload-url-batch", UploadURLMethod, werr)
 	}
 	if cerr := writer.Close(); cerr != nil {
-		h.logIPCWriteErr("close", uploadURLMethod, cerr)
+		h.logIPCWriteErr("close", UploadURLMethod, cerr)
 	}
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
 }
