@@ -302,10 +302,15 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	// Extract state token and cancel signal from custom metadata BEFORE
 	// attempting any schema cast: cancel batches carry an empty schema that
 	// would fail the cast, but the server must observe them regardless.
+	// Keep the full metadata: it becomes CallContext.InputMetadata for the
+	// exchange handler (parity with the pipe transports; the cast below
+	// drops it from the batch).
 	var tokenBytes []byte
 	var cancelled bool
+	var inputMeta arrow.Metadata
 	if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
 		meta := bwm.Metadata()
+		inputMeta = meta
 		if v, found := meta.GetValue(MetaStreamState); found {
 			tokenBytes = []byte(v)
 		}
@@ -426,7 +431,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	if isProducer {
 		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta, cookies, streamID, stickySinkForCtx)
 	} else {
-		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta, cookies, streamID, stickySinkForCtx)
+		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, inputMeta, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta, cookies, streamID, stickySinkForCtx)
 	}
 }
 
@@ -499,7 +504,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 // handleExchangeCall processes one exchange and returns the result with updated token.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWriter, inputBatch arrow.RecordBatch,
-	schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, sink *stickySink) error {
+	inputMeta arrow.Metadata, schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, sink *stickySink) error {
 
 	// Record input stats
 	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
@@ -517,6 +522,9 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		Kind:              TransportKindHTTP,
 		Implementation:    h.server.implementation,
 		stickySink:        sink,
+		// Surface the request batch's custom metadata to the handler, matching
+		// the pipe transports (server_stream.go sets it from the input batch).
+		InputMetadata: inputMeta,
 	}
 
 	var exchangeErr error
@@ -561,27 +569,41 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	var writeErr error
 	for i, ab := range out.batches {
 		isDataBatch := (i == out.dataBatchIdx)
-		if ab.meta != nil {
+		if isDataBatch {
+			// Data batch — record output stats and merge the state token ON
+			// TOP of any per-emit metadata (vgi.cache.*, vgi_batch_index, …).
+			// The token must ride the data batch even when the emit carried
+			// metadata or produced zero rows, or the client sees end-of-stream
+			// mid-exchange (mirrors Python's merge_data_metadata).
+			stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
+			bschema := schema
+			var keys, values []string
+			if ab.meta != nil {
+				// Use the batch's own (possibly projection-narrowed) schema
+				// and keep the per-emit metadata underneath the token.
+				bschema = ab.batch.Schema()
+				keys = append(keys, ab.meta.Keys()...)
+				values = append(values, ab.meta.Values()...)
+			}
+			keys = append(keys, MetaStreamState)
+			values = append(values, string(newToken))
+			merged := arrow.NewMetadata(keys, values)
+			batchWithMeta := array.NewRecordBatchWithMetadata(
+				bschema, ab.batch.Columns(), ab.batch.NumRows(), merged)
+			if werr := writer.Write(batchWithMeta); werr != nil {
+				h.logIPCWriteErr("data-batch", info.Name, werr)
+				if writeErr == nil {
+					writeErr = werr
+				}
+			}
+			batchWithMeta.Release()
+		} else if ab.meta != nil {
 			// Use the batch's own (possibly projection-narrowed) schema and
 			// attach the custom metadata on top.
 			batchWithMeta := array.NewRecordBatchWithMetadata(
 				ab.batch.Schema(), ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
 			if werr := writer.Write(batchWithMeta); werr != nil {
 				h.logIPCWriteErr("log-batch", info.Name, werr)
-				if writeErr == nil {
-					writeErr = werr
-				}
-			}
-			batchWithMeta.Release()
-		} else if isDataBatch {
-			// Data batch — record output stats and merge state token
-			stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
-			stateMeta := arrow.NewMetadata(
-				[]string{MetaStreamState}, []string{string(newToken)})
-			batchWithMeta := array.NewRecordBatchWithMetadata(
-				schema, ab.batch.Columns(), ab.batch.NumRows(), stateMeta)
-			if werr := writer.Write(batchWithMeta); werr != nil {
-				h.logIPCWriteErr("data-batch", info.Name, werr)
 				if writeErr == nil {
 					writeErr = werr
 				}
