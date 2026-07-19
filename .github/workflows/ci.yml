@@ -31,6 +31,11 @@ jobs:
       - name: Staticcheck
         run: staticcheck ./...
 
+      # Checks the docs against the code: module paths resolve, complete
+      # examples compile, symbol references exist, relative links resolve.
+      - name: Verify documentation
+        run: go run ./tools/docverify
+
   conformance:
     needs: lint
     runs-on: ubuntu-latest

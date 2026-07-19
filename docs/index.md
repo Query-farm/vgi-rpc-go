@@ -30,7 +30,7 @@ Define RPC methods with typed Go structs annotated with `vgirpc` struct tags. Th
 - **Stream headers** for metadata before the first data batch
 - **Client-directed logging** at configurable levels
 - **`context.Context` support** for cancellation and deadlines
-- **HTTP transport** with signed state tokens and zstd decompression
+- **HTTP transport** with signed state tokens, zstd/gzip request decompression, and optional response compression
 - **ArrowSerializable** interface for complex nested types
 - **OpenTelemetry support** via optional `vgirpc/otel` module (tracing + metrics)
 
@@ -73,7 +73,7 @@ Client  ──      [close]          ──▸  Server
 ## Installation
 
 ```bash
-go get github.com/Query-farm/vgi-rpc/vgirpc
+go get github.com/Query-farm/vgi-rpc-go/vgirpc
 ```
 
 ## Quick Start
@@ -83,7 +83,7 @@ package main
 
 import (
     "context"
-    "github.com/Query-farm/vgi-rpc/vgirpc"
+    "github.com/Query-farm/vgi-rpc-go/vgirpc"
 )
 
 type GreetParams struct {

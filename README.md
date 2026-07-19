@@ -9,7 +9,7 @@ Go implementation of the [vgi_rpc](https://github.com/Query-farm/vgi-rpc) framew
 ## Install
 
 ```bash
-go get github.com/Query-farm/vgi-rpc/vgirpc
+go get github.com/Query-farm/vgi-rpc-go/vgirpc
 ```
 
 ## Quick Start
@@ -19,7 +19,7 @@ package main
 
 import (
     "context"
-    "github.com/Query-farm/vgi-rpc/vgirpc"
+    "github.com/Query-farm/vgi-rpc-go/vgirpc"
 )
 
 type GreetParams struct {
@@ -46,7 +46,7 @@ func main() {
 - **Stream headers** for metadata before the first data batch
 - **Client-directed logging** at configurable levels
 - **`context.Context` support** for cancellation and deadlines
-- **HTTP transport** with signed state tokens and zstd decompression
+- **HTTP transport** with signed state tokens, zstd/gzip request decompression, and optional response compression via `SetCompressionLevel`
 - **Raw Unix/TCP socket transports** (`Server.RunUnix` / `Server.RunTcp`) speaking the lean Arrow-IPC framing for co-located workers. Raw TCP carries no auth/TLS and defaults to loopback (`127.0.0.1`) — trusted networks only; use the HTTP transport otherwise.
 - **ArrowSerializable** interface for complex nested types
 - **OpenTelemetry support** via optional `vgirpc/otel` module (tracing + metrics)
@@ -250,7 +250,7 @@ server.SetDispatchHook(myHook)
 The optional `vgirpc/otel` module provides a ready-made hook with W3C trace propagation, spans, and metrics:
 
 ```go
-import vgiotel "github.com/Query-farm/vgi-rpc/vgirpc/otel"
+import vgiotel "github.com/Query-farm/vgi-rpc-go/vgirpc/otel"
 
 server := vgirpc.NewServer()
 // ... register methods ...
@@ -260,7 +260,7 @@ vgiotel.InstrumentServer(server, vgiotel.DefaultConfig())
 Install separately:
 
 ```bash
-go get github.com/Query-farm/vgi-rpc/vgirpc/otel
+go get github.com/Query-farm/vgi-rpc-go/vgirpc/otel
 ```
 
 ## HTTP Transport
@@ -287,7 +287,7 @@ All request and response bodies use `Content-Type: application/vnd.apache.arrow.
 
 ### State tokens
 
-HTTP is stateless, so exchange streams carry an HMAC-signed state token in batch custom metadata (`vgi_rpc.stream_state`). The server serializes the `ExchangeState` via `encoding/gob`, signs it, and returns it to the client. The client sends the token back with each exchange request.
+HTTP is stateless, so exchange streams carry an HMAC-signed state token in batch custom metadata (`vgi_rpc.stream_state#b64`). The server serializes the `ExchangeState` via `encoding/gob`, signs it, and returns it to the client. The client sends the token back with each exchange request.
 
 **Important:** Call `vgirpc.RegisterStateType` for every concrete type used in your state (and any types they embed) before the first HTTP stream request:
 
@@ -383,4 +383,4 @@ The response includes method names, types (unary/stream), parameter schemas, res
 ## Reference
 
 - Python reference implementation: [github.com/Query-farm/vgi-rpc](https://github.com/Query-farm/vgi-rpc)
-- Go package documentation: `go doc github.com/Query-farm/vgi-rpc/vgirpc`
+- Go package documentation: `go doc github.com/Query-farm/vgi-rpc-go/vgirpc`

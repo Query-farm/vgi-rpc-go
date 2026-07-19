@@ -12,3 +12,6 @@ coverage-go.txt
 _vgi-rpc-python/
 .pytest_cache/
 .claude/
+
+# Build artifacts
+docverify

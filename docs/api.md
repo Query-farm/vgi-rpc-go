@@ -1,6 +1,6 @@
 # API Reference
 
-Full Go documentation is available on [pkg.go.dev](https://pkg.go.dev/github.com/Query-farm/vgi-rpc/vgirpc). For the protocol specification, see the [wire protocol](https://vgi-rpc.query.farm/wire-protocol) page.
+Full Go documentation is available on [pkg.go.dev](https://pkg.go.dev/github.com/Query-farm/vgi-rpc-go/vgirpc). For the protocol specification, see the [wire protocol](https://vgi-rpc.query.farm/wire-protocol) page.
 
 ## Registration Functions
 
@@ -98,7 +98,7 @@ type StreamResult struct {
 | `EmitMap(data map[string][]interface{}) error` | Build and emit a batch from column maps |
 | `Finish() error` | Signal end-of-stream (producer only) |
 | `Finished() bool` | Whether `Finish()` has been called |
-| `ClientLog(level LogLevel, message string, extras ...KV) error` | Emit a log batch to the client |
+| `ClientLog(level LogLevel, message string, extras ...KV)` | Emit a log batch to the client |
 
 ## ArrowSerializable
 
@@ -163,12 +163,12 @@ type Request struct {
 type LogLevel string
 
 const (
-    LogException LogLevel = "exception"
-    LogError     LogLevel = "error"
-    LogWarn      LogLevel = "warn"
-    LogInfo      LogLevel = "info"
-    LogDebug     LogLevel = "debug"
-    LogTrace     LogLevel = "trace"
+    LogException LogLevel = "EXCEPTION"
+    LogError     LogLevel = "ERROR"
+    LogWarn      LogLevel = "WARN"
+    LogInfo      LogLevel = "INFO"
+    LogDebug     LogLevel = "DEBUG"
+    LogTrace     LogLevel = "TRACE"
 )
 ```
 
@@ -261,13 +261,13 @@ const (
 | Constant | Value |
 |---|---|
 | `MetaMethod` | `vgi_rpc.method` |
-| `MetaRequestVersion` | `vgi_rpc.version` |
+| `MetaRequestVersion` | `vgi_rpc.request_version` |
 | `MetaRequestID` | `vgi_rpc.request_id` |
 | `MetaLogLevel` | `vgi_rpc.log_level` |
 | `MetaLogMessage` | `vgi_rpc.log_message` |
 | `MetaLogExtra` | `vgi_rpc.log_extra` |
 | `MetaServerID` | `vgi_rpc.server_id` |
-| `MetaStreamState` | `vgi_rpc.stream_state` |
+| `MetaStreamState` | `vgi_rpc.stream_state#b64` |
 | `MetaShmOffset` | `vgi_rpc.shm_offset` |
 | `MetaShmLength` | `vgi_rpc.shm_length` |
 | `MetaLocation` | `vgi_rpc.location` |
@@ -276,7 +276,7 @@ const (
 | `MetaProtocolName` | `vgi_rpc.protocol_name` |
 | `MetaDescribeVersion` | `vgi_rpc.describe_version` |
 | `ProtocolVersion` | `"1"` |
-| `DescribeVersion` | `"3"` |
+| `DescribeVersion` | `"4"` |
 
 ## Wire Functions
 

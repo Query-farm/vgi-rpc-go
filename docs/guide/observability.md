@@ -53,13 +53,13 @@ The `vgirpc/otel` module implements `DispatchHook` with W3C trace context propag
 ### Installation
 
 ```bash
-go get github.com/Query-farm/vgi-rpc/vgirpc/otel
+go get github.com/Query-farm/vgi-rpc-go/vgirpc/otel
 ```
 
 ### Usage
 
 ```go
-import vgiotel "github.com/Query-farm/vgi-rpc/vgirpc/otel"
+import vgiotel "github.com/Query-farm/vgi-rpc-go/vgirpc/otel"
 
 server := vgirpc.NewServer()
 server.SetServiceName("my-service")

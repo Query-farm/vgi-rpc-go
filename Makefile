@@ -8,7 +8,7 @@ export GO_CONFORMANCE_WORKER
 GOBIN := $(shell go env GOPATH)/bin
 COVDIR := $(CURDIR)/_covdata
 
-.PHONY: build lint test coverage leakcheck race docs clean
+.PHONY: build lint test coverage leakcheck race docs docs-verify clean
 
 # --- Build -----------------------------------------------------------------
 
@@ -35,6 +35,7 @@ lint:
 	go build ./...
 	go vet ./...
 	$(GOBIN)/staticcheck ./...
+	go run ./tools/docverify
 	cd vgirpc/otel && go vet ./...
 	cd vgirpc/sentry && go vet ./...
 	cd vgirpc/jwtauth && go vet ./...
@@ -75,6 +76,14 @@ leakcheck:
 race:
 	go build -race -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
 	GORACE=halt_on_error=1 VGI_GO_WORKER_TEARDOWN_TIMEOUT=30 $(PYTHON) -m pytest test_go_conformance.py -v -p no:timeout
+
+# --- Documentation verification -------------------------------------------
+# Checks README.md, CLAUDE.md and docs/** against the code: module paths
+# resolve, complete examples compile against the working tree, symbol
+# references exist, and relative links resolve. See tools/docverify.
+
+docs-verify:
+	go run ./tools/docverify
 
 # --- Docs ------------------------------------------------------------------
 

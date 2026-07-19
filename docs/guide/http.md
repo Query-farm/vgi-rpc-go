@@ -22,11 +22,13 @@ All request and response bodies use `Content-Type: application/vnd.apache.arrow.
 
 ## Request Compression
 
-The server transparently decompresses request bodies sent with `Content-Encoding: zstd`. The Python vgi-rpc client enables zstd compression by default (level 3), so this is handled automatically.
+The server transparently decompresses request bodies sent with `Content-Encoding: zstd` or `gzip`, and advertises both via `VGI-Supported-Encodings`. The Python vgi-rpc client compresses by default (level 3), picking zstd or gzip depending on whether `zstandard` is installed, so this is handled automatically.
+
+Responses can be compressed too — call `SetCompressionLevel` on the `HttpServer`; the codec is chosen per request from `Accept-Encoding`.
 
 ## State Tokens
 
-HTTP is stateless, so exchange streams carry an HMAC-signed state token in batch custom metadata (`vgi_rpc.stream_state`). The server serializes the `ExchangeState` via `encoding/gob`, signs it, and returns it to the client. The client sends the token back with each exchange request.
+HTTP is stateless, so exchange streams carry an HMAC-signed state token in batch custom metadata (`vgi_rpc.stream_state#b64`). The server serializes the `ExchangeState` via `encoding/gob`, signs it, and returns it to the client. The client sends the token back with each exchange request.
 
 !!! important
     Call `vgirpc.RegisterStateType` for every concrete type used in your state (and any types they embed) before the first HTTP stream request:
@@ -105,9 +107,26 @@ A long-running producer that ignores its context will not exit until the shutdow
 package main
 
 import (
+    "context"
     "net/http"
-    "github.com/Query-farm/vgi-rpc/vgirpc"
+
+    "github.com/Query-farm/vgi-rpc-go/vgirpc"
 )
+
+// Stream state must be registered so the HTTP transport can round-trip it
+// through a signed state token.
+type myState struct {
+    Remaining int
+}
+
+func (s *myState) Produce(ctx context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+    if s.Remaining <= 0 {
+        return out.Finish()
+    }
+    s.Remaining--
+    // EmitMap takes columns: each value is a slice, one entry per row.
+    return out.EmitMap(map[string][]interface{}{"value": {int64(s.Remaining)}})
+}
 
 func init() {
     vgirpc.RegisterStateType(&myState{})

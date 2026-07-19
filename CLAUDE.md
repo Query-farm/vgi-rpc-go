@@ -5,8 +5,8 @@
 All common tasks are available via `make`:
 
 ```bash
-make build     # build all packages (root + vgirpc/otel sub-module)
-make lint      # go build + go vet + staticcheck (root + otel)
+make build     # build all packages (root + otel, sentry, jwtauth, s3, gcs submodules)
+make lint      # go build + go vet + staticcheck (root + otel, sentry, jwtauth)
 make test      # build conformance worker, run Python conformance tests
 make coverage  # run tests with Go coverage instrumentation
 ```
@@ -19,7 +19,7 @@ The conformance tests require the `vgi-rpc` package from PyPI:
 pip install "vgi-rpc[http,cli,external]>=0.20.0" pytest pytest-timeout
 ```
 
-The Makefile defaults to `python3`. Override with `PYTHON=/path/to/python make test` if your `vgi-rpc` install lives in a different environment.
+The Makefile's `PYTHON` variable currently points at a local virtualenv path, not `python3`. Override it with `PYTHON=/path/to/python make test` to point at whichever environment has `vgi-rpc` installed.
 
 ## Testing Policy
 
@@ -73,7 +73,7 @@ server.SetDispatchHook(hook)
 ```go
 import (
     "github.com/getsentry/sentry-go"
-    vgisentry "github.com/Query-farm/vgi-rpc/vgirpc/sentry"
+    vgisentry "github.com/Query-farm/vgi-rpc-go/vgirpc/sentry"
 )
 
 sentry.Init(sentry.ClientOptions{Dsn: "https://..."})
@@ -88,4 +88,75 @@ Limitations vs Python:
 
 ### Race-detector pass
 
-`make race` builds the conformance worker with `go build -race` and runs the full 866-test suite under it (~5 minutes; ~3-5× slower than `make test`). The pytest-timeout plugin is disabled for this target because the upstream `_pytest_suite.py` declares `pytestmark = pytest.mark.timeout(5)` at module scope, which fires on the slower instrumented worker even when individual tests pass. Use `make race` before cutting releases.
+`make race` builds the conformance worker with `go build -race` and runs the full 1049-test suite under it (~5 minutes; ~3-5× slower than `make test`). The pytest-timeout plugin is disabled for this target because the upstream `_pytest_suite.py` declares `pytestmark = pytest.mark.timeout(5)` at module scope, which fires on the slower instrumented worker even when individual tests pass. Use `make race` before cutting releases.
+
+## Hot-path performance invariants
+
+These are load-bearing: undoing them silently regresses throughput, and the
+allocation counts are covered by the benchmarks above.
+
+### Per-type reflection memoization
+
+Deriving a struct's Arrow schema and parsing its `vgirpc` tags are pure
+functions of the `reflect.Type`, so `vgirpc/types_cache.go` memoizes both in a
+`sync.Map` keyed by type (`describeStruct`). `deserializeParams` runs on every
+inbound request; before memoization it re-split every tag string and matched
+columns with an O(fields × columns) scan.
+
+**Schema pointer identity.** `structToSchema` returns the *shared* cached
+`*arrow.Schema` rather than a fresh one. `arrow.Schema` is immutable, so this
+is safe, and it is deliberate: the Arrow IPC writer requires an exact schema
+pointer match, so sharing the pointer keeps that fast path hit. Do not "fix"
+this by returning a copy.
+
+Column lookup uses `resolveColumn`, which tries the field's own ordinal
+position before falling back to a scan. Both paths are allocation-free.
+
+### Pooled response codec writers
+
+`vgirpc/http_compression.go` checks zstd/gzip writers out of a `sync.Pool`
+keyed by (codec, level) and returns them on `Close`. Constructing a zstd
+encoder per response allocates level-sized window tables and, at default
+concurrency, spawns `GOMAXPROCS` goroutines — on the order of 21 MB per
+request. Encoder concurrency is pinned to 1 because response bodies are fully
+buffered before compression, so extra workers buy nothing and make each pooled
+encoder far more expensive to hold. klauspost's `Encoder` is not
+goroutine-safe; a request owns one for the duration of its write and never
+shares it.
+
+### Lazy state must be `sync.Once`
+
+`HttpServer.InitPages` and `Server.ProtocolHash` are both reached from the
+dispatch path and are guarded by `sync.Once`. Both previously used an
+unsynchronized check-then-act: concurrent first requests raced, and
+`InitPages` additionally panicked because `mux.HandleFunc` rejects a duplicate
+pattern. `InitPages` is idempotent as a result. Any new lazily-initialized
+field reachable from a handler needs the same treatment — the conformance
+suite does not exercise concurrent first requests, so this class of bug does
+not show up there.
+
+### `DispatchInfo.RequestData` is conditional
+
+`SerializeRequestBatch` re-encodes the whole request payload, so it only runs
+when a `DispatchHook` is actually registered. With no hook installed,
+`RequestData` is nil. See `http_unary.go`, `http_stream.go`, `server_serve.go`.
+
+## Documentation verification
+
+`make docs-verify` runs `tools/docverify`, which checks README.md, CLAUDE.md
+and the whole `docs/` tree:
+
+- **modules** — every `github.com/Query-farm/...` path resolves to a real
+  package in this repo. This exists because every example once imported
+<!-- docverify:ignore -->
+  `github.com/Query-farm/vgi-rpc/vgirpc`, the *Python* reference repo, which
+  is not a Go module — so every documented `go get` failed. (A line preceded
+  by a `docverify:ignore` HTML comment is skipped, as that one is.)
+- **compile** — every fenced `go` block that is a complete program builds
+  against the local working tree, not the published module.
+- **symbols** — every `vgirpc.X` / `vgiotel.X` reference in a `go` block is an
+  exported symbol of that package. This covers the ~50 fragment blocks that
+  are not complete programs and so cannot be compiled.
+- **links** — every relative link and image path resolves on disk.
+
+Run `make docs-verify` after changing any exported API or any documentation.
