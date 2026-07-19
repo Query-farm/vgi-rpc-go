@@ -3,7 +3,7 @@ module github.com/Query-farm/vgi-rpc-go
 go 1.25.0
 
 require (
-	github.com/Query-farm/vgi-rpc-go/vgirpc/otel v0.9.3
+	github.com/Query-farm/vgi-rpc-go/vgirpc/otel v0.16.0
 	github.com/apache/arrow-go/v18 v18.6.0
 	github.com/klauspost/compress v1.19.0
 	go.opentelemetry.io/otel/exporters/stdout/stdoutmetric v1.44.0
@@ -31,6 +31,5 @@ require (
 	go.opentelemetry.io/otel/metric v1.44.0 // indirect
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	golang.org/x/exp v0.0.0-20260718201538-764159d718ef // indirect
-	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 )
