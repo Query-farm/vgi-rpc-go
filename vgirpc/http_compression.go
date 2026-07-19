@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -22,6 +23,11 @@ import (
 // The wire is byte-identical to the Python codec set in vgi_rpc._codec.
 var supportedEncodings = []string{"zstd", "gzip"}
 
+// supportedEncodingsHeaderValue is the rendered VGI-Supported-Encodings
+// value. addCapabilityHeaders runs on every response and supportedEncodings
+// never changes, so join it once.
+var supportedEncodingsHeaderValue = strings.Join(supportedEncodings, ", ")
+
 // SetCompressionLevel enables compression of response bodies at the given
 // level. The codec is chosen per request from Accept-Encoding intersected
 // with the server's supported set: zstd (when offered) wins over gzip.
@@ -32,10 +38,11 @@ func (h *HttpServer) SetCompressionLevel(level int) error {
 		h.zstdEncoderLevel = 0
 		return nil
 	}
-	// Validate the level early by attempting a probe encoder. The probe
-	// is discarded; per-request encoders are constructed on demand so
-	// each goroutine gets a fresh writer (klauspost's Encoder is not
-	// goroutine-safe and reuse-via-Reset across goroutines is awkward).
+	// Validate the level early by attempting a probe encoder. The probe is
+	// discarded; request-time encoders come from a per-(codec, level) pool
+	// (see newCompressWriter). klauspost's Encoder is not goroutine-safe,
+	// so each request checks one out for the duration of its write and
+	// returns it on Close — never sharing one across goroutines.
 	probe, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevel(level)))
 	if err != nil {
 		return fmt.Errorf("vgirpc: failed to create zstd encoder: %w", err)
@@ -227,24 +234,107 @@ func (cw *compressResponseWriter) finish() {
 	}
 }
 
-// newCompressWriter constructs a streaming compressor for the chosen
+// Codec writers are pooled per (codec, level). Constructing a zstd encoder
+// allocates level-sized window and hash tables and — at the default
+// concurrency — spawns GOMAXPROCS worker goroutines; a gzip writer allocates
+// a full deflate state. Paying that on every response is the single largest
+// per-request allocation when compression is enabled.
+//
+// klauspost's Encoder is not goroutine-safe, which is exactly what sync.Pool
+// plus Reset(w) is for: each request checks out an encoder for the duration
+// of the write and returns it on Close. Response bodies are fully buffered
+// before compression, so encoder concurrency is pinned to 1 — extra worker
+// goroutines buy nothing here and make each pooled encoder far more
+// expensive to hold.
+var codecWriterPools sync.Map // codecPoolKey -> *sync.Pool
+
+type codecPoolKey struct {
+	encoding string
+	level    int
+}
+
+func codecPool(key codecPoolKey) *sync.Pool {
+	if p, ok := codecWriterPools.Load(key); ok {
+		return p.(*sync.Pool)
+	}
+	p := &sync.Pool{New: func() any {
+		switch key.encoding {
+		case "zstd":
+			enc, err := zstd.NewWriter(nil,
+				zstd.WithEncoderLevel(zstd.EncoderLevel(key.level)),
+				zstd.WithEncoderConcurrency(1))
+			if err != nil {
+				return err
+			}
+			return enc
+		default: // gzip
+			w, err := gzip.NewWriterLevel(nil, key.level)
+			if err != nil {
+				return err
+			}
+			return w
+		}
+	}}
+	actual, _ := codecWriterPools.LoadOrStore(key, p)
+	return actual.(*sync.Pool)
+}
+
+// pooledCodecWriter returns its codec writer to the pool on Close.
+type pooledCodecWriter struct {
+	io.WriteCloser
+	pool *sync.Pool
+	// resetNil returns the writer to a state that holds no reference to the
+	// request's ResponseWriter, so a pooled entry cannot pin a finished
+	// request's memory.
+	resetNil func()
+}
+
+func (p *pooledCodecWriter) Close() error {
+	err := p.WriteCloser.Close()
+	p.resetNil()
+	p.pool.Put(p.WriteCloser)
+	return err
+}
+
+// gzipLevelFor clamps the zstd-shaped level into gzip's 1–9 domain rather
+// than carrying a second config field.
+func gzipLevelFor(zstdLevel int) int {
+	if zstdLevel > gzip.BestCompression {
+		return gzip.BestCompression
+	}
+	if zstdLevel < gzip.BestSpeed {
+		return gzip.DefaultCompression
+	}
+	return zstdLevel
+}
+
+// newCompressWriter checks out a streaming compressor for the chosen
 // encoding. Caller writes the buffered body into the returned WriteCloser
-// and must Close it to flush trailing bytes.
+// and must Close it to flush trailing bytes and release it back to the pool.
 func newCompressWriter(encoding string, w io.Writer, zstdLevel int) (io.WriteCloser, error) {
+	var key codecPoolKey
 	switch encoding {
 	case "zstd":
-		return zstd.NewWriter(w, zstd.WithEncoderLevel(zstd.EncoderLevel(zstdLevel)))
+		key = codecPoolKey{encoding: "zstd", level: zstdLevel}
 	case "gzip":
-		// gzip's level range is 1–9; clamp the zstd-shaped level into
-		// gzip's domain rather than carrying a second config field.
-		level := zstdLevel
-		if level > gzip.BestCompression {
-			level = gzip.BestCompression
-		}
-		if level < gzip.BestSpeed {
-			level = gzip.DefaultCompression
-		}
-		return gzip.NewWriterLevel(w, level)
+		key = codecPoolKey{encoding: "gzip", level: gzipLevelFor(zstdLevel)}
+	default:
+		return nil, fmt.Errorf("unsupported encoding: %q", encoding)
+	}
+
+	pool := codecPool(key)
+	got := pool.Get()
+	if err, isErr := got.(error); isErr {
+		return nil, err
+	}
+
+	switch enc := got.(type) {
+	case *zstd.Encoder:
+		enc.Reset(w)
+		return &pooledCodecWriter{WriteCloser: enc, pool: pool, resetNil: func() { enc.Reset(nil) }}, nil
+	case *gzip.Writer:
+		enc.Reset(w)
+		return &pooledCodecWriter{WriteCloser: enc, pool: pool, resetNil: func() { enc.Reset(io.Discard) }}, nil
 	default:
 		return nil, fmt.Errorf("unsupported encoding: %q", encoding)
 	}

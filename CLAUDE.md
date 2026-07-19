@@ -25,6 +25,14 @@ The Makefile defaults to `python3`. Override with `PYTHON=/path/to/python make t
 
 Do not add Go unit tests (`_test.go` files) to this module. The canonical test suite lives in the `vgi-rpc` PyPI package (`vgi_rpc.conformance._pytest_suite`). All correctness validation is done through the conformance test harness (`make test`).
 
+**Exception — benchmarks.** `vgirpc/bench_test.go` and `vgirpc/bench_http_test.go` hold `Benchmark*` functions only, no `Test*` correctness tests. Go benchmarks can only live in `_test.go` files, and the Python harness cannot report `B/op` / `allocs/op`. Run them with:
+
+```bash
+go test -run XXX -bench . -benchmem -count=6 ./vgirpc/
+```
+
+Compare runs with `benchstat` (`go install golang.org/x/perf/cmd/benchstat@latest`). Timings on a loaded machine are unreliable — a contended run once showed a phantom 93% regression that an interleaved old-vs-new re-run proved was an 18% improvement. `allocs/op` and `B/op` are deterministic and trustworthy regardless of load; trust those first and only believe `sec/op` deltas from low-variance runs.
+
 ## CI
 
 CI installs `vgi-rpc` from PyPI (not a local checkout) for repeatable builds. See `.github/workflows/ci.yml`.

@@ -91,6 +91,7 @@ type Server struct {
 	protocolVersionParts [3]int // parsed (major, minor, patch); used when protocolVersion != ""
 	protocolVersionSet   bool   // true when SetProtocolVersion was called with a non-empty value
 	protocolHash         string
+	protocolHashOnce     sync.Once
 	dispatchHook         DispatchHook
 	debugErrors          bool
 	externalConfig       *ExternalLocationConfig
@@ -335,14 +336,18 @@ func (s *Server) checkProtocolVersion(clientVersion string, present bool) *Proto
 
 // ProtocolHash returns the SHA-256 hex digest of the canonical __describe__
 // payload. Computed lazily on first call and cached.
+//
+// The computation is guarded by a sync.Once: ProtocolHash is called from the
+// dispatch path, so concurrent first requests would otherwise race on the
+// cached field (and each redundantly build a describe batch).
 func (s *Server) ProtocolHash() string {
-	if s.protocolHash == "" {
+	s.protocolHashOnce.Do(func() {
 		batch, meta := s.buildDescribeBatch()
 		batch.Release()
 		if v, ok := meta.GetValue(MetaProtocolHash); ok {
 			s.protocolHash = v
 		}
-	}
+	})
 	return s.protocolHash
 }
 

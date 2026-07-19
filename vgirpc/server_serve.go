@@ -231,11 +231,15 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 		return nil
 	}
 
-	// Capture self-contained IPC bytes of the request batch for observability hooks.
+	// Capture self-contained IPC bytes of the request batch for observability
+	// hooks. This re-encodes the whole request payload, so only pay for it when
+	// a hook is actually installed to consume DispatchInfo.RequestData.
 	// Best-effort: a serialization failure here must not fail dispatch.
 	var reqBytes []byte
-	if rb, serErr := SerializeRequestBatch(req.Batch); serErr == nil {
-		reqBytes = rb
+	if s.dispatchHook != nil {
+		if rb, serErr := SerializeRequestBatch(req.Batch); serErr == nil {
+			reqBytes = rb
+		}
 	}
 
 	// Build dispatch info and stats for hooks. For stream methods, mint a

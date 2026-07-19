@@ -178,33 +178,18 @@ func goTypeToArrowType(t reflect.Type, tag tagInfo) (arrow.DataType, bool, error
 }
 
 // structToSchema builds an Arrow schema from a Go struct type using vgirpc tags.
+// The reflection walk is memoized per type; see types_cache.go. The returned
+// schema is shared across callers — arrow.Schema is immutable, so this is
+// safe and lets the IPC writer's schema-identity check hit.
 func structToSchema(t reflect.Type) (*arrow.Schema, error) {
 	if t.Kind() == reflect.Ptr {
 		t = t.Elem()
 	}
-	if t.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("expected struct type, got %v", t.Kind())
+	desc := describeStruct(t)
+	if desc.Err != nil {
+		return nil, desc.Err
 	}
-	var fields []arrow.Field
-	for i := range t.NumField() {
-		f := t.Field(i)
-		tag := f.Tag.Get("vgirpc")
-		if tag == "" || tag == "-" {
-			continue
-		}
-		info := parseTag(tag)
-
-		arrowType, nullable, err := goTypeToArrowType(f.Type, info)
-		if err != nil {
-			return nil, fmt.Errorf("field %s: %w", f.Name, err)
-		}
-		fields = append(fields, arrow.Field{
-			Name:     info.Name,
-			Type:     arrowType,
-			Nullable: nullable,
-		})
-	}
-	return arrow.NewSchema(fields, nil), nil
+	return desc.Schema, nil
 }
 
 // resultSchema builds an Arrow schema for a return type.

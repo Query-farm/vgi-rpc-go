@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -61,6 +62,17 @@ func asString(value any) (string, bool) {
 		return s.String(), true
 	}
 	return "", false
+}
+
+// stringOf converts a value to its string form for string/dictionary
+// columns. The asString fast path covers strings and fmt.Stringer without
+// allocating; Sprintf is the fallback for everything else. This mirrors what
+// the LARGE_STRING paths already did.
+func stringOf(value any) string {
+	if s, ok := asString(value); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", value)
 }
 
 // asBytes accepts a []byte or a named slice-of-byte type.
@@ -154,34 +166,27 @@ func serializeVgirpcStruct(value any) ([]byte, error) {
 	}
 	rt := rv.Type()
 
-	schema, err := structToSchema(rt)
-	if err != nil {
-		return nil, err
+	// Schema and tagged-field list are memoized per type (types_cache.go).
+	desc := describeStruct(rt)
+	if desc.Err != nil {
+		return nil, desc.Err
 	}
+	schema := desc.Schema
 
 	mem := defaultAllocator()
-	cols := make([]arrow.Array, schema.NumFields())
+	cols := make([]arrow.Array, len(desc.Fields))
 
-	fieldIdx := 0
-	for i := range rt.NumField() {
-		f := rt.Field(i)
-		tag := f.Tag.Get("vgirpc")
-		if tag == "" || tag == "-" {
-			continue
-		}
-
-		fieldVal := rv.Field(i).Interface()
-		arr, err := buildArray(mem, schema.Field(fieldIdx).Type, fieldVal)
+	for fieldIdx, fd := range desc.Fields {
+		arr, err := buildArray(mem, schema.Field(fieldIdx).Type, rv.Field(fd.Index).Interface())
 		if err != nil {
 			for _, c := range cols[:fieldIdx] {
 				if c != nil {
 					c.Release()
 				}
 			}
-			return nil, fmt.Errorf("field %s: %w", f.Name, err)
+			return nil, fmt.Errorf("field %s: %w", rt.Field(fd.Index).Name, err)
 		}
 		cols[fieldIdx] = arr
-		fieldIdx++
 	}
 
 	batch := array.NewRecordBatch(schema, cols, 1)
@@ -221,7 +226,7 @@ func buildArray(mem memory.Allocator, dt arrow.DataType, value any) (arrow.Array
 	case arrow.STRING:
 		b := array.NewStringBuilder(mem)
 		defer b.Release()
-		b.Append(fmt.Sprintf("%v", value))
+		b.Append(stringOf(value))
 		return b.NewArray(), nil
 
 	case arrow.INT64:
@@ -451,7 +456,7 @@ func buildArray(mem memory.Allocator, dt arrow.DataType, value any) (arrow.Array
 		b := array.NewDictionaryBuilder(mem, dictType)
 		defer b.Release()
 		sb := b.(*array.BinaryDictionaryBuilder)
-		sb.AppendString(fmt.Sprintf("%v", value))
+		sb.AppendString(stringOf(value))
 		return b.NewArray(), nil
 
 	case arrow.STRUCT:
@@ -484,15 +489,61 @@ func buildListArray(mem memory.Allocator, lt *arrow.ListType, rv reflect.Value) 
 	return lb.NewArray(), nil
 }
 
+// sortMapKeys orders map keys deterministically. Arrow map columns must
+// serialize in a stable key order (see the sorted-keys note in CLAUDE.md).
+// String and integer keys sort directly off the reflect.Value with no
+// allocation; anything else falls back to string formatting.
+func sortMapKeys(keys []reflect.Value) {
+	if len(keys) < 2 {
+		return
+	}
+	// Strings compare in place with zero allocation.
+	if keys[0].Kind() == reflect.String {
+		sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+		return
+	}
+
+	// Everything else keeps the historical ordering, which compared the
+	// *formatted* key ("10" < "9"). Format each key once up front rather
+	// than twice per comparison: O(n) allocations instead of O(n log n).
+	formatted := make([]string, len(keys))
+	for i, k := range keys {
+		switch k.Kind() {
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+			formatted[i] = strconv.FormatInt(k.Int(), 10)
+		case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+			formatted[i] = strconv.FormatUint(k.Uint(), 10)
+		default:
+			formatted[i] = fmt.Sprintf("%v", k.Interface())
+		}
+	}
+	sort.Sort(&mapKeySorter{keys: keys, formatted: formatted})
+}
+
+// mapKeySorter sorts keys by their precomputed formatted form, keeping the
+// two slices in step.
+type mapKeySorter struct {
+	keys      []reflect.Value
+	formatted []string
+}
+
+func (s *mapKeySorter) Len() int           { return len(s.keys) }
+func (s *mapKeySorter) Less(i, j int) bool { return s.formatted[i] < s.formatted[j] }
+func (s *mapKeySorter) Swap(i, j int) {
+	s.keys[i], s.keys[j] = s.keys[j], s.keys[i]
+	s.formatted[i], s.formatted[j] = s.formatted[j], s.formatted[i]
+}
+
 func buildMapArray(mem memory.Allocator, mt *arrow.MapType, rv reflect.Value) (arrow.Array, error) {
 	mb := array.NewMapBuilder(mem, mt.KeyType(), mt.ItemType(), false)
 	defer mb.Release()
 
-	// Sort keys for deterministic output
+	// Sort keys for deterministic output. String and integer keys — which
+	// cover every map type on the wire — compare directly off the
+	// reflect.Value; the Sprintf path is the fallback for exotic key types
+	// and allocates two strings per comparison, so keep it off the hot path.
 	keys := rv.MapKeys()
-	sort.Slice(keys, func(i, j int) bool {
-		return fmt.Sprintf("%v", keys[i].Interface()) < fmt.Sprintf("%v", keys[j].Interface())
-	})
+	sortMapKeys(keys)
 
 	mb.Append(true) // start map element
 	kb := mb.KeyBuilder()
@@ -555,7 +606,7 @@ func appendToBuilder(b array.Builder, dt arrow.DataType, value any) error {
 
 	switch dt.ID() {
 	case arrow.STRING:
-		b.(*array.StringBuilder).Append(fmt.Sprintf("%v", value))
+		b.(*array.StringBuilder).Append(stringOf(value))
 	case arrow.INT64:
 		v, err := toInt64(value)
 		if err != nil {
@@ -694,9 +745,7 @@ func appendToBuilder(b array.Builder, dt arrow.DataType, value any) error {
 		ib := mb.ItemBuilder()
 		mapRV := reflect.ValueOf(value)
 		mapKeys := mapRV.MapKeys()
-		sort.Slice(mapKeys, func(i, j int) bool {
-			return fmt.Sprintf("%v", mapKeys[i].Interface()) < fmt.Sprintf("%v", mapKeys[j].Interface())
-		})
+		sortMapKeys(mapKeys)
 		for _, k := range mapKeys {
 			v := mapRV.MapIndex(k)
 			if err := appendToBuilder(kb, dt.(*arrow.MapType).KeyType(), k.Interface()); err != nil {
@@ -708,7 +757,7 @@ func appendToBuilder(b array.Builder, dt arrow.DataType, value any) error {
 		}
 	case arrow.DICTIONARY:
 		dictBuilder := b.(*array.BinaryDictionaryBuilder)
-		dictBuilder.AppendString(fmt.Sprintf("%v", value))
+		dictBuilder.AppendString(stringOf(value))
 	case arrow.STRUCT:
 		sb := b.(*array.StructBuilder)
 		sb.Append(true)

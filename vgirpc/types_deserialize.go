@@ -6,7 +6,6 @@ package vgirpc
 import (
 	"bytes"
 	"fmt"
-	"log/slog"
 	"reflect"
 	"strconv"
 	"time"
@@ -70,14 +69,11 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 	// binary, the actual parameters are IPC-serialized inside it. Unwrap the
 	// inner batch and use it for field mapping.
 	if batch.NumCols() == 1 && batch.ColumnName(0) == "request" && batch.Column(0).DataType().ID() == arrow.BINARY {
-		slog.Debug("deserializeParams: detected wrapped request column", "target", target.Name())
 		if binCol, ok := batch.Column(0).(*array.Binary); ok && binCol.Len() > 0 && !binCol.IsNull(0) {
 			data := binCol.Value(0)
-			slog.Debug("deserializeParams: unwrapping request", "dataLen", len(data))
 			if len(data) > 0 {
 				innerReader, err := ipc.NewReader(bytes.NewReader(data))
 				if err != nil {
-					slog.Debug("deserializeParams: unwrap error", "err", err)
 					return reflect.Value{}, fmt.Errorf("unwrapping request IPC: %w", err)
 				}
 				defer innerReader.Release()
@@ -85,36 +81,29 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 					innerBatch := innerReader.RecordBatch()
 					innerBatch.Retain()
 					defer innerBatch.Release()
-					slog.Debug("deserializeParams: unwrapped inner batch", "numCols", innerBatch.NumCols(), "numRows", innerBatch.NumRows())
 					return deserializeParams(innerBatch, target)
 				}
-				slog.Debug("deserializeParams: no batch in IPC stream")
 			}
 		}
 	}
 
+	// Tag parsing and field enumeration are memoized per type (types_cache.go)
+	// rather than redone on every request.
+	desc := describeStruct(target)
+	if desc.Err != nil {
+		return reflect.Value{}, desc.Err
+	}
+
 	result := reflect.New(target).Elem()
 
-	for i := range target.NumField() {
-		f := target.Field(i)
-		tag := f.Tag.Get("vgirpc")
-		if tag == "" || tag == "-" {
-			continue
-		}
-		info := parseTag(tag)
+	for ord, fd := range desc.Fields {
+		info := fd.Info
 
-		// Find column by name
-		colIdx := -1
-		for ci := range batch.NumCols() {
-			if batch.ColumnName(int(ci)) == info.Name {
-				colIdx = int(ci)
-				break
-			}
-		}
+		colIdx := resolveColumn(batch, ord, info.Name)
 		if colIdx == -1 {
 			// Column not present — use default if available
 			if info.Default != nil {
-				if err := setFieldFromString(result.Field(i), f.Type, *info.Default); err != nil {
+				if err := setFieldFromString(result.Field(fd.Index), fd.Type, *info.Default); err != nil {
 					return reflect.Value{}, fmt.Errorf("default for %s: %w", info.Name, err)
 				}
 			}
@@ -125,14 +114,14 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 		if col.IsNull(0) {
 			// Value is null — apply default if available, otherwise leave as zero
 			if info.Default != nil {
-				if err := setFieldFromString(result.Field(i), f.Type, *info.Default); err != nil {
+				if err := setFieldFromString(result.Field(fd.Index), fd.Type, *info.Default); err != nil {
 					return reflect.Value{}, fmt.Errorf("default for %s: %w", info.Name, err)
 				}
 			}
 			continue
 		}
 
-		if err := setFieldFromArrow(result.Field(i), f.Type, col, 0, info); err != nil {
+		if err := setFieldFromArrow(result.Field(fd.Index), fd.Type, col, 0, info); err != nil {
 			return reflect.Value{}, fmt.Errorf("field %s: %w", info.Name, err)
 		}
 	}

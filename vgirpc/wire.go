@@ -127,10 +127,12 @@ func ReadRequest(r io.Reader) (*Request, error) {
 	requestID, _ := meta.GetValue(MetaRequestID)
 	logLevel, _ := meta.GetValue(MetaLogLevel)
 
-	// Convert metadata to map
-	metaMap := make(map[string]string)
-	for i := range meta.Len() {
-		metaMap[meta.Keys()[i]] = meta.Values()[i]
+	// Convert metadata to map. Size the map up front and hoist Keys()/Values()
+	// out of the loop — both were re-invoked on every iteration.
+	mKeys, mVals := meta.Keys(), meta.Values()
+	metaMap := make(map[string]string, len(mKeys))
+	for i := range mKeys {
+		metaMap[mKeys[i]] = mVals[i]
 	}
 
 	return &Request{

@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -66,6 +67,13 @@ type HttpServer struct {
 
 	corsOrigins string // CORS allowed origins; empty = disabled
 	corsMaxAge  string // Access-Control-Max-Age value; empty = omit
+
+	// Health response body, rendered on first probe and reused thereafter.
+	healthBodyOnce sync.Once
+	healthBody     []byte
+
+	// Guards the lazy page render + route registration in InitPages.
+	initPagesOnce sync.Once
 
 	pkce *oauthPkceState // non-nil when OAuth PKCE browser login is enabled
 
@@ -215,7 +223,7 @@ func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool)
 	// and pick a codec from the intersection; absence is interpreted as
 	// {zstd} per the Python reference, so emitting both keeps gzip-only
 	// clients (e.g. environments without zstandard installed) working.
-	w.Header().Set(supportedEncodingsHeader, strings.Join(supportedEncodings, ", "))
+	w.Header().Set(supportedEncodingsHeader, supportedEncodingsHeaderValue)
 	if h.maxRequestBytes > 0 {
 		w.Header().Set(maxRequestBytesHeader, strconv.FormatInt(h.maxRequestBytes, 10))
 	}
@@ -317,12 +325,16 @@ func (h *HttpServer) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	if protocol == "" {
 		protocol = h.server.serviceName
 	}
-	body := fmt.Sprintf(`{"status":"ok","server_id":%q,"protocol":%q}`,
-		h.server.serverID, protocol)
+	// Both operands are fixed at construction, so render once and reuse.
+	// Load balancers hit this endpoint at high frequency.
+	h.healthBodyOnce.Do(func() {
+		h.healthBody = fmt.Appendf(nil, `{"status":"ok","server_id":%q,"protocol":%q}`,
+			h.server.serverID, protocol)
+	})
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte(body)); err != nil {
+	if _, err := w.Write(h.healthBody); err != nil {
 		slog.Debug("http: response write failed", "err", err)
 	}
 }
@@ -347,7 +359,17 @@ func (h *HttpServer) handleOAuthWellKnown(w http.ResponseWriter, r *http.Request
 //
 // If not called explicitly, pages are initialized automatically on the first
 // HTTP request.
+//
+// InitPages is idempotent and safe to call concurrently: the work runs once
+// and later calls are a no-op. This matters because ServeHTTP calls it on the
+// request path — without the guard, two concurrent first requests would both
+// render pages and both register routes, and mux.HandleFunc panics on a
+// duplicate pattern.
 func (h *HttpServer) InitPages() {
+	h.initPagesOnce.Do(h.initPages)
+}
+
+func (h *HttpServer) initPages() {
 	name := h.protocolName
 	if name == "" {
 		name = h.server.serviceName
@@ -626,9 +648,9 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auto-initialize pages on first request if not done explicitly.
-	if h.landingHTML == nil && h.describeHTML == nil && h.notFoundHTML == nil {
-		h.InitPages()
-	}
+	// InitPages is guarded by a sync.Once, so this is a cheap atomic load
+	// after the first request and is safe under concurrent first requests.
+	h.InitPages()
 
 	// Capability headers go on every response so clients can probe via
 	// any verb (typically OPTIONS /health). On OPTIONS we also add a
