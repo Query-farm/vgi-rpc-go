@@ -252,10 +252,16 @@ func (h *dispatchHook) OnDispatchStart(ctx context.Context, info vgirpc.Dispatch
 
 		// Stream correlation: the StreamID is a uuid4-derived 32-char
 		// hex that's stable across all turns of one logical stream call.
-		// Span data only, never a scope tag (unbounded cardinality would
+		// Context data only, never a scope tag (unbounded cardinality would
 		// pollute Sentry's tag distribution UI).
+		//
+		// sentry-go v0.48 removed Scope.SetExtra in favour of contexts, so
+		// this rides in an "rpc" context rather than the legacy extras bag.
+		// In the Sentry UI the value moves from "Additional Data" to its own
+		// "rpc" context section, keyed "stream_id" instead of
+		// "rpc.stream_id".
 		if info.StreamID != "" {
-			scope.SetExtra("rpc.stream_id", info.StreamID)
+			scope.SetContext("rpc", sentry.Context{"stream_id": info.StreamID})
 		}
 	})
 
