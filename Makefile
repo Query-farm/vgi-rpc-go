@@ -2,13 +2,34 @@
 
 # Configurable paths — override with env vars or on the command line.
 GO_CONFORMANCE_WORKER ?= $(CURDIR)/conformance-worker
-PYTHON ?= /Users/rusty/Development/vgi-rpc/.venv/bin/python
 export GO_CONFORMANCE_WORKER
 
 GOBIN := $(shell go env GOPATH)/bin
 COVDIR := $(CURDIR)/_covdata
 
-.PHONY: build lint test coverage leakcheck race docs docs-verify clean
+# --- Python environment ----------------------------------------------------
+# The conformance suite is driven by the released vgi-rpc package from PyPI.
+# By default the test targets bootstrap a repo-local .venv and install it, so
+# a fresh clone can run `make test` with no manual setup.
+#
+# To use an interpreter you manage yourself (e.g. a checkout of
+# vgi-rpc-python installed with -e), override PYTHON and the bootstrap is
+# skipped entirely:
+#
+#	PYTHON=/path/to/python make test
+VENV := $(CURDIR)/.venv
+PYTHON ?= $(VENV)/bin/python
+VGI_RPC_SPEC ?= vgi-rpc[http,cli,external]>=0.20.0
+
+# Bootstrap only when PYTHON came from this file — never when the caller
+# supplied their own interpreter.
+ifeq ($(filter command line environment,$(origin PYTHON)),)
+PYTHON_BOOTSTRAP := $(VENV)/bin/python
+else
+PYTHON_BOOTSTRAP :=
+endif
+
+.PHONY: build lint test coverage leakcheck race docs docs-verify venv clean
 
 # --- Build -----------------------------------------------------------------
 
@@ -40,14 +61,24 @@ lint:
 	cd vgirpc/sentry && go vet ./...
 	cd vgirpc/jwtauth && go vet ./...
 
+# --- Python venv -----------------------------------------------------------
+
+venv: $(VENV)/bin/python
+
+$(VENV)/bin/python:
+	python3 -m venv "$(VENV)"
+	"$(VENV)/bin/python" -m pip install --quiet --upgrade pip
+	"$(VENV)/bin/python" -m pip install --quiet "$(VGI_RPC_SPEC)" pytest pytest-timeout
+	@echo "created $(VENV) with $(VGI_RPC_SPEC)"
+
 # --- Test ------------------------------------------------------------------
 
-test: conformance-worker
+test: conformance-worker $(PYTHON_BOOTSTRAP)
 	$(PYTHON) -m pytest test_go_conformance.py -v
 
 # --- Coverage --------------------------------------------------------------
 
-coverage: conformance-worker-cover
+coverage: conformance-worker-cover $(PYTHON_BOOTSTRAP)
 	rm -rf $(COVDIR) && mkdir -p $(COVDIR)
 	GOCOVERDIR=$(COVDIR) $(PYTHON) -m pytest test_go_conformance.py -v
 	go tool covdata textfmt -i=$(COVDIR) -o=coverage-go.txt
@@ -58,7 +89,7 @@ coverage: conformance-worker-cover
 # Arrow allocation routes through a single shared CheckedAllocator. The
 # worker prints LeakCheckSummary to stderr on exit; pytest captures it.
 
-leakcheck:
+leakcheck: $(PYTHON_BOOTSTRAP)
 	go build -tags leakcheck -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
 	$(PYTHON) -m pytest test_go_conformance.py -v -s 2>&1 | grep -E "vgirpc leakcheck|passed|failed" | tail -20
 
@@ -73,7 +104,7 @@ leakcheck:
 # GORACE=halt_on_error=1 causes the test run to fail on the first race
 # rather than logging-and-continuing, so CI sees the failure clearly.
 
-race:
+race: $(PYTHON_BOOTSTRAP)
 	go build -race -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
 	GORACE=halt_on_error=1 VGI_GO_WORKER_TEARDOWN_TIMEOUT=30 $(PYTHON) -m pytest test_go_conformance.py -v -p no:timeout
 

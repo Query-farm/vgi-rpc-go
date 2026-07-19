@@ -13,13 +13,28 @@ make coverage  # run tests with Go coverage instrumentation
 
 ### Python dependency
 
-The conformance tests require the `vgi-rpc` package from PyPI:
+The conformance tests are driven by the released `vgi-rpc` package from PyPI.
+`make test` (and `coverage` / `leakcheck` / `race`) bootstraps a repo-local
+`.venv` and installs it automatically, so a fresh clone needs no manual setup:
+
+```bash
+make test          # creates .venv on first run, then runs the suite
+make venv          # create/refresh .venv without running tests
+```
+
+To install by hand, or to point at a checkout of `vgi-rpc-python` instead:
 
 ```bash
 pip install "vgi-rpc[http,cli,external]>=0.20.0" pytest pytest-timeout
 ```
 
-The Makefile's `PYTHON` variable currently points at a local virtualenv path, not `python3`. Override it with `PYTHON=/path/to/python make test` to point at whichever environment has `vgi-rpc` installed.
+Override `PYTHON` to use an interpreter you manage yourself — an editable install of `vgi-rpc-python`, say. Supplying it on the command line or in the environment skips the `.venv` bootstrap entirely:
+
+```bash
+PYTHON=/path/to/python make test
+```
+
+`VGI_RPC_SPEC` overrides the installed requirement (default `vgi-rpc[http,cli,external]>=0.20.0`); the suite is verified against 0.25.0.
 
 ## Testing Policy
 
@@ -35,7 +50,11 @@ Compare runs with `benchstat` (`go install golang.org/x/perf/cmd/benchstat@lates
 
 ## CI
 
-CI installs `vgi-rpc` from PyPI (not a local checkout) for repeatable builds. See `.github/workflows/ci.yml`.
+CI clones `vgi-rpc-python` at HEAD and installs from that checkout, so the Go
+port is tested against unreleased upstream changes and regressions surface
+before they ship. Local `make test` instead uses the released PyPI package —
+so the two can legitimately disagree, and a CI-only failure usually means
+upstream changed something not yet released. See `.github/workflows/ci.yml`.
 
 ## Cross-language wire alignment
 
