@@ -248,25 +248,25 @@
   margin-bottom: 1rem;
 }
 
+/* The mark is a landscape shield on a transparent background, so it is
+   shown as-is: no circle clip, no forced square box, and no shadow (a
+   shadow on a transparent PNG traces the rectangular bounding box rather
+   than the artwork). Height is left to the aspect ratio. */
 .hero-logo-img {
-  border-radius: 50%;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.18);
   transition: transform 0.3s ease;
-  width: 200px;
-  height: 200px;
+  width: 320px;
+  height: auto;
 }
 
 .hero-logo-img:hover {
   transform: scale(1.05);
 }
 
-/* Header logo — bigger than default, clipped to circle */
+/* Header logo — sized by height so the landscape mark keeps its aspect. */
 .md-header__button.md-logo img,
 .md-nav__button.md-logo img {
-  height: 3rem;
-  width: 3rem;
-  border-radius: 50%;
-  object-fit: cover;
+  height: 2.2rem;
+  width: auto;
 }
 
 /* Scrollbar — subtle farm tones */
