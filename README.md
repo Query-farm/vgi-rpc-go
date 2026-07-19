@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo-shield.png" alt="Vector Gateway Interface" width="400">
+</p>
+
 # vgi-rpc-go
 
 Go implementation of the [vgi_rpc](https://github.com/Query-farm/vgi-rpc) framework -- an Apache Arrow IPC-based RPC protocol for high-performance data services.
