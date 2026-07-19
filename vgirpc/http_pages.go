@@ -18,15 +18,17 @@ const fontImports = `<link rel="preconnect" href="https://fonts.googleapis.com">
 	`<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` +
 	`<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">`
 
-const logoURL = "https://vgi-rpc-python.query.farm/assets/logo-hero.png"
+// logoURL is the mark shown on the served HTML pages. It points at this
+// project's own docs site; the asset is published from docs/assets by the
+// Docs workflow.
+const logoURL = "https://vgi-rpc-go.query.farm/assets/logo-hero.png"
 
 const errorPageStyle = `<style>
   body { font-family: 'Inter', system-ui, -apple-system, sans-serif; max-width: 600px;
          margin: 0 auto; padding: 60px 20px 0; color: #2c2c1e; text-align: center;
          background: #faf8f0; }
   .logo { margin-bottom: 24px; }
-  .logo img { width: 120px; height: 120px; border-radius: 50%%;
-               box-shadow: 0 4px 24px rgba(0,0,0,0.12); }
+  .logo img { width: 200px; height: auto; }
   h1 { color: #2d5016; margin-bottom: 8px; font-weight: 700; }
   code { font-family: 'JetBrains Mono', monospace; background: #f0ece0;
           padding: 2px 6px; border-radius: 3px; font-size: 0.9em; color: #2c2c1e; }
@@ -75,8 +77,7 @@ const landingHTMLTemplate = `<!DOCTYPE html>
          margin: 0 auto; padding: 60px 20px 0; color: #2c2c1e; text-align: center;
          background: #faf8f0; }
   .logo { margin-bottom: 24px; }
-  .logo img { width: 140px; height: 140px; border-radius: 50%%;
-               box-shadow: 0 4px 24px rgba(0,0,0,0.12); }
+  .logo img { width: 230px; height: auto; }
   h1 { color: #2d5016; margin-bottom: 8px; font-weight: 700; }
   code { font-family: 'JetBrains Mono', monospace; background: #f0ece0;
           padding: 2px 6px; border-radius: 3px; font-size: 0.9em; color: #2c2c1e; }
@@ -125,8 +126,7 @@ const describeHTMLTemplate = `<!DOCTYPE html>
   body { font-family: 'Inter', system-ui, -apple-system, sans-serif; max-width: 900px;
          margin: 0 auto; padding: 40px 20px 0; color: #2c2c1e; background: #faf8f0; }
   .header { text-align: center; margin-bottom: 40px; }
-  .header .logo img { width: 80px; height: 80px; border-radius: 50%%;
-                       box-shadow: 0 3px 16px rgba(0,0,0,0.10); }
+  .header .logo img { width: 150px; height: auto; }
   .header h1 { margin-bottom: 4px; color: #2d5016; font-weight: 700; }
   .header .subtitle { color: #6b6b5a; font-size: 1.1em; margin-top: 0; }
   .header .meta { color: #6b6b5a; font-size: 0.9em; }
