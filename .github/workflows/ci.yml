@@ -25,6 +25,13 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # Language-local Go tests only — intermediary helpers, client-side
+      # code, unexported internals, pure functions. Cross-language behaviour
+      # is the conformance job's remit; see CLAUDE.md § Testing Policy.
+      # These ran nowhere in CI until they were wired in here.
+      - name: Go unit tests
+        run: go test ./...
+
       - name: Install staticcheck
         run: go install honnef.co/go/tools/cmd/staticcheck@latest
 

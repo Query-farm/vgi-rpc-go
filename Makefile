@@ -29,7 +29,7 @@ else
 PYTHON_BOOTSTRAP :=
 endif
 
-.PHONY: build lint test coverage leakcheck race docs docs-verify venv clean
+.PHONY: build lint go-test test coverage leakcheck race docs docs-verify venv clean
 
 # --- Build -----------------------------------------------------------------
 
@@ -72,8 +72,22 @@ $(VENV)/bin/python:
 	@echo "created $(VENV) with $(VGI_RPC_SPEC)"
 
 # --- Test ------------------------------------------------------------------
+# Two suites, deliberately split (see CLAUDE.md § Testing Policy):
+#
+#   go-test — language-local Go logic the cross-language harness structurally
+#             cannot reach (intermediary helpers, client-side code, unexported
+#             internals, pure functions). Seconds; no Python needed.
+#   test    — the canonical cross-language conformance suite, which is what
+#             actually keeps this port aligned with the Python/Java/TS/Rust
+#             ones. Runs go-test first, since it is nearly free.
+#
+# The submodules (otel, sentry, jwtauth, s3, gcs) carry no tests; they are
+# covered by `make lint`.
 
-test: conformance-worker $(PYTHON_BOOTSTRAP)
+go-test:
+	go test ./...
+
+test: go-test conformance-worker $(PYTHON_BOOTSTRAP)
 	$(PYTHON) -m pytest test_go_conformance.py -v
 
 # --- Coverage --------------------------------------------------------------

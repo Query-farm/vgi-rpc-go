@@ -43,6 +43,13 @@ type HttpServer struct {
 	prefix                  string
 	mux                     *http.ServeMux
 	zstdEncoderLevel        int // > 0 when response compression is enabled
+	// supportedEncodingsValue is the rendered VGI-Supported-Encodings
+	// capability value, re-derived from producibleResponseEncodings every
+	// time the level changes (applyCompressionLevel). Both fields are set
+	// by the constructors — the struct's zero value is not a usable
+	// configuration, since a zero level would mean compression off while
+	// the default is DefaultCompressionLevel.
+	supportedEncodingsValue string
 
 	rehydrateFunc      RehydrateFunc    // called after unpacking state tokens
 	producerBatchLimit int              // max data batches per producer response; 0 = unlimited
@@ -113,6 +120,7 @@ func NewHttpServer(server *Server) *HttpServer {
 		enableDescribePage: true,
 		enableNotFoundPage: true,
 	}
+	h.applyCompressionLevel(DefaultCompressionLevel)
 	h.initRoutes()
 	return h
 }
@@ -139,6 +147,7 @@ func NewHttpServerWithKey(server *Server, tokenKey []byte) (*HttpServer, error) 
 		enableDescribePage: true,
 		enableNotFoundPage: true,
 	}
+	h.applyCompressionLevel(DefaultCompressionLevel)
 	h.initRoutes()
 	return h, nil
 }
@@ -218,12 +227,19 @@ const (
 // Cache-Control: public, max-age=N header is set so clients can cache
 // the discovered values for the advertised TTL.
 func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool) {
-	// Advertise the codec set the server can decode on requests AND
-	// produce on responses. Capability-aware clients cache this header
-	// and pick a codec from the intersection; absence is interpreted as
-	// {zstd} per the Python reference, so emitting both keeps gzip-only
-	// clients (e.g. environments without zstandard installed) working.
-	w.Header().Set(supportedEncodingsHeader, supportedEncodingsHeaderValue)
+	// Advertise the codec set the server can do in BOTH directions: decode
+	// on requests and produce on responses — the intersection, in server
+	// preference order, with identity omitted (it is always available and
+	// carries no information). Derived from producibleResponseEncodings, the
+	// same predicate the negotiation walk uses, so the advertisement cannot
+	// claim a codec the server would decline to use.
+	//
+	// Always emitted, including empty. Present-but-empty means "I speak no
+	// compression" — reachable only by an explicit SetCompressionLevel(0),
+	// since a stock server starts compressed and advertises "zstd, gzip".
+	// Absent means a legacy server, which clients read as {zstd} per the
+	// Python reference. A client must be able to tell those apart.
+	w.Header().Set(supportedEncodingsHeader, h.supportedEncodingsValue)
 	if h.maxRequestBytes > 0 {
 		w.Header().Set(maxRequestBytesHeader, strconv.FormatInt(h.maxRequestBytes, 10))
 	}
@@ -472,11 +488,9 @@ func (h *HttpServer) SetMaxDecompressedBodySize(n int64) {
 	h.maxDecompressedBodySize = n
 }
 
-// SetCompressionLevel enables zstd compression of response bodies at the
-// given level (1–11). When enabled, responses are compressed if the client
-// sends an Accept-Encoding header containing "zstd". Pass 0 to disable
-// response compression (the default).
-// exchange and producer continuation requests.
+// SetRehydrateFunc registers a [RehydrateFunc] that reconstructs the
+// non-serializable fields of a stream state deserialized from a state token,
+// for exchange and producer continuation requests.
 func (h *HttpServer) SetRehydrateFunc(fn RehydrateFunc) {
 	h.rehydrateFunc = fn
 }
@@ -685,9 +699,22 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.zstdEncoderLevel > 0 {
-		if enc := chooseResponseEncoding(r.Header.Get("Accept-Encoding")); enc != "" {
-			cw := &compressResponseWriter{ResponseWriter: w, encoderLevel: h.zstdEncoderLevel, encoding: enc}
+	// The producible set is empty when compression is disabled, which makes
+	// negotiation a no-op — the length check is just the fast path, not a
+	// second copy of the gate.
+	if producible := h.producibleResponseEncodings(); len(producible) > 0 {
+		enc, useCustomHeader := chooseResponseEncoding(
+			r.Header.Get(customAcceptEncodingHeader),
+			r.Header.Get(acceptEncodingHeader),
+			producible,
+		)
+		if enc != "" {
+			cw := &compressResponseWriter{
+				ResponseWriter:  w,
+				encoderLevel:    h.zstdEncoderLevel,
+				encoding:        enc,
+				useCustomHeader: useCustomHeader,
+			}
 			defer cw.finish()
 			h.mux.ServeHTTP(cw, r)
 			return

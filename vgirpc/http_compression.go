@@ -16,26 +16,95 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// supportedEncodings lists the codecs the server can produce on responses,
-// in preference order (used when emitting the VGI-Supported-Encodings
-// capability header and for codec selection from Accept-Encoding).
+// supportedEncodings lists the compressed codecs this build speaks, in the
+// server's own preference order. Both are compiled in unconditionally
+// (klauspost zstd, stdlib gzip) and both work in both directions — decode on
+// requests, produce on responses — so this is the full two-way codec set
+// before the configuration gate is applied (see producibleResponseEncodings).
+// It is the membership test for negotiation, but not the pick order: the
+// response codec is chosen in the *client's* order (see chooseResponseEncoding).
 //
 // The wire is byte-identical to the Python codec set in vgi_rpc._codec.
 var supportedEncodings = []string{"zstd", "gzip"}
 
-// supportedEncodingsHeaderValue is the rendered VGI-Supported-Encodings
-// value. addCapabilityHeaders runs on every response and supportedEncodings
-// never changes, so join it once.
-var supportedEncodingsHeaderValue = strings.Join(supportedEncodings, ", ")
+// Codec negotiation header names. The X-VGI-* pair is VGI's private
+// channel for clients whose HTTP stack owns the standard headers — see
+// chooseResponseEncoding.
+const (
+	acceptEncodingHeader        = "Accept-Encoding"
+	customAcceptEncodingHeader  = "X-VGI-Accept-Encoding"
+	contentEncodingHeader       = "Content-Encoding"
+	customContentEncodingHeader = "X-VGI-Content-Encoding"
+)
 
-// SetCompressionLevel enables compression of response bodies at the given
-// level. The codec is chosen per request from Accept-Encoding intersected
-// with the server's supported set: zstd (when offered) wins over gzip.
-// Levels: zstd 1–11, gzip 1–9. Pass 0 to disable compression entirely
-// (the default).
+// identityEncoding is the "send it uncompressed" token. Every server can
+// always produce it, so a client that lists it ahead of the compressed
+// codecs is explicitly opting out of response compression for that request
+// (benchmarking, or a proxy that must see the raw body). It is never
+// stamped on a response — an identity body is just a body — and it is
+// deliberately absent from supportedEncodings, which advertises codecs.
+const identityEncoding = "identity"
+
+// DefaultCompressionLevel is the zstd level a freshly constructed
+// [HttpServer] starts at. Response compression is ON by default: an Arrow
+// response body is large and highly compressible, and the client side of
+// this protocol always decompresses, so the only question is which level.
+//
+// Level 1, not the usual level-3 default, and that is not a size/speed
+// tradeoff. Measured on an 8.41 MB Arrow payload, level 1 was 4.7× faster
+// than level 3 *and* produced the smaller body — it wins on both axes, so
+// there is nothing to trade. Raise it only with a measurement on your own
+// payloads; pass 0 to [HttpServer.SetCompressionLevel] to turn compression
+// off entirely.
+const DefaultCompressionLevel = 1
+
+// applyCompressionLevel stores a validated level and re-renders the
+// advertisement derived from it. Every write to zstdEncoderLevel goes
+// through here so the two fields cannot drift apart: the capability header
+// is a pure function of the level, and rendering it once per configuration
+// change keeps it off the per-response path.
+func (h *HttpServer) applyCompressionLevel(level int) {
+	if level < 0 {
+		level = 0
+	}
+	h.zstdEncoderLevel = level
+	h.supportedEncodingsValue = strings.Join(h.producibleResponseEncodings(), ", ")
+}
+
+// producibleResponseEncodings returns the codecs this server can actually
+// produce right now, in the server's own preference order: runtime-available
+// (both encoders are compiled in) and enabled by configuration. nil when
+// compression is disabled.
+//
+// This is the single producibility predicate. Both the negotiation walk and
+// the VGI-Supported-Encodings capability advertisement derive from it, so the
+// header cannot claim a codec the server would decline to use. Because every
+// codec here decodes as well as it encodes, this set is also the two-way
+// intersection the capability header is specified to carry.
+//
+// Note the config gate is one field for both codecs: zstdEncoderLevel is
+// zstd-named but governs gzip too (gzip reuses the level via gzipLevelFor),
+// so the set is all-or-nothing today.
+func (h *HttpServer) producibleResponseEncodings() []string {
+	if h.zstdEncoderLevel <= 0 {
+		return nil
+	}
+	return supportedEncodings
+}
+
+// SetCompressionLevel overrides the compression level for response bodies.
+// The codec is chosen per request from the client's stated preference order
+// across X-VGI-Accept-Encoding and Accept-Encoding, intersected with the
+// server's supported set (see chooseResponseEncoding). Levels: zstd 1–11,
+// gzip 1–9 (gzip reuses this level, clamped by gzipLevelFor).
+//
+// Calling this at all is optional: a server starts at
+// [DefaultCompressionLevel] with compression already on. Pass 0 to turn
+// compression off entirely — which also empties the advertised codec set,
+// since the level gates both codecs.
 func (h *HttpServer) SetCompressionLevel(level int) error {
 	if level <= 0 {
-		h.zstdEncoderLevel = 0
+		h.applyCompressionLevel(0)
 		return nil
 	}
 	// Validate the level early by attempting a probe encoder. The probe is
@@ -48,7 +117,7 @@ func (h *HttpServer) SetCompressionLevel(level int) error {
 		return fmt.Errorf("vgirpc: failed to create zstd encoder: %w", err)
 	}
 	_ = probe.Close()
-	h.zstdEncoderLevel = level
+	h.applyCompressionLevel(level)
 	return nil
 }
 
@@ -129,11 +198,13 @@ func DecodeContentEncoding(data []byte, contentEncoding string, maxOutputSize in
 	return result, nil
 }
 
-// parseAcceptEncoding returns the codec tokens from an Accept-Encoding
-// header in the client's stated preference order. Tokens are lowercased,
-// trimmed, and ;q=<weight> suffixes stripped (weight ordering is not
-// honoured — clients that care about ordering should list preferred
-// codecs first).
+// parseAcceptEncoding returns the codec tokens from an Accept-Encoding-style
+// header — either Accept-Encoding or X-VGI-Accept-Encoding — in the client's
+// stated preference order. Tokens are lowercased, trimmed, de-duplicated
+// (first occurrence wins), and ;q=<weight> suffixes stripped. Weights are
+// parsed off and ignored, never honoured as ordering: clients state their
+// preference by listing preferred codecs first. Tokens this server does not
+// know are kept here and filtered by the caller's producibility check.
 func parseAcceptEncoding(header string) []string {
 	if header == "" {
 		return nil
@@ -158,34 +229,103 @@ func parseAcceptEncoding(header string) []string {
 	return out
 }
 
-// chooseResponseEncoding picks a codec from the client's accept list
-// intersected with the server's supported set. Returns "" when there's
-// no overlap (caller writes identity). zstd is preferred over gzip when
-// both are accepted; the supportedEncodings preference order wins.
-func chooseResponseEncoding(accept string) string {
-	tokens := parseAcceptEncoding(accept)
-	if len(tokens) == 0 {
-		return ""
+// chooseResponseEncoding picks the response codec from the two accept
+// headers a VGI client may send: X-VGI-Accept-Encoding (custom) and the
+// standard Accept-Encoding. It returns the chosen codec ("" for identity)
+// and whether the choice came only from the custom header.
+//
+// The client is authoritative: the merged list is walked in the client's
+// stated order — the whole custom header first, then anything the standard
+// header adds — and the first codec this server can produce wins. The
+// server's own supportedEncodings order is not consulted for the pick.
+//
+// Two reasons the custom header leads. First, an HTTP stack often injects
+// its own Accept-Encoding over the caller's head: cpp-httplib (the DuckDB
+// engine's client) sends "deflate, gzip, br, zstd", listing gzip before the
+// zstd that VGI actually wants, and gzip dominates large Arrow bodies.
+// Second — and why ignoring the custom header was a latent bug here rather
+// than merely a preference question — browser fetch() cannot set
+// Accept-Encoding at all: it is a forbidden header name. A WASM/browser
+// client can *only* state its codec preference through X-VGI-Accept-Encoding,
+// so a server that reads just the standard header ships every browser
+// response uncompressed.
+//
+// used_custom (the second return) is true only when the winner was offered
+// on the custom header and not on the standard one. That client's fetch or
+// proxy layer would auto-decode (or mangle) a standard Content-Encoding it
+// never asked for, so the caller must stamp X-VGI-Content-Encoding instead.
+//
+// "identity" is a codec like any other in the walk, except that every server
+// can produce it: reaching it before a producible compressed codec ends the
+// search with "" — send the body as-is, stamping no encoding header at all.
+// That is how a client explicitly opts out of response compression.
+//
+// producible is the server's codec set from producibleResponseEncodings;
+// an empty set can still only yield "" (identity), never a codec.
+func chooseResponseEncoding(custom, standard string, producible []string) (string, bool) {
+	customTokens := parseAcceptEncoding(custom)
+	standardTokens := parseAcceptEncoding(standard)
+	if len(customTokens) == 0 && len(standardTokens) == 0 {
+		return "", false
 	}
-	clientSet := make(map[string]struct{}, len(tokens))
-	for _, t := range tokens {
-		clientSet[t] = struct{}{}
+
+	inCustom := make(map[string]struct{}, len(customTokens))
+	for _, t := range customTokens {
+		inCustom[t] = struct{}{}
 	}
-	for _, enc := range supportedEncodings {
-		if _, ok := clientSet[enc]; ok {
-			return enc
+	inStandard := make(map[string]struct{}, len(standardTokens))
+	for _, t := range standardTokens {
+		inStandard[t] = struct{}{}
+	}
+
+	merged := make([]string, 0, len(customTokens)+len(standardTokens))
+	merged = append(merged, customTokens...)
+	for _, t := range standardTokens {
+		if _, dup := inCustom[t]; !dup {
+			merged = append(merged, t)
 		}
 	}
-	return ""
+
+	for _, enc := range merged {
+		if enc == identityEncoding {
+			// Explicitly requested: stop here rather than falling through
+			// to a compressed codec listed after it.
+			return "", false
+		}
+		if !containsEncoding(producible, enc) {
+			continue
+		}
+		_, viaCustom := inCustom[enc]
+		_, viaStandard := inStandard[enc]
+		return enc, viaCustom && !viaStandard
+	}
+	return "", false
 }
 
-// when the response has an Arrow content type.
+// containsEncoding reports membership in an ordered codec list.
+func containsEncoding(list []string, enc string) bool {
+	for _, s := range list {
+		if s == enc {
+			return true
+		}
+	}
+	return false
+}
+
+// compressResponseWriter buffers a handler's response and, in finish,
+// compresses it with the negotiated codec — but only when the response has
+// an Arrow content type. HTML pages and error bodies pass through
+// uncompressed regardless of what was negotiated.
 type compressResponseWriter struct {
 	http.ResponseWriter
 	encoderLevel int
 	encoding     string // "zstd", "gzip", or "" (identity)
-	buf          bytes.Buffer
-	statusCode   int
+	// useCustomHeader stamps X-VGI-Content-Encoding instead of
+	// Content-Encoding, for a client that could only state its codec
+	// preference on X-VGI-Accept-Encoding (see chooseResponseEncoding).
+	useCustomHeader bool
+	buf             bytes.Buffer
+	statusCode      int
 }
 
 func (cw *compressResponseWriter) WriteHeader(code int) {
@@ -219,7 +359,11 @@ func (cw *compressResponseWriter) finish() {
 		}
 		return
 	}
-	cw.ResponseWriter.Header().Set("Content-Encoding", cw.encoding)
+	encodingHeader := contentEncodingHeader
+	if cw.useCustomHeader {
+		encodingHeader = customContentEncodingHeader
+	}
+	cw.ResponseWriter.Header().Set(encodingHeader, cw.encoding)
 	cw.ResponseWriter.WriteHeader(cw.statusCode)
 	writer, err := newCompressWriter(cw.encoding, cw.ResponseWriter, cw.encoderLevel)
 	if err != nil {

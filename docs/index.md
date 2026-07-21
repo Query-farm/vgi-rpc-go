@@ -30,7 +30,7 @@ Define RPC methods with typed Go structs annotated with `vgirpc` struct tags. Th
 - **Stream headers** for metadata before the first data batch
 - **Client-directed logging** at configurable levels
 - **`context.Context` support** for cancellation and deadlines
-- **HTTP transport** with signed state tokens, zstd/gzip request decompression, and optional response compression
+- **HTTP transport** with signed state tokens, zstd/gzip request decompression, and negotiated response compression (on by default at zstd level 1)
 - **ArrowSerializable** interface for complex nested types
 - **OpenTelemetry support** via optional `vgirpc/otel` module (tracing + metrics)
 

@@ -7,7 +7,8 @@ All common tasks are available via `make`:
 ```bash
 make build     # build all packages (root + otel, sentry, jwtauth, s3, gcs submodules)
 make lint      # go build + go vet + staticcheck (root + otel, sentry, jwtauth)
-make test      # build conformance worker, run Python conformance tests
+make go-test   # Go unit tests (language-local only — see Testing Policy)
+make test      # go-test, then build conformance worker + run Python conformance tests
 make coverage  # run tests with Go coverage instrumentation
 ```
 
@@ -38,9 +39,25 @@ PYTHON=/path/to/python make test
 
 ## Testing Policy
 
-Do not add Go unit tests (`_test.go` files) to this module. The canonical test suite lives in the `vgi-rpc` PyPI package (`vgi_rpc.conformance._pytest_suite`). All correctness validation is done through the conformance test harness (`make test`).
+**Cross-language behaviour belongs in the shared conformance suite; Go tests cover what that suite cannot reach.**
 
-**Exception — benchmarks.** `vgirpc/bench_test.go` and `vgirpc/bench_http_test.go` hold `Benchmark*` functions only, no `Test*` correctness tests. Go benchmarks can only live in `_test.go` files, and the Python harness cannot report `B/op` / `allocs/op`. Run them with:
+The canonical correctness suite is the cross-language one in the `vgi-rpc` PyPI package (`vgi_rpc.conformance._pytest_suite`), run by `make test`. It is canonical for a reason: it drives *this* worker and the Python, Java, TypeScript and Rust ones from one set of assertions, so the ports cannot silently drift. Anything observable on the wire — dispatch semantics, framing, headers, error mapping, stream and transport behaviour — is validated there, and a Go-local test asserting the same thing is worse than useless: it passes while this port drifts away from the others.
+
+So: **if a behaviour is reachable through RPC dispatch, test it in the conformance suite, not here.** When the suite can't reach it yet, extend the worker (`conformance/cmd/vgi-rpc-conformance-go`) so it can — `--http-pkce` was added exactly that way.
+
+Go `_test.go` files are appropriate for the things a subprocess-driven, dispatch-only harness structurally cannot touch:
+
+- **Library entry points for intermediaries** — `DecodeContentEncoding`, `WriteRequest` / `ReadRequest`, `FindStateToken`, `ReadUnaryResult`. These are called by proxies and gateways, never by a dispatching server, so no conformance run exercises them.
+- **Client-side helpers** — the harness drives a *server* worker; `FetchOAuthResourceMetadata` and friends have no server surface at all.
+- **Unexported internals** — `isExternalLocationBatch`, `maybeExternalizeBatch`, `resolveExternalLocation`, `buildHTTPCookies`. Reachable only in-package.
+- **Pure language-local functions** — header/token parsing, codec negotiation, cookie construction, URL derivation.
+- **Go-API contract guards** — "this symbol is still exported with this value" (`vgirpc/http_upload_url_test.go`). The *value* is cross-language; "is it exported from the Go package" is not.
+- **Concurrency and allocation properties** — races, `sync.Once` init, pooling. `make race` covers the conformance workload; targeted races need a Go test.
+- **Benchmarks.** `vgirpc/bench_test.go` and `vgirpc/bench_http_test.go` hold `Benchmark*` functions only, no `Test*`. Go benchmarks can only live in `_test.go` files, and the Python harness cannot report `B/op` / `allocs/op`.
+
+A Go test that ports one of the *Python package's own unit tests* (`tests/test_wire.py`) is in scope. One that duplicates the *conformance* suite is not — delete it and rely on `make test`.
+
+Run them with `make go-test` (also run by `make test` and by CI's lint job). Benchmarks:
 
 ```bash
 go test -run XXX -bench . -benchmem -count=6 ./vgirpc/

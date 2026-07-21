@@ -22,9 +22,35 @@ All request and response bodies use `Content-Type: application/vnd.apache.arrow.
 
 ## Request Compression
 
-The server transparently decompresses request bodies sent with `Content-Encoding: zstd` or `gzip`, and advertises both via `VGI-Supported-Encodings`. The Python vgi-rpc client compresses by default (level 3), picking zstd or gzip depending on whether `zstandard` is installed, so this is handled automatically.
+The server transparently decompresses request bodies sent with `Content-Encoding: zstd` or `gzip`. The Python vgi-rpc client compresses by default (level 3), picking zstd or gzip depending on whether `zstandard` is installed, so this is handled automatically.
 
-Responses can be compressed too — call `SetCompressionLevel` on the `HttpServer`; the codec is chosen per request from `Accept-Encoding`.
+## Response Compression
+
+**Response compression is on by default, at zstd level 1.** Nothing needs to be called to get it; `SetCompressionLevel` on the `HttpServer` only changes the level, and `SetCompressionLevel(0)` turns compression off.
+
+Level 1 rather than the more common level 3, and that is not a size/speed tradeoff: measured on an 8.41 MB Arrow response body, level 1 was **4.7× faster than level 3 and produced a smaller body**. It wins on both axes, so there is nothing to give up. Raise it only if a measurement on your own payloads says so.
+
+The codec is negotiated per request from the client's stated preference order, reading `X-VGI-Accept-Encoding` first and then anything `Accept-Encoding` adds; the first codec the server can produce wins. VGI's own custom header leads because HTTP stacks routinely inject their own `Accept-Encoding` (cpp-httplib, the DuckDB engine's client, sends `deflate, gzip, br, zstd`), and because browser `fetch()` cannot set `Accept-Encoding` at all — it is a forbidden header name, so a WASM/browser client has no other way to ask for a codec.
+
+`identity` is a recognised token in either header: list it ahead of the compressed codecs to explicitly ask for an uncompressed response (useful for benchmarking or for a proxy that must see the raw body). q-values are parsed off and ignored — order alone decides, so `identity;q=0` still opts out.
+
+Which response header carries the result:
+
+| Outcome | Response header |
+|---|---|
+| Codec offered on both accept headers, or on `Accept-Encoding` only | `Content-Encoding: <codec>` |
+| Codec offered *only* on `X-VGI-Accept-Encoding` | `X-VGI-Content-Encoding: <codec>` |
+| `identity` won, or no producible codec was offered | *(none — the body is uncompressed)* |
+
+The custom response header exists for the same reason as the custom request header: a client that had to ask via `X-VGI-Accept-Encoding` is one whose fetch or proxy layer would auto-decode or mangle a standard `Content-Encoding`, so the response must not claim one.
+
+## Capability Advertisement
+
+`VGI-Supported-Encodings` lists the codecs the server can do in **both** directions — decode on requests and produce on responses — in server-preference order, excluding `identity`. It is emitted on every response, so `OPTIONS /health` works as a discovery probe.
+
+The header is always present, and an **empty value is meaningful**: it means "this server speaks no compression", which is distinct from an absent header (a legacy server, which clients read as zstd-capable). A stock server advertises `VGI-Supported-Encodings: zstd, gzip`, because compression is on by default; only an explicit `SetCompressionLevel(0)` produces the present-but-empty value.
+
+Note that one level gates both codecs: `SetCompressionLevel` is zstd-named but gzip reuses the same level (clamped into gzip's 1–9 range), so the producible set is all-or-nothing.
 
 ## State Tokens
 
