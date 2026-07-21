@@ -82,6 +82,21 @@ def conformance_http_port(go_http_port: int) -> int:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_no_compression_port() -> Iterator[int]:
+    """Go HTTP worker with response compression disabled.
+
+    Backs the shared ``test_empty_advertisement_means_never_compressed``
+    case.  It needs its own server because the state under test is a
+    *server configuration* -- "I can produce no codecs" -- which no client
+    request can induce.  ``identity`` covers the client-side ability to
+    demand an uncompressed body; only a server booted this way emits the
+    present-but-empty ``VGI-Supported-Encodings`` that distinguishes
+    "speaks no compression" from an absent header on a legacy server.
+    """
+    yield from _start_http_worker("--http", "--no-compression")
+
+
+@pytest.fixture(scope="session")
 def conformance_http_auth_port() -> Iterator[int]:
     """Start a Go HTTP server that rejects every RPC call with 401."""
     yield from _start_http_worker("--http-auth")

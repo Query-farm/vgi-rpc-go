@@ -259,7 +259,19 @@ func main() {
 			httpServer.Handle("POST /__test_drain__", testDrainHandler(drain, true))
 			httpServer.Handle("DELETE /__test_drain__", testDrainHandler(drain, false))
 		}
-		if err := httpServer.SetCompressionLevel(3); err != nil {
+		// --no-compression backs the shared conformance case
+		// test_empty_advertisement_means_never_compressed. The state under
+		// test is a *server configuration* — "I can produce no codecs" —
+		// which no client request can induce (identity is the client-side
+		// opt-out and is covered separately), and it is the only way to put
+		// a present-but-empty VGI-Supported-Encodings on the wire. Level 0
+		// is Go's opt-out; it must override the level set below, so it is
+		// resolved here rather than in a second call.
+		compressionLevel := 3
+		if hasFlag(os.Args, "--no-compression") {
+			compressionLevel = 0
+		}
+		if err := httpServer.SetCompressionLevel(compressionLevel); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to set compression level: %v\n", err)
 			os.Exit(1)
 		}
@@ -390,6 +402,19 @@ func findFlagValue(args []string, name string) string {
 		}
 	}
 	return ""
+}
+
+// hasFlag reports whether a valueless flag appears anywhere in args. The
+// value-taking flags are parsed by a loop that stops one short of the end
+// (it always reads args[i+1]), so a boolean flag has to be scanned for
+// separately to work in the final position.
+func hasFlag(args []string, name string) bool {
+	for _, a := range args {
+		if a == name {
+			return true
+		}
+	}
+	return false
 }
 
 // testDrainHandler returns an http.HandlerFunc that flips the sticky
