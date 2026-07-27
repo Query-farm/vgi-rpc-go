@@ -103,6 +103,38 @@ def conformance_http_auth_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def proof_worker_factory() -> Iterator[Callable[..., Any]]:
+    """Spawn Go workers gated on proxy proof, for the shared TestProxyProof group.
+
+    The shared suite owns the matrix; this only has to know how to start one
+    worker for a given configuration.
+    """
+    from vgi_rpc.conformance.proof_harness import ProofWorker, ProofWorkerConfig
+
+    @contextlib.contextmanager
+    def spawn(config: ProofWorkerConfig) -> Iterator[ProofWorker]:
+        args = [
+            "--http-proof",
+            "--proof-mode", config.mode,
+            "--proof-origin-id", config.origin_id,
+            "--proof-secrets", config.secrets,
+            "--proof-skew", str(config.skew_seconds),
+        ]
+        if not config.replay_cache:
+            args.append("--proof-no-replay-cache")
+        gen = _start_http_worker(*args)
+        port = next(gen)
+        try:
+            # The Go worker mounts proof mode under /vgi, mirroring its auth mode.
+            yield ProofWorker(port=port, prefix="/vgi", config=config)
+        finally:
+            with contextlib.suppress(StopIteration):
+                next(gen)
+
+    yield spawn
+
+
+@pytest.fixture(scope="session")
 def conformance_fake_storage() -> Iterator[str]:
     """Run the Python fake-storage WSGI app in a background thread."""
     from vgi_rpc.conformance.fake_storage import serve_in_thread

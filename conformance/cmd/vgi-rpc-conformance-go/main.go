@@ -59,7 +59,8 @@ func main() {
 	zstdStorageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-zstd-storage"
 	pkceMode := len(os.Args) > 1 && os.Args[1] == "--http-pkce"
 	strictMode := len(os.Args) > 1 && os.Args[1] == "--http-strict"
-	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode || storageMode || zstdStorageMode || pkceMode || strictMode {
+	proofMode := len(os.Args) > 1 && os.Args[1] == "--http-proof"
+	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode || storageMode || zstdStorageMode || pkceMode || strictMode || proofMode {
 		// Parse optional flags that may follow positional args:
 		//   --otel-export <path>
 		//   --externalize-threshold <bytes>   (overrides default 8 KiB in storage modes)
@@ -203,6 +204,51 @@ func main() {
 			httpServer.SetAuthenticate(func(*http.Request) (*vgirpc.AuthContext, error) {
 				return nil, &vgirpc.RpcError{Type: "ValueError", Message: "auth required"}
 			})
+		}
+		if proofMode {
+			// Mirrors the reference worker's CLI so the shared TestProxyProof
+			// group can drive every port with one fixture implementation.
+			httpServer.SetPrefix("/vgi")
+			secrets, err := vgirpc.ParseProofSecrets(findFlagValue(os.Args, "--proof-secrets"))
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid --proof-secrets: %v\n", err)
+				os.Exit(1)
+			}
+			skew := 30
+			if v := findFlagValue(os.Args, "--proof-skew"); v != "" {
+				parsed, perr := strconv.Atoi(v)
+				if perr != nil {
+					fmt.Fprintf(os.Stderr, "invalid --proof-skew: %v\n", perr)
+					os.Exit(1)
+				}
+				skew = parsed
+			}
+			mode := vgirpc.ProofMode(findFlagValue(os.Args, "--proof-mode"))
+			if mode == "" {
+				mode = vgirpc.ProofModeRequire
+			}
+			originID := findFlagValue(os.Args, "--proof-origin-id")
+			if originID == "" {
+				originID = "conformance-origin"
+			}
+			disableReplay := false
+			for _, a := range os.Args {
+				if a == "--proof-no-replay-cache" {
+					disableReplay = true
+				}
+			}
+			gate, gerr := vgirpc.ProofAuthenticate(vgirpc.ProofConfig{
+				Mode:               mode,
+				OriginID:           originID,
+				Secrets:            secrets,
+				SkewSeconds:        skew,
+				DisableReplayCache: disableReplay,
+			}, nil)
+			if gerr != nil {
+				fmt.Fprintf(os.Stderr, "invalid proof config: %v\n", gerr)
+				os.Exit(1)
+			}
+			httpServer.SetAuthenticate(gate)
 		}
 		if pkceMode {
 			idpURL := findFlagValue(os.Args, "--idp-url")

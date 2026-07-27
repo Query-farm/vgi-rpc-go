@@ -157,7 +157,48 @@ staticAuth := vgirpc.BearerAuthenticateStatic(map[string]*vgirpc.AuthContext{
 httpServer.SetAuthenticate(vgirpc.ChainAuthenticate(jwtAuth, staticAuth))
 ```
 
-### Mutual TLS (mTLS) Authentication
+### Proxy Proof
+
+Proxy proof lets a worker refuse any request that did not arrive through a trusted proxy. The
+proxy mints a per-request HMAC-SHA256 over a timestamp, a fresh nonce and the worker's own
+identifier, keyed by a secret shared only with that worker.
+
+Unlike a forwarded assertion about what happened at a TLS terminator, a proof cannot be produced
+by someone who merely reaches the worker directly — without the secret there is nothing to replay.
+
+```go
+secrets, err := vgirpc.ParseProofSecrets("prod-use1:" + hexSecret)
+if err != nil {
+    log.Fatal(err)
+}
+gate, err := vgirpc.ProofAuthenticate(vgirpc.ProofConfig{
+    Mode:        vgirpc.ProofModeRequire,
+    OriginID:    "worker-a",
+    Secrets:     secrets,
+    SkewSeconds: 30,
+}, existingAuthenticator) // may be nil for proof-only
+if err != nil {
+    log.Fatal(err)
+}
+httpServer.SetAuthenticate(gate)
+```
+
+> **Warning:** this composes as an **AND**, not an alternative. Do **not** pass the gate to
+> [`ChainAuthenticate`] — chaining is first-success-wins, so any later credential would bypass it.
+> Pass your existing authenticator as `inner` instead.
+
+`kid` doubles as the calling proxy's label, so `AuthContext.Claims["vgi_proxy_proof"]["proxy"]`
+records *which* proxy served each request. The label comes from the secret that verified, never
+from the transmitted field — a caller can claim any `kid` but cannot produce its MAC.
+
+Modes: `ProofModeOff` installs no gate at all, `ProofModeAllow` verifies and records without
+denying (the rollout lever), `ProofModeRequire` rejects. `OPTIONS`, `/.well-known/` and
+`{prefix}/health` stay reachable without a proof in every mode.
+
+The normative cross-language contract is
+[`docs/proxy-proof-spec.md`](https://github.com/Query-farm/vgi-rpc) in the vgi-rpc repository.
+
+## Mutual TLS (mTLS) Authentication
 
 vgi-rpc-go supports mTLS authentication for services behind TLS-terminating proxies. The proxy verifies client certificates and forwards certificate information as HTTP headers. vgi-rpc provides factories that extract identity from these headers.
 
