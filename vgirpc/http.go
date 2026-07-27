@@ -100,6 +100,11 @@ type HttpServer struct {
 	// runs in the serve goroutine rather than at construction time.
 	stickyRegistry    *sessionRegistry
 	stickyEchoHeaders map[string]string
+
+	// Advertise VGI-Proxy-Proof-Required. Operator-declared, not derived:
+	// the gate is an opaque AuthenticateFunc the server cannot introspect.
+	// See SetProxyProofRequired in proof.go.
+	proxyProofRequired bool
 }
 
 // NewHttpServer creates a new HTTP server wrapping an RPC server.
@@ -262,6 +267,11 @@ func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool)
 			w.Header().Set(maxUploadBytesHeader, strconv.FormatInt(h.maxUploadBytes, 10))
 		}
 	}
+	// Emitted only when the operator declared require mode — an absent
+	// header means "not enforcing", which is what a proxy needs to see.
+	if h.proxyProofRequired {
+		w.Header().Set(ProofRequiredHeader, "true")
+	}
 	h.addStickyCapabilityHeaders(w)
 	if isOptions {
 		w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", capabilityCacheMaxAge))
@@ -302,7 +312,12 @@ func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, r *http.Request, isOp
 			}
 		}
 		w.Header().Set("Access-Control-Allow-Headers", allowHeaders)
-		w.Header().Set("Access-Control-Expose-Headers", "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, "+maxResponseBytesHeader+", "+maxExternalizedResponseBytesHeader+", "+externalizationEnabledHeader+", "+supportedEncodingsHeader+", "+stickyEnabledHeader+", "+stickyDefaultTTLHeader+", "+stickyEchoHeadersHeader+", "+stickySessionHeader+", "+stickySessionCloseHeader)
+		expose := "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, " + maxResponseBytesHeader + ", " + maxExternalizedResponseBytesHeader + ", " + externalizationEnabledHeader + ", " + supportedEncodingsHeader + ", " + stickyEnabledHeader + ", " + stickyDefaultTTLHeader + ", " + stickyEchoHeadersHeader + ", " + stickySessionHeader + ", " + stickySessionCloseHeader
+		// Exposed only when actually emitted, mirroring the header itself.
+		if h.proxyProofRequired {
+			expose += ", " + ProofRequiredHeader
+		}
+		w.Header().Set("Access-Control-Expose-Headers", expose)
 		// Opt responses into cross-origin embedding so the service is usable
 		// from cross-origin-isolated pages (COEP: require-corp), e.g. browsers
 		// running multithreaded WASM (DuckDB-WASM) against this worker.

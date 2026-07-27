@@ -404,6 +404,20 @@ func ProofAuthenticate(cfg ProofConfig, inner AuthenticateFunc) (AuthenticateFun
 	}, nil
 }
 
+// SetProxyProofRequired advertises ProofRequiredHeader on every response, so
+// a proxy can tell it is minting proofs for a worker that actually checks
+// them — the misconfiguration that otherwise turns the feature into a no-op.
+//
+// Operator-declared rather than derived from the gate: ProofAuthenticate is
+// installed through SetAuthenticate as an opaque AuthenticateFunc, which the
+// server cannot introspect for its mode. Set it only for ProofModeRequire —
+// allow mode never denies, so it must not claim to.
+//
+// Advertisement only: it enables and enforces nothing.
+func (h *HttpServer) SetProxyProofRequired(required bool) {
+	h.proxyProofRequired = required
+}
+
 func verifyRequestProof(r *http.Request, cfg *ProofConfig, cache *nonceCache) (map[string]any, *ProofError) {
 	values := r.Header.Values(ProofHeader)
 	if len(values) == 0 || values[0] == "" {

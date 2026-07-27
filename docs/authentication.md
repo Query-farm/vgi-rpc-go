@@ -181,6 +181,7 @@ if err != nil {
     log.Fatal(err)
 }
 httpServer.SetAuthenticate(gate)
+httpServer.SetProxyProofRequired(true) // advertise the posture; see below
 ```
 
 > **Warning:** this composes as an **AND**, not an alternative. Do **not** pass the gate to
@@ -194,6 +195,15 @@ from the transmitted field — a caller can claim any `kid` but cannot produce i
 Modes: `ProofModeOff` installs no gate at all, `ProofModeAllow` verifies and records without
 denying (the rollout lever), `ProofModeRequire` rejects. `OPTIONS`, `/.well-known/` and
 `{prefix}/health` stay reachable without a proof in every mode.
+
+`SetProxyProofRequired(true)` advertises `VGI-Proxy-Proof-Required: true` as a capability header
+on every response (so `GET /health` is a discovery probe), and adds it to the CORS
+`Access-Control-Expose-Headers` list. It is how a proxy confirms it is minting proofs for a worker
+that actually checks them — otherwise a worker with the gate left off looks identical to one
+enforcing it, and the whole feature is a silent no-op. Set it only alongside `ProofModeRequire`:
+`allow` never denies, so it must not claim to. The header is **advertisement only** — the gate is
+installed through `SetAuthenticate` as an opaque callback the server cannot introspect, so the
+operator states the posture explicitly; setting it enables and enforces nothing.
 
 The normative cross-language contract is
 [`docs/proxy-proof-spec.md`](https://github.com/Query-farm/vgi-rpc) in the vgi-rpc repository.

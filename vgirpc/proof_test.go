@@ -7,6 +7,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -296,6 +297,49 @@ func TestProofAuthenticateModes(t *testing.T) {
 			t.Fatal("off mode should install no gate rather than a passing one")
 		}
 	})
+}
+
+// The capability header is what lets a proxy distinguish an enforcing worker
+// from one that silently ignores the proof — the misconfiguration that makes
+// the whole feature a no-op. Only require mode may claim it; allow never
+// denies, so advertising there would be a lie, and an unconditional emission
+// would pass the require case while failing this one.
+func TestProxyProofRequiredCapabilityHeader(t *testing.T) {
+	for _, tc := range []struct {
+		mode ProofMode
+		want string
+	}{
+		{ProofModeRequire, "true"},
+		{ProofModeAllow, ""},
+		{ProofModeOff, ""},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			h := newTestHttpServer(t)
+			h.SetCorsOrigins("*")
+			// Exactly the wiring the conformance worker performs.
+			h.SetProxyProofRequired(tc.mode == ProofModeRequire)
+			h.InitPages()
+
+			ts := httptest.NewServer(h)
+			defer ts.Close()
+
+			resp, err := http.Get(ts.URL + "/health")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = resp.Body.Close() }()
+
+			if got := resp.Header.Get(ProofRequiredHeader); got != tc.want {
+				t.Fatalf("%s: expected %s=%q, got %q", tc.mode, ProofRequiredHeader, tc.want, got)
+			}
+			// A header a browser client cannot read is not advertised.
+			exposed := strings.Contains(resp.Header.Get("Access-Control-Expose-Headers"), ProofRequiredHeader)
+			if exposed != (tc.want != "") {
+				t.Fatalf("%s: expected %s in Access-Control-Expose-Headers=%v, got %v",
+					tc.mode, ProofRequiredHeader, tc.want != "", exposed)
+			}
+		})
+	}
 }
 
 func TestParseProofSecrets(t *testing.T) {

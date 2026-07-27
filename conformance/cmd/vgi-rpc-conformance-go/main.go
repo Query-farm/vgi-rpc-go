@@ -249,6 +249,7 @@ func main() {
 				os.Exit(1)
 			}
 			httpServer.SetAuthenticate(gate)
+			httpServer.SetProxyProofRequired(mode == vgirpc.ProofModeRequire)
 		}
 		if pkceMode {
 			idpURL := findFlagValue(os.Args, "--idp-url")
