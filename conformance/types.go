@@ -414,7 +414,7 @@ var sessionCounterOutputSchema = arrow.NewSchema([]arrow.Field{
 }, nil)
 
 // sessionCounterExchangeInputSchema is the schema for
-// exchange_session_counter's input batches: a single ``by`` column
+// exchange_session_counter's input batches: a single “by“ column
 // whose values are summed into the bound _StickyCounter.
 var sessionCounterExchangeInputSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "by", Type: arrow.PrimitiveTypes.Int64},

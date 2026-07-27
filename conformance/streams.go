@@ -83,9 +83,9 @@ func (s *cancellableProducerState) OnCancel(_ context.Context, callCtx *vgirpc.C
 }
 
 // sessionCounterProducerState emits the sticky-session counter
-// ``count`` times. Each Produce call resolves the counter via
+// “count“ times. Each Produce call resolves the counter via
 // ctx.Session(), increments it by one, and emits a one-row batch with
-// the new value. Across HTTP turns ``Current`` rides in the
+// the new value. Across HTTP turns “Current“ rides in the
 // continuation token while ctx.Session is rebound by the sticky
 // middleware on every request — mirrors Python's
 // SessionCounterProducerState in vgi_rpc/conformance/_types.py.
@@ -111,7 +111,7 @@ func (s *sessionCounterProducerState) Produce(_ context.Context, out *vgirpc.Out
 }
 
 // sessionCounterExchangeState is an exchange stream that, for every
-// turn, sums the input ``by`` column into the bound _StickyCounter and
+// turn, sums the input “by“ column into the bound _StickyCounter and
 // emits the post-update value. Mirrors Python's
 // SessionCounterExchangeState.
 type sessionCounterExchangeState struct{}

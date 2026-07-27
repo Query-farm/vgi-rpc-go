@@ -280,4 +280,3 @@ func TestNewAuthenticateFunc_CustomPrincipalClaim(t *testing.T) {
 		t.Errorf("expected principal=user@example.com, got %s", auth.Principal)
 	}
 }
-

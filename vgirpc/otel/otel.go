@@ -105,10 +105,10 @@ func InstrumentServer(server *vgirpc.Server, cfg OtelConfig) {
 
 // otelHook implements vgirpc.DispatchHook with OpenTelemetry tracing and metrics.
 type otelHook struct {
-	cfg                OtelConfig
-	tracer             trace.Tracer
-	requestCounter     metric.Int64Counter
-	durationHistogram  metric.Float64Histogram
+	cfg               OtelConfig
+	tracer            trace.Tracer
+	requestCounter    metric.Int64Counter
+	durationHistogram metric.Float64Histogram
 }
 
 // spanToken is the HookToken returned by OnDispatchStart.

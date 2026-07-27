@@ -167,10 +167,10 @@ type dispatchHook struct {
 }
 
 type hookToken struct {
-	span        *sentry.Span // non-nil only when EnablePerformance
-	hub         *sentry.Hub
-	methodName  string
-	methodType  string
+	span       *sentry.Span // non-nil only when EnablePerformance
+	hub        *sentry.Hub
+	methodName string
+	methodType string
 }
 
 // OnDispatchStart attaches RPC scope, tags, and user info to the
