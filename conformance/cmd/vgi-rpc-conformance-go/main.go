@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Query-farm/vgi-rpc-go/conformance"
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
@@ -34,7 +36,15 @@ func main() {
 	server := vgirpc.NewServer()
 	server.SetDebugErrors(true)
 	server.SetServiceName("ConformanceService")
-	server.SetServerID("conformance-go")
+	// --server-id overrides the fixed default. TestSticky's wrong-worker case
+	// runs two workers that share one AEAD key, and asserts up front that they
+	// report distinct server_id — otherwise a token that "belongs to the other
+	// worker" would in fact belong to this one and the test would prove nothing.
+	serverID := "conformance-go"
+	if v := findFlagValue(os.Args, "--server-id"); v != "" {
+		serverID = v
+	}
+	server.SetServerID(serverID)
 	// Match Python ConformanceService.protocol_version. Requires
 	// vgi-rpc >= 0.18.0 on the client (sends the vgi_rpc.protocol_version
 	// request metadata key) — see ci.yml.
@@ -185,7 +195,25 @@ func main() {
 			})
 		}
 
-		httpServer := vgirpc.NewHttpServer(server)
+		// --token-key <hex> pins the AEAD key so two workers can open each
+		// other's session tokens. There is no post-construction setter, so the
+		// choice has to be made here.
+		var httpServer *vgirpc.HttpServer
+		if keyHex := findFlagValue(os.Args, "--token-key"); keyHex != "" {
+			key, err := hex.DecodeString(keyHex)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid --token-key (expected hex): %v\n", err)
+				os.Exit(1)
+			}
+			hs, kerr := vgirpc.NewHttpServerWithKey(server, key)
+			if kerr != nil {
+				fmt.Fprintf(os.Stderr, "invalid --token-key: %v\n", kerr)
+				os.Exit(1)
+			}
+			httpServer = hs
+		} else {
+			httpServer = vgirpc.NewHttpServer(server)
+		}
 		// In storage modes the same fake-storage instance also acts as
 		// the upload-URL provider so client-vended request externalization
 		// works end-to-end. The 4 KiB request cap is small enough that the
@@ -288,7 +316,39 @@ func main() {
 		// TestSticky conformance group runs against the Go worker via
 		// `conformance_http_port`. The default TTL (zero) falls back to
 		// 300 seconds matching Python's `sticky_default_ttl`.
-		httpServer.EnableSticky(0)
+		// --sticky-ttl <seconds> shortens it so the expiry conformance case has
+		// something it can outwait; the header advertises whole seconds, so the
+		// flag is an integer.
+		stickyTTL := time.Duration(0)
+		if v := findFlagValue(os.Args, "--sticky-ttl"); v != "" {
+			secs, terr := strconv.Atoi(v)
+			if terr != nil || secs <= 0 {
+				fmt.Fprintf(os.Stderr, "invalid --sticky-ttl (expected positive integer seconds): %q\n", v)
+				os.Exit(1)
+			}
+			stickyTTL = time.Duration(secs) * time.Second
+		}
+		httpServer.EnableSticky(stickyTTL)
+		// --sticky-auth resolves the principal named in X-Conformance-Principal
+		// so one worker is reachable as two identities, which is what the
+		// cross-principal replay case needs. Requests without the header stay
+		// anonymous rather than being rejected: the suite probes /health and the
+		// capability endpoint before it authenticates anything. Unlike
+		// --http-auth above, this does NOT move the prefix — the suite connects
+		// to this worker exactly as it connects to the plain one.
+		if hasFlag(os.Args, "--sticky-auth") {
+			httpServer.SetAuthenticate(func(r *http.Request) (*vgirpc.AuthContext, error) {
+				principal := r.Header.Get("X-Conformance-Principal")
+				if principal == "" {
+					return vgirpc.Anonymous(), nil
+				}
+				return &vgirpc.AuthContext{
+					Domain:        "conformance",
+					Authenticated: true,
+					Principal:     principal,
+				}, nil
+			})
+		}
 		// The conformance suite's test_echo_header_round_trip probes for
 		// a fixed marker echo header; advertise it under the same name
 		// as the Python worker (x-vgi-conformance-echo) so cross-language
