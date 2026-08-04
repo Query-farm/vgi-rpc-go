@@ -179,6 +179,14 @@ func main() {
 				os.Exit(1)
 			}
 		}
+		// At INFO the record carries no `request_data` at all, so every spec
+		// rule governing that field goes unexercised — the validator only
+		// checks it is well-formed *when present*. `vgi-rpc-test
+		// --require-request-data` turns that silence into a failure, and it
+		// needs a worker that can be asked for the payload.
+		if hasFlag(os.Args, "--access-log-debug") {
+			hook.SetDebug(true)
+		}
 		if hasFlag(os.Args, "--access-log-async") {
 			queueSize := 0
 			if raw := findFlagValue(os.Args, "--access-log-queue-size"); raw != "" {
