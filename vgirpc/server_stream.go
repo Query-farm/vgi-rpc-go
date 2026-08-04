@@ -340,7 +340,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				// Maybe externalize large data batches
 				dataBatch := ab.batch
 				if s.externalConfig != nil && dataBatch.NumRows() > 0 {
-					extBatch, _, extErr := MaybeExternalizeBatch(dataBatch, arrow.Metadata{}, s.externalConfig)
+					extBatch, _, extErr := maybeExternalizeBatchCtx(ctx, dataBatch, arrow.Metadata{}, s.externalConfig)
 					if extErr != nil {
 						slog.Error("failed to externalize stream batch", "err", extErr)
 					} else if extBatch != dataBatch {

@@ -101,7 +101,7 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 
 	// Maybe externalize large result batch
 	if s.externalConfig != nil {
-		extBatch, extMeta, extErr := MaybeExternalizeBatch(resultBatch, arrow.Metadata{}, s.externalConfig)
+		extBatch, extMeta, extErr := maybeExternalizeBatchCtx(ctx, resultBatch, arrow.Metadata{}, s.externalConfig)
 		if extErr != nil {
 			slog.Error("failed to externalize result batch", "err", extErr)
 		} else if extBatch != resultBatch {

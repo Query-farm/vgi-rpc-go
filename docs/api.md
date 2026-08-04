@@ -287,7 +287,9 @@ const (
 | `WriteUnaryResponse(w, schema, logs, result, serverID, requestID)` | Write a unary response |
 | `WriteErrorResponse(w, schema, err, serverID, requestID)` | Write an error response (nil schema = empty) |
 | `WriteVoidResponse(w, logs, serverID, requestID)` | Write a void response |
-| `FindStateToken(data) []byte` | Extract the stream-state continuation token (intermediaries) |
+| `FindStateToken(data) []byte` | Extract the stream-state cursor token (intermediaries) |
+| `FindCallStateToken(data) []byte` | Extract the stream's call token, if the server split its state |
+| `FindStreamTokens(data) (state, callState []byte)` | Extract both continuation tokens in one walk — what forwarding a continuation needs |
 | `FindProtocolVersion(data) string` | Recover the stamped application protocol_version (intermediaries) |
 | `ReadUnaryResult(data) (schema, result, ok)` | Unwrap a unary response envelope without a typed decode |
 | `WriteUnaryResult(w, envelopeSchema, resultBytes)` | Rewrap raw result bytes as a unary response |

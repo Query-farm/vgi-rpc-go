@@ -29,7 +29,8 @@ else
 PYTHON_BOOTSTRAP :=
 endif
 
-.PHONY: build lint go-test test coverage leakcheck race docs docs-verify venv clean
+.PHONY: build lint go-test test coverage leakcheck race docs docs-verify venv clean \
+	conformance-worker conformance-worker-cover benchmark-worker
 
 # --- Build -----------------------------------------------------------------
 
@@ -41,6 +42,10 @@ build:
 	cd vgirpc/s3 && go build ./...
 	cd vgirpc/gcs && go build ./...
 
+# PHONY on purpose: the rule names a file but lists no prerequisites, so
+# without this make treats an existing binary as up to date forever and
+# silently runs the conformance suite against a stale worker. Let `go build`
+# decide what needs recompiling — it is already incremental.
 conformance-worker:
 	go build -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
 

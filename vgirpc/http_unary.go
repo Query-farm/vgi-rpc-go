@@ -269,7 +269,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 			h.writeUnaryCapError(w, info, req.RequestID, logs, overshoot)
 			return
 		}
-		extBatch, extMeta, extErr := MaybeExternalizeBatch(resultBatch, arrow.Metadata{}, h.server.externalConfig)
+		extBatch, extMeta, extErr := maybeExternalizeBatchCtx(ctx, resultBatch, arrow.Metadata{}, h.server.externalConfig)
 		if extErr != nil {
 			slog.Error("failed to externalize unary result", "method", info.Name, "err", extErr)
 		} else if extBatch != resultBatch {

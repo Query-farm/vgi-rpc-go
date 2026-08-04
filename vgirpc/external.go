@@ -215,7 +215,21 @@ func serializeBatchAsIPC(batch arrow.RecordBatch, meta *arrow.Metadata) ([]byte,
 // MaybeExternalizeBatch checks if a batch exceeds the threshold and uploads it
 // to external storage if configured. Returns the original batch unchanged if
 // below threshold or no storage configured.
+//
+// Prefer [maybeExternalizeBatchCtx] inside the framework: the uploaded size is
+// attributed to the call in flight only when a context is in hand.
 func MaybeExternalizeBatch(
+	batch arrow.RecordBatch,
+	meta arrow.Metadata,
+	config *ExternalLocationConfig,
+) (arrow.RecordBatch, arrow.Metadata, error) {
+	return maybeExternalizeBatchCtx(context.Background(), batch, meta, config)
+}
+
+// maybeExternalizeBatchCtx is [MaybeExternalizeBatch] with the call's context,
+// so uploads can be charged to the access log's externalized_bytes.
+func maybeExternalizeBatchCtx(
+	ctx context.Context,
 	batch arrow.RecordBatch,
 	meta arrow.Metadata,
 	config *ExternalLocationConfig,
@@ -260,6 +274,14 @@ func MaybeExternalizeBatch(
 		encoder.Close()
 		contentEncoding = "zstd"
 	}
+
+	// Counted here rather than at the call sites: this is the one function
+	// every externalised payload passes through, so the total cannot drift
+	// from reality when someone adds a new upload path. Externalised bytes
+	// never appear in the HTTP body — only a pointer batch does — so they
+	// are invisible to transport-level accounting and are frequently the
+	// largest of the three byte figures.
+	countExternalizedBytes(ctx, int64(len(ipcData)))
 
 	// Upload
 	locationURL, err := config.Storage.Upload(ipcData, batch.Schema(), contentEncoding)

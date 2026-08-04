@@ -33,6 +33,21 @@ const (
 	// exchange streams. The "#b64" suffix signals that the value is
 	// base64-encoded binary data, ensuring UTF-8 validity in Arrow IPC metadata.
 	MetaStreamState = "vgi_rpc.stream_state#b64"
+	// MetaCallState carries a stream's *call state* — the half of its state
+	// that is fixed for the life of the call (the init request, the resolved
+	// schemas). The wire protocol requires a server to split its stream state
+	// this way: the call token is minted once on /init and never re-issued,
+	// and only [MetaStreamState], the cursor, comes back per turn. Splitting
+	// is what keeps continuation payloads small and lets each half be cached
+	// and compressed on its own lifetime.
+	//
+	// NOTE: this port's HTTP server does not yet split — it packs everything
+	// into the cursor and never emits this key, which the shared conformance
+	// group TestCallTokenSplit reports as non-conformant. The intermediary
+	// helpers below already handle both tokens, so a proxy forwarding a
+	// continuation to a conformant server (the Python reference) carries the
+	// call token correctly today. See [FindStreamTokens].
+	MetaCallState = "vgi_rpc.call_state#b64"
 	// MetaCancel signals client-initiated cancellation of a streaming RPC.
 	// When present on an input batch the server ends the stream cleanly
 	// without invoking Produce/Exchange (optionally running StreamCanceller.OnCancel).

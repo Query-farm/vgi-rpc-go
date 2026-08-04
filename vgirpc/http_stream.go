@@ -64,6 +64,15 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	// Mint a stable stream_id at /init; round-trip it through the state
 	// token so every continuation log record reports the same value.
 	streamID := RandomStreamID()
+	// Mint the stream's call id and its call token here, once. Everything the
+	// call token carries is fixed for the life of the stream, so this is the
+	// only point at which any of it is serialized or sealed; continuations
+	// echo the token back and resolve it from cache.
+	callID, callIDErr := newCallID()
+	if callIDErr != nil {
+		h.writeHttpError(w, http.StatusInternalServerError, callIDErr, nil)
+		return
+	}
 
 	// Capture self-contained IPC bytes of the request batch for observability
 	// hooks. This re-encodes the whole request payload, so only pay for it when
@@ -215,10 +224,13 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		handlerErr = err
 		if err == nil && !finished {
 			// Batch limit reached — append continuation token
-			token, tokenErr := h.packStateToken(state, outputSchema, auth, streamID)
+			token, tokenErr := h.packCursorToken(callID, state, auth)
+			callToken, callErr := h.packCallToken(callID, outputSchema, auth, streamID)
 			if tokenErr != nil {
 				handlerErr = tokenErr
-			} else if werr := writeStateTokenBatch(writer, outputSchema, token); werr != nil {
+			} else if callErr != nil {
+				handlerErr = callErr
+			} else if werr := writeStateTokenBatch(writer, outputSchema, token, callToken); werr != nil {
 				h.logIPCWriteErr("state-token-batch", info.Name, werr)
 				handlerErr = werr
 			}
@@ -231,7 +243,12 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Exchange init — return state token (carry schema for dynamic methods)
-		token, err := h.packStateToken(state, outputSchema, auth, streamID)
+		token, err := h.packCursorToken(callID, state, auth)
+		if err != nil {
+			h.writeHttpError(w, http.StatusInternalServerError, err, nil)
+			return
+		}
+		callToken, err := h.packCallToken(callID, outputSchema, auth, streamID)
 		if err != nil {
 			h.writeHttpError(w, http.StatusInternalServerError, err, nil)
 			return
@@ -246,7 +263,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Write zero-row batch with state token
-		if werr := writeStateTokenBatch(writer, outputSchema, token); werr != nil {
+		if werr := writeStateTokenBatch(writer, outputSchema, token, callToken); werr != nil {
 			h.logIPCWriteErr("state-token-batch", info.Name, werr)
 			handlerErr = werr
 		}
@@ -311,6 +328,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	// exchange handler (parity with the pipe transports; the cast below
 	// drops it from the batch).
 	var tokenBytes []byte
+	var callTokenBytes []byte
 	var cancelled bool
 	var inputMeta arrow.Metadata
 	if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
@@ -318,6 +336,9 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		inputMeta = meta
 		if v, found := meta.GetValue(MetaStreamState); found {
 			tokenBytes = []byte(v)
+		}
+		if v, found := meta.GetValue(MetaCallState); found {
+			callTokenBytes = []byte(v)
 		}
 		if _, found := meta.GetValue(MetaCancel); found {
 			cancelled = true
@@ -342,7 +363,16 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	tokenData, err := h.unpackStateToken(tokenBytes, auth)
+	// Open the cursor FIRST: its AEAD tag covers the call id and its AAD
+	// covers the caller, so the id is authenticated before it is used to
+	// resolve anything. See resolveCall for why that ordering is the whole
+	// security argument for the cache.
+	tokenData, err := h.openCursorToken(tokenBytes, auth)
+	if err != nil {
+		h.writeHttpError(w, http.StatusBadRequest, err, nil)
+		return
+	}
+	call, err := h.resolveCall(tokenData, callTokenBytes, auth)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -361,7 +391,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	stats := &CallStatistics{}
 
 	transportMeta := buildHTTPTransportMeta(nil, r)
-	streamID := tokenData.StreamID
+	streamID := call.StreamID
 	if streamID == "" {
 		// Tokens minted before the stream_id field was added — mint fresh.
 		streamID = RandomStreamID()
@@ -414,9 +444,9 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	// For dynamic methods, OutputSchema is not set at registration time —
 	// recover it from the serialized schema stored in the state token.
 	var outputSchema *arrow.Schema
-	if info.Type == MethodDynamic && len(tokenData.SchemaIPC) > 0 {
+	if info.Type == MethodDynamic && len(call.SchemaIPC) > 0 {
 		var schemaErr error
-		outputSchema, schemaErr = deserializeSchema(tokenData.SchemaIPC)
+		outputSchema, schemaErr = deserializeSchema(call.SchemaIPC)
 		if schemaErr != nil {
 			h.writeHttpError(w, http.StatusBadRequest,
 				&RpcError{Type: "RuntimeError", Message: fmt.Sprintf("failed to recover output schema: %v", schemaErr)}, nil)
@@ -434,9 +464,9 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	}
 
 	if isProducer {
-		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta, cookies, streamID, stickySinkForCtx)
+		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx)
 	} else {
-		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, inputMeta, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta, cookies, streamID, stickySinkForCtx)
+		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, inputMeta, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx)
 	}
 }
 
@@ -479,7 +509,7 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 // handleProducerContinuation runs the produce loop for a continuation request.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, sink *stickySink) error {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink) error {
 
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
@@ -488,10 +518,10 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies, sink, arrow.Metadata{})
 	if err == nil && !finished {
 		// Batch limit reached — append continuation token
-		token, tokenErr := h.packStateToken(state, schema, auth, streamID)
+		token, tokenErr := h.packCursorToken(callID, state, auth)
 		if tokenErr != nil {
 			err = tokenErr
-		} else if werr := writeStateTokenBatch(writer, schema, token); werr != nil {
+		} else if werr := writeStateTokenBatch(writer, schema, token, nil); werr != nil {
 			h.logIPCWriteErr("state-token-batch", info.Name, werr)
 			err = werr
 		}
@@ -509,7 +539,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 // handleExchangeCall processes one exchange and returns the result with updated token.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWriter, inputBatch arrow.RecordBatch,
-	inputMeta arrow.Metadata, schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, sink *stickySink) error {
+	inputMeta arrow.Metadata, schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink) error {
 
 	// Record input stats
 	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
@@ -562,7 +592,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	}
 
 	// Serialize updated state into new token (carry schema for dynamic methods)
-	newToken, err := h.packStateToken(state, schema, auth, streamID)
+	newToken, err := h.packCursorToken(callID, state, auth)
 	if err != nil {
 		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
 		h.logIPCWriteErr("close", info.Name, writer.Close())

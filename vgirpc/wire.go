@@ -198,11 +198,17 @@ func writeLogBatch(w *ipc.Writer, schema *arrow.Schema, msg LogMessage, serverID
 	return w.Write(batchWithMeta)
 }
 
-// writeStateTokenBatch writes a zero-row batch whose only metadata key is
-// the continuation state token. Used by streaming handlers to append a
-// "resume here" marker to a producer or exchange response.
-func writeStateTokenBatch(w *ipc.Writer, schema *arrow.Schema, token []byte) error {
-	meta := arrow.NewMetadata([]string{MetaStreamState}, []string{string(token)})
+// writeStateTokenBatch writes the zero-row sentinel carrying a stream's
+// continuation token(s). callToken is non-nil only on /init, which is the one
+// response that hands it over; continuations re-mint the cursor alone.
+func writeStateTokenBatch(w *ipc.Writer, schema *arrow.Schema, token []byte, callToken []byte) error {
+	keys := []string{MetaStreamState}
+	vals := []string{string(token)}
+	if len(callToken) > 0 {
+		keys = append(keys, MetaCallState)
+		vals = append(vals, string(callToken))
+	}
+	meta := arrow.NewMetadata(keys, vals)
 	zeroBatch := emptyBatch(schema)
 	defer zeroBatch.Release()
 
