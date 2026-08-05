@@ -9,7 +9,13 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
-import httpx
+try:
+    # vgi-rpc 0.40.1 moved its HTTP client dependency from httpx to httpx2,
+    # so a checkout of the reference no longer drags httpx in. Only the
+    # readiness poll below uses it; both spellings serve.
+    import httpx2 as httpx
+except ModuleNotFoundError:  # pragma: no cover - older reference / PyPI build
+    import httpx
 import pytest
 
 from vgi_rpc.conformance import ConformanceService
