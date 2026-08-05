@@ -227,13 +227,18 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		}
 		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(ipcW, info.ResultSchema, callErr, h.server.serverID, req.RequestID, h.server.debugErrors))
 		h.logIPCWriteErr("close", info.Name, ipcW.Close())
-		statusCode := http.StatusInternalServerError
-		if rpcErr, ok := callErr.(*RpcError); ok {
-			if rpcErr.Type == "TypeError" || rpcErr.Type == "ValueError" {
-				statusCode = http.StatusBadRequest
-			}
-		}
-		h.writeArrow(w, statusCode, buf.Bytes())
+		// The call reached the method and the method failed, so the
+		// failure is an application result, not a malformed request: it
+		// answers 200 with the EXCEPTION batch in the body and
+		// X-VGI-RPC-Error: true, which writeArrow derives from the 500
+		// handed to it here. Mapping a handler's ValueError/TypeError to
+		// 400 instead skipped that rewrite, so the response carried no
+		// error header at all and a client had only the status line —
+		// which for this protocol says nothing. Request-level failures
+		// that never reach a method (body decode, parameter
+		// deserialization, unknown method, unsupported encoding) keep
+		// their 4xx statuses; they go through writeHttpError above.
+		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return
 	}
 

@@ -168,6 +168,32 @@ def conformance_http_cold_call_cache_port() -> Iterator[int]:
     yield from _start_http_worker("--http", "--no-call-state-cache")
 
 
+@pytest.fixture(scope="session")
+def conformance_http_access_log(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[int, Path]]:
+    """Go HTTP worker writing JSONL access records, yielding ``(port, path)``.
+
+    Backs the shared ``TestRequestId`` correlation case, which asserts that
+    the ``X-Request-ID`` on a response and the ``request_id`` in the record
+    name the same request. That is the whole value of the field, and nothing
+    observable on the wire can stand in for it: the check has to read back
+    what the server logged for a request the suite itself made.
+
+    The worker needs no new flag — ``--access-log <path>`` is already
+    scanned out of ``os.Args`` (``conformance/cmd/vgi-rpc-conformance-go``)
+    and installs an ``AccessLogHook`` emitting the spec's JSONL, ``logger``
+    field included.
+    """
+    log_path = tmp_path_factory.mktemp("accesslog") / "conformance.log"
+    gen = _start_http_worker("--http", "--access-log", str(log_path))
+    port = next(gen)
+    try:
+        yield port, log_path
+    finally:
+        next(gen, None)
+
+
 # ---------------------------------------------------------------------------
 # Sticky failure-path fixtures (upstream TestSticky; see the reference repo's
 # docs/sticky-sessions-spec.md §9.1)
