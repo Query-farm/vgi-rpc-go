@@ -367,8 +367,10 @@ func ProofAuthenticate(cfg ProofConfig, inner AuthenticateFunc) (AuthenticateFun
 		if perr != nil {
 			if required {
 				// Uniform message: the caller controls kid, so echoing any
-				// detail would reflect attacker-supplied text.
-				return nil, &RpcError{Type: "PermissionError", Message: "proxy proof required"}
+				// detail would reflect attacker-supplied text. Absent,
+				// malformed, and bad-MAC proofs are indistinguishable here,
+				// which is the uniform-rejection rule of the proxy-proof spec.
+				return nil, NewAuthFailure(AuthReasonProxyRequired, "proxy proof required")
 			}
 			claims = map[string]any{
 				"verified":  "false",
@@ -388,6 +390,10 @@ func ProofAuthenticate(cfg ProofConfig, inner AuthenticateFunc) (AuthenticateFun
 		}
 		ctx, err := inner(r)
 		if err != nil {
+			// Propagated verbatim, *[AuthUnavailableError] included: the gate
+			// already passed, so an inner failure that could not determine an
+			// answer must stay transient (503) rather than being flattened
+			// into a rejection the caller may negative-cache.
 			return nil, err
 		}
 		merged := make(map[string]any, len(ctx.Claims)+1)

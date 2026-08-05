@@ -5,7 +5,9 @@ package vgirpc
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -21,7 +23,38 @@ const (
 	rpcErrorHeader     = "X-VGI-RPC-Error"
 	defaultTokenTTL    = 5 * time.Minute
 	defaultMaxBodySize = 64 << 20 // 64 MB
+
+	// requestIDHeader carries the per-request correlation id, echoed from the
+	// caller when supplied and minted otherwise. The access-log spec's
+	// request_id field names the same value.
+	requestIDHeader = "X-Request-ID"
+	// maxRequestIDLength bounds an echoed id. Without a bound the header is
+	// an unbounded caller-controlled string that lands in every log line and
+	// on every response; the ports agree on 128.
+	maxRequestIDLength = 128
 )
+
+// newRequestID mints a 16-char hex correlation id, matching the shape the
+// Python reference and the Java port generate.
+func newRequestID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// crypto/rand does not fail in practice; a fixed value keeps the
+		// header present rather than taking the request down for it.
+		return "0000000000000000"
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// resolveRequestID echoes the caller's correlation id when it sent a usable
+// one, and mints one otherwise.
+func resolveRequestID(r *http.Request) string {
+	id := strings.TrimSpace(r.Header.Get(requestIDHeader))
+	if id == "" || len(id) > maxRequestIDLength {
+		return newRequestID()
+	}
+	return id
+}
 
 // HttpServer serves RPC requests over HTTP. It wraps a [Server] and exposes
 // URL routes under a configurable prefix (default ""):
@@ -50,6 +83,11 @@ type HttpServer struct {
 	// configuration, since a zero level would mean compression off while
 	// the default is DefaultCompressionLevel.
 	supportedEncodingsValue string
+
+	// callStates accelerates the fixed half of a stream's state. Purely an
+	// accelerator: a miss reopens the call token the client echoed, so
+	// correctness never depends on a hit. See [callStateCache].
+	callStates *callStateCache
 
 	rehydrateFunc      RehydrateFunc    // called after unpacking state tokens
 	producerBatchLimit int              // max data batches per producer response; 0 = unlimited
@@ -105,6 +143,19 @@ type HttpServer struct {
 	// the gate is an opaque AuthenticateFunc the server cannot introspect.
 	// See SetProxyProofRequired in proof.go.
 	proxyProofRequired bool
+
+	// Token introspection (HTTP-only, opt-in). nil unless
+	// EnableTokenIntrospection was called — its presence is what "enabled"
+	// means. The route is registered either way, so a worker without it still
+	// answers definitively rather than letting a caller spin. See
+	// introspect_token.go.
+	introspect *tokenIntrospection
+
+	// extraProxyAuthHeaders are operator-declared proxy-injected headers a
+	// custom AuthenticateFunc depends on — the escape hatch for
+	// authenticators the framework cannot introspect. See
+	// SetProxyAuthHeaders.
+	extraProxyAuthHeaders []string
 }
 
 // NewHttpServer creates a new HTTP server wrapping an RPC server.
@@ -126,6 +177,7 @@ func NewHttpServer(server *Server) *HttpServer {
 		enableNotFoundPage: true,
 	}
 	h.applyCompressionLevel(DefaultCompressionLevel)
+	h.callStates = newCallStateCache(defaultCallStateCacheEntries, h.tokenTTL)
 	h.initRoutes()
 	return h
 }
@@ -153,6 +205,7 @@ func NewHttpServerWithKey(server *Server, tokenKey []byte) (*HttpServer, error) 
 		enableNotFoundPage: true,
 	}
 	h.applyCompressionLevel(DefaultCompressionLevel)
+	h.callStates = newCallStateCache(defaultCallStateCacheEntries, h.tokenTTL)
 	h.initRoutes()
 	return h, nil
 }
@@ -227,6 +280,14 @@ const (
 	capabilityCacheMaxAge    = 300 // seconds; OPTIONS Cache-Control max-age
 )
 
+// defaultCorsAllowHeaders is the Access-Control-Allow-Headers value used when
+// a preflight names no headers of its own: every request header a client of
+// this framework may need to send, since a browser will not send one the
+// server did not list.
+const defaultCorsAllowHeaders = "Content-Type, Authorization, " +
+	customAcceptEncodingHeader + ", " + stickySessionHeader + ", " +
+	stickySessionAcceptHeader + ", " + ProofHeader
+
 // addCapabilityHeaders writes the advertised capability headers (when
 // configured) on every response. On OPTIONS responses an additional
 // Cache-Control: public, max-age=N header is set so clients can cache
@@ -272,6 +333,11 @@ func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool)
 	if h.proxyProofRequired {
 		w.Header().Set(ProofRequiredHeader, "true")
 	}
+	// Absent rather than "false" when off, so a proxy can preflight on the
+	// header's presence alone.
+	if h.introspect != nil {
+		w.Header().Set(IntrospectEnabledHeader, "true")
+	}
 	h.addStickyCapabilityHeaders(w)
 	if isOptions {
 		w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", capabilityCacheMaxAge))
@@ -305,19 +371,54 @@ func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, r *http.Request, isOp
 	if h.corsOrigins != "" {
 		w.Header().Set("Access-Control-Allow-Origin", h.corsOrigins)
 		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		allowHeaders := "Content-Type, Authorization"
+		// A preflight that names no headers gets the full set a client may
+		// send: a browser refuses to send anything the server didn't list, so
+		// omitting VGI-Session here would silently disable sticky sessions and
+		// omitting VGI-Proxy-Proof every call behind a proof gate.
+		allowHeaders := defaultCorsAllowHeaders
 		if r != nil {
 			if requested := r.Header.Get("Access-Control-Request-Headers"); requested != "" {
 				allowHeaders = requested
 			}
 		}
 		w.Header().Set("Access-Control-Allow-Headers", allowHeaders)
-		expose := "WWW-Authenticate, X-Request-ID, X-VGI-Content-Encoding, X-VGI-RPC-Error, " + maxResponseBytesHeader + ", " + maxExternalizedResponseBytesHeader + ", " + externalizationEnabledHeader + ", " + supportedEncodingsHeader + ", " + stickyEnabledHeader + ", " + stickyDefaultTTLHeader + ", " + stickyEchoHeadersHeader + ", " + stickySessionHeader + ", " + stickySessionCloseHeader
-		// Exposed only when actually emitted, mirroring the header itself.
-		if h.proxyProofRequired {
-			expose += ", " + ProofRequiredHeader
+		expose := []string{
+			"WWW-Authenticate", requestIDHeader, customContentEncodingHeader, rpcErrorHeader,
+			maxResponseBytesHeader, maxExternalizedResponseBytesHeader, externalizationEnabledHeader,
+			supportedEncodingsHeader,
+			stickyEnabledHeader, stickyDefaultTTLHeader, stickyEchoHeadersHeader,
+			stickySessionHeader, stickySessionCloseHeader,
 		}
-		w.Header().Set("Access-Control-Expose-Headers", expose)
+		// Exposed only when actually emitted, mirroring the header itself.
+		// Each condition is the one addCapabilityHeaders advertises under, so
+		// the two cannot drift into advertising something a browser can't read.
+		if h.maxRequestBytes > 0 {
+			expose = append(expose, maxRequestBytesHeader)
+		}
+		if h.uploadURLProvider != nil {
+			expose = append(expose, uploadURLHeader)
+			if h.maxUploadBytes > 0 {
+				expose = append(expose, maxUploadBytesHeader)
+			}
+		}
+		if h.proxyProofRequired {
+			expose = append(expose, ProofRequiredHeader)
+		}
+		if h.introspect != nil {
+			expose = append(expose, IntrospectEnabledHeader)
+		}
+		// A browser client that cannot read these is back to guessing the
+		// rejection from the body, so they must be exposed cross-origin.
+		expose = append(expose, HeaderAuthReason)
+		if len(h.proxyAuthHeaders()) > 0 {
+			expose = append(expose, HeaderAuthProxyRequired)
+		}
+		// The advertised name list is useless if the echoed values themselves
+		// are unreadable, so expose each VGI-Echo-<name> it points at.
+		for name := range h.stickyEchoHeaders {
+			expose = append(expose, stickyEchoHeaderPrefix+name)
+		}
+		w.Header().Set("Access-Control-Expose-Headers", strings.Join(expose, ", "))
 		// Opt responses into cross-origin embedding so the service is usable
 		// from cross-origin-isolated pages (COEP: require-corp), e.g. browsers
 		// running multithreaded WASM (DuckDB-WASM) against this worker.
@@ -335,6 +436,11 @@ func (h *HttpServer) initRoutes() {
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/init", h.prefix), h.handleStreamInit)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/exchange", h.prefix), h.handleStreamExchange)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/__upload_url__/init", h.prefix), h.handleUploadURLInit)
+	// Always routed, but only ever an oracle once EnableTokenIntrospection has
+	// supplied a resolver. The disabled arm holds nothing and looks nothing
+	// up; it exists so a caller gets a definitive 404 instead of the 415 the
+	// generic {method} route below would answer a JSON body with.
+	h.mux.HandleFunc(fmt.Sprintf("POST %s%s", h.prefix, IntrospectEndpoint), h.handleIntrospectToken)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}", h.prefix), h.handleUnary)
 	h.mux.HandleFunc(fmt.Sprintf("GET %s", wellKnownURL(h.prefix)), h.handleOAuthWellKnown)
 	// Health is registered at /health (root) regardless of the RPC prefix so
@@ -454,9 +560,24 @@ func (h *HttpServer) initPages() {
 	}
 }
 
+// SetCallStateCacheEntries sizes the per-process call-state cache; 0
+// disables it.
+//
+// The cache is a pure accelerator — a miss reopens the call token the client
+// echoed, so correctness never depends on a hit. Disabling it is the
+// supported way to prove that: every continuation then takes the miss path,
+// so a client that fails to echo the call token fails immediately instead of
+// only once the cache goes cold in production.
+func (h *HttpServer) SetCallStateCacheEntries(n int) {
+	h.callStates = newCallStateCache(n, h.tokenTTL)
+}
+
 // SetTokenTTL sets the maximum age for state tokens.
 func (h *HttpServer) SetTokenTTL(d time.Duration) {
 	h.tokenTTL = d
+	// Rebuild the call cache so a cached call can never outlive the token
+	// that names it.
+	h.callStates = newCallStateCache(defaultCallStateCacheEntries, d)
 }
 
 // SetUploadURLProvider configures a provider that issues pre-signed
@@ -649,12 +770,22 @@ func (h *HttpServer) authenticate(w http.ResponseWriter, r *http.Request) *AuthC
 	}
 	auth, err := h.authenticateFunc(r)
 	if err != nil {
-		if rpcErr, ok := err.(*RpcError); ok &&
-			(rpcErr.Type == "ValueError" || rpcErr.Type == "PermissionError") {
-			if h.wwwAuthenticate != "" {
-				w.Header().Set("WWW-Authenticate", h.wwwAuthenticate)
-			}
-			http.Error(w, rpcErr.Message, http.StatusUnauthorized)
+		// Not a rejection: the authority could not be reached. A 401 here
+		// tells every caller to re-authenticate against a service that is
+		// merely down, and invites them to negative-cache an outage.
+		var unavailable *AuthUnavailableError
+		if errors.As(err, &unavailable) {
+			slog.Warn("authentication unavailable", "err", err, "remote_addr", r.RemoteAddr)
+			w.Header().Set("Retry-After", strconv.Itoa(unavailable.retryAfterSeconds()))
+			http.Error(w, "authentication service unavailable", http.StatusServiceUnavailable)
+			return nil
+		}
+		var failure *AuthFailure
+		rpcErr, isRpc := err.(*RpcError)
+		if asAuthFailure(err, &failure) ||
+			(isRpc && (rpcErr.Type == "ValueError" || rpcErr.Type == "PermissionError")) {
+			reason, detail := classifyAuthError(err)
+			h.writeUnauthorized(w, r, reason, detail)
 		} else {
 			slog.Error("authenticate callback error", "err", err, "remote_addr", r.RemoteAddr)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
@@ -666,6 +797,29 @@ func (h *HttpServer) authenticate(w http.ResponseWriter, r *http.Request) *AuthC
 
 // ServeHTTP implements http.Handler.
 func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Echo the caller's correlation id, or mint one. Set before anything can
+	// answer, so it rides every exit path — the rejections and errors are
+	// precisely the responses someone later grep's the log for.
+	requestID := resolveRequestID(r)
+	w.Header().Set(requestIDHeader, requestID)
+
+	// Egress accounting + deferred access-log emission, installed only when
+	// something is actually consuming the records. The recorder measures the
+	// response after compression, so it has to outlive the compressing
+	// writer: registering its flush first makes it run last.
+	if h.server.dispatchHook != nil {
+		rec := &egressRecorder{requestID: requestID}
+		if r.ContentLength > 0 {
+			// The body as received, before decompression — what the peer
+			// actually sent. A request with no declared length reports 0,
+			// matching the Python reference.
+			rec.requestBytes = r.ContentLength
+		}
+		r = r.WithContext(withEgressRecorder(r.Context(), rec))
+		defer rec.flush()
+		w = &countingResponseWriter{ResponseWriter: w, rec: rec}
+	}
+
 	// Fire the on_serve_start hook lazily on the first request so pre-fork
 	// servers wire each child correctly. notifyTransport is idempotent for
 	// repeat calls with the same kind. If the hook fails, refuse the

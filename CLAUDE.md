@@ -80,7 +80,40 @@ This port tracks `vgi-rpc-python` for wire compatibility. Two surfaces matter:
 - **`__describe__`** — `DescribeVersion = "4"`. The response batch is the slim 8-column schema (`name`, `method_type`, `has_return`, `params_schema_ipc`, `result_schema_ipc`, `has_header`, `header_schema_ipc`, `is_exchange`). Python-flavoured columns (`doc`, `param_types_json`, `param_defaults_json`, `param_docs_json`) are not on the wire. The response's `arrow.Metadata` carries `vgi_rpc.protocol_hash` — a SHA-256 hex digest over the canonical describe payload, computed by `computeProtocolHash` to mirror Python's `compute_protocol_hash` byte-for-byte. Within-port stable; cross-port byte equality is *not* guaranteed because Arrow IPC schema bytes vary across language Arrow libraries.
 - **Access log** — every dispatch fires `AccessLogHook` (when installed), writing one JSONL record per call. The record shape conforms to `vgi_rpc/access_log.schema.json` in the Python repo and validates under `vgi-rpc-test --access-log <path>`. `DispatchInfo` carries `Protocol`, `ProtocolHash`, `ProtocolVersion`, `RemoteAddr`, `RequestData`, `StreamID`, `Cancelled`, and `HTTPStatus`; the access-log emitter maps these to the spec field names. Configure protocol-version via `Server.SetProtocolVersion(...)`.
 
-The conformance worker accepts `--access-log <path>` anywhere on the CLI to enable JSONL emission.
+The conformance worker accepts `--access-log <path>` anywhere on the CLI to enable JSONL emission, plus `--access-log-sample <rate>`, `--access-log-async`, `--access-log-queue-size <n>` and `--access-log-debug` (the CLI face of `AccessLogHook.SetDebug`).
+
+Verify a change against the spec with the standalone runner, which validates every emitted record against the schema and exits non-zero if any fails:
+
+```bash
+make conformance-worker
+~/…/vgi-rpc/.venv/bin/vgi-rpc-test \
+  --cmd "$PWD/conformance-worker --access-log /tmp/go-al.jsonl --access-log-debug" \
+  --access-log /tmp/go-al.jsonl --require-request-data
+```
+
+`--access-log-debug` + `--require-request-data` belong together and are not optional here: at INFO the worker omits `request_data`, and a log that never carries the field satisfies every rule governing it trivially, so the payload contract goes unchecked. CI runs exactly this command (`.github/workflows/ci.yml`, "Verify access log against the spec") — do not fall back to checking it by hand, which is how it drifted before.
+
+`--cmd` only exercises the pipe path. The HTTP-only fields (`request_id`, `request_bytes`, `response_bytes`, `externalized_bytes`) need the worker started with `--http` / `--http-with-storage` and the runner pointed at it with `--url`.
+
+#### Egress accounting
+
+Three byte figures answer three different questions and must not be conflated: `request_bytes`/`response_bytes` are what crossed the wire (post-compression), `input_bytes`/`output_bytes` are logical Arrow buffers, and `externalized_bytes` never touches the HTTP body at all. A compressible result routinely shows a ~1000x gap between the first pair and the second.
+
+`response_bytes` cannot be measured where a record is assembled — compression runs afterwards, in `compressResponseWriter.finish`. `HttpServer.ServeHTTP` therefore installs an `egressRecorder` (`accesslog_egress.go`) in the request context; `OnDispatchEnd` appends to it instead of writing, and the recorder emits once the body exists. A transport that installs no recorder keeps logging inline, so the immediate-vs-deferred choice is made in exactly one place. Externalised bytes are counted inside `maybeExternalizeBatchCtx`, the one function every upload passes through.
+
+#### Trace correlation
+
+`trace_id`/`span_id` come from `SetTraceContextProvider`, a pluggable accessor, because core carries no OpenTelemetry dependency. Wire it up once at startup with `vgirpc.SetTraceContextProvider(vgiotel.TraceContext)`. The accessor reads whatever span is *current* in the dispatch context, so an application-opened span correlates as readily as a framework-opened one. Malformed values (a dashed UUID, uppercase hex, one half of the pair) are dropped rather than emitted — a record carrying only one of the two fails the cross-language schema.
+
+#### Claim redaction, sampling, async emission
+
+- `RedactClaims` is the default policy: key-based, replaces values rather than dropping keys (which claims a credential carried is what an audit log is for), and covers credential-shaped names plus standard OIDC PII. `SetClaimRedactor` replaces it; `NoClaimRedaction` opts out. A redactor that panics **fails closed** — the claims are dropped, never emitted unredacted.
+- `AccessLogHook.SetSampleRate` never samples out errors, decides deterministically per call (keyed on `stream_id`, then `request_id`, so every record of one stream shares its init's fate), and stamps `sample_rate` on every kept record. An out-of-range rate is rejected where it is configured, not at the first request.
+- `AccessLogHook.SetAsync` moves writes to a goroutine behind a bounded queue that never blocks. Full means drop, and the next record through carries `dropped_records`. Opt-in: it trades the guarantee that a record on disk means the call completed. Call `Close()` at shutdown to drain.
+
+#### Correlation id
+
+`HttpServer.ServeHTTP` echoes the caller's `X-Request-ID` (bounded at 128 chars) or mints a 16-char hex one, set before dispatch so it rides every exit path including 401s and 404s. The shared suite only asserts the header is listed in `Access-Control-Expose-Headers`, which this port passed for a while without emitting anything — `vgirpc/accesslog_test.go` guards emission.
 
 ### Access-log rotation
 
@@ -100,7 +133,9 @@ hook := vgirpc.NewAccessLogHook(writer, serverVersion)
 server.SetDispatchHook(hook)
 ```
 
-`AccessLogHook` serializes writes through an internal mutex, so wrapping a non-thread-safe writer is safe. For high-volume workloads, call `hook.SetDebug(true)` only when replay/audit needs the full base64 `request_data` field — at INFO the field is replaced with `original_request_bytes` + `truncated: true`, which typically halves record size.
+`AccessLogHook` serializes writes through an internal mutex, so wrapping a non-thread-safe writer is safe. For high-volume workloads, call `hook.SetDebug(true)` only when replay/audit needs the full base64 `request_data` field — at INFO the field is replaced with `original_request_bytes` + `truncated: "payload_omitted"`, which typically halves record size.
+
+`"payload_omitted"` is deliberately not `true`. `true` means genuine size-driven shedding; `"payload_omitted"` means nothing was lost to a cap, the emitter simply is not logging payloads at this level. Sharing one marker made it fire on essentially every record and left a consumer scanning for real data loss with nothing to filter on. This port enforces no per-record byte cap (rotation and truncation are the caller's, per the `lumberjack` pattern above), so it never emits `true`.
 
 ### Sentry integration
 

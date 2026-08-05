@@ -72,16 +72,38 @@ jobs:
       - name: Clone vgi-rpc-python reference
         run: git clone --depth 1 https://github.com/Query-farm/vgi-rpc-python.git "$RUNNER_TEMP/vgi-rpc-python"
 
+      # The conformance extra pulls jsonschema, which `vgi-rpc-test
+      # --access-log` needs to validate records against access_log.schema.json.
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "${RUNNER_TEMP}/vgi-rpc-python[http,cli,external]" pytest pytest-timeout
+          pip install "${RUNNER_TEMP}/vgi-rpc-python[http,cli,external,conformance]" pytest pytest-timeout
 
       - name: Create coverage directory
         run: mkdir -p _covdata
 
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_go_conformance.py -x -v
+
+      # Access-log conformance was verified by hand for months and drifted
+      # anyway — four people checked it by inspection and the rule was still
+      # wrong. It runs here now so it cannot silently rot again.
+      #
+      # --access-log-debug is not optional: at INFO the worker omits
+      # `request_data`, and a log that never carries the field trivially
+      # satisfies every rule that governs it, so the whole payload contract
+      # goes unchecked. --require-request-data makes that absence a failure.
+      #
+      # No --filter: the suite's zero-parameter methods (void*) send an empty
+      # schema and no row, and they are the exact case a row-demanding
+      # validator gets wrong (v0.36.1 shipped that bug). Do not add a filter
+      # that excludes them.
+      - name: Verify access log against the spec
+        run: |
+          timeout 120 vgi-rpc-test \
+            --cmd "$PWD/conformance-worker --access-log $RUNNER_TEMP/access-log.jsonl --access-log-debug" \
+            --access-log "$RUNNER_TEMP/access-log.jsonl" \
+            --require-request-data
 
       - name: Merge coverage profiles
         run: go tool covdata textfmt -i=_covdata -o=coverage-go.txt

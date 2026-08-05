@@ -196,6 +196,81 @@ func TestFindStateTokenAbsentOrUnparseable(t *testing.T) {
 	}
 }
 
+// makeSplitStateStream frames an /init response from a server that splits
+// its stream state: one zero-row sentinel carrying both the cursor and the
+// call token, as the Python reference emits.
+func makeSplitStateStream(t *testing.T, schema *arrow.Schema, token, callToken string) []byte {
+	t.Helper()
+	batch := emptyBatch(schema)
+	defer batch.Release()
+
+	var buf bytes.Buffer
+	w := ipc.NewWriter(&buf, ipc.WithSchema(schema))
+	meta := arrow.NewMetadata(
+		[]string{MetaStreamState, MetaCallState},
+		[]string{token, callToken},
+	)
+	withMeta := array.NewRecordBatchWithMetadata(schema, batch.Columns(), 0, meta)
+	defer withMeta.Release()
+	if err := w.Write(withMeta); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func TestFindStreamTokensRecoversBothHalves(t *testing.T) {
+	body := makeSplitStateStream(t, arrow.NewSchema(nil, nil), "CURSOR", "CALL")
+	state, callState := FindStreamTokens(body)
+	if !bytes.Equal(state, []byte("CURSOR")) {
+		t.Fatalf("expected cursor CURSOR, got %q", state)
+	}
+	if !bytes.Equal(callState, []byte("CALL")) {
+		t.Fatalf("expected call token CALL, got %q", callState)
+	}
+	// The single-token accessors read the same walk.
+	if got := FindStateToken(body); !bytes.Equal(got, []byte("CURSOR")) {
+		t.Fatalf("FindStateToken: expected CURSOR, got %q", got)
+	}
+	if got := FindCallStateToken(body); !bytes.Equal(got, []byte("CALL")) {
+		t.Fatalf("FindCallStateToken: expected CALL, got %q", got)
+	}
+}
+
+func TestFindStreamTokensWalksConcatenatedStreams(t *testing.T) {
+	headerSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "execution_id", Type: arrow.BinaryTypes.String},
+	}, nil)
+	header := makeStream(t, headerSchema, "") // no tokens
+	data := makeSplitStateStream(t, arrow.NewSchema(nil, nil), "CURSOR2", "CALL2")
+	state, callState := FindStreamTokens(append(header, data...))
+	if !bytes.Equal(state, []byte("CURSOR2")) {
+		t.Fatalf("expected cursor CURSOR2, got %q", state)
+	}
+	if !bytes.Equal(callState, []byte("CALL2")) {
+		t.Fatalf("expected call token CALL2, got %q", callState)
+	}
+}
+
+func TestFindStreamTokensCallStateAbsent(t *testing.T) {
+	// This port's own server does not split yet, so a body it produced
+	// yields no call token. The helper must report that as absence rather
+	// than fail, since it also parses bodies from non-vgi peers.
+	body := makeStream(t, arrow.NewSchema(nil, nil), "TOK")
+	state, callState := FindStreamTokens(body)
+	if !bytes.Equal(state, []byte("TOK")) {
+		t.Fatalf("expected TOK, got %q", state)
+	}
+	if callState != nil {
+		t.Fatalf("expected no call token, got %q", callState)
+	}
+	if got := FindCallStateToken([]byte("not-an-ipc-stream")); got != nil {
+		t.Fatalf("expected nil for junk bytes, got %q", got)
+	}
+}
+
 func TestFindProtocolVersion(t *testing.T) {
 	params := makeBinaryParamsBatch(t, []byte("x"))
 	defer params.Release()

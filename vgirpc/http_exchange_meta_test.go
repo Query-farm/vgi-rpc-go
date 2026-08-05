@@ -104,9 +104,15 @@ func TestHTTPExchangeKeepsTokenWithEmitMetadata(t *testing.T) {
 	if initResp.StatusCode != http.StatusOK {
 		t.Fatalf("/init: expected 200, got %d: %s", initResp.StatusCode, initBytes)
 	}
-	token := FindStateToken(initBytes)
+	// A conformant client echoes BOTH tokens on every continuation: the
+	// cursor it was just handed and the call token /init minted once. See
+	// docs/WIRE_PROTOCOL.md in the reference repo.
+	token, callToken := FindStreamTokens(initBytes)
 	if token == nil {
 		t.Fatal("/init response carried no state token")
+	}
+	if callToken == nil {
+		t.Fatal("/init response carried no call token")
 	}
 
 	// --- /exchange: input batch whose custom metadata carries the token and
@@ -117,8 +123,8 @@ func TestHTTPExchangeKeepsTokenWithEmitMetadata(t *testing.T) {
 	vb.Release()
 	inputBatch := array.NewRecordBatch(valueSchema, []arrow.Array{valueArr}, 1)
 	reqMeta := arrow.NewMetadata(
-		[]string{MetaStreamState, "if_none_match"},
-		[]string{string(token), "etag-123"})
+		[]string{MetaStreamState, MetaCallState, "if_none_match"},
+		[]string{string(token), string(callToken), "etag-123"})
 	inputWithMeta := array.NewRecordBatchWithMetadata(
 		valueSchema, inputBatch.Columns(), inputBatch.NumRows(), reqMeta)
 

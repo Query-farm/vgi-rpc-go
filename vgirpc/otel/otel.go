@@ -103,6 +103,29 @@ func InstrumentServer(server *vgirpc.Server, cfg OtelConfig) {
 	server.SetDispatchHook(hook)
 }
 
+// TraceContext reports the W3C trace and span IDs of whatever span is current
+// in ctx, as lowercase hex (32 and 16 characters), or two empty strings when
+// no valid span is current.
+//
+// It has the shape of [github.com/Query-farm/vgi-rpc-go/vgirpc.TraceContextFunc],
+// and exists so the access log can carry trace correlation without the core
+// package depending on OpenTelemetry. Wire it up once at startup:
+//
+//	vgirpc.SetTraceContextProvider(vgiotel.TraceContext)
+//
+// It reads the *current* span rather than anything the framework threads
+// through, so a record correlates with a span opened by the application as
+// readily as one opened by [InstrumentServer]. Without it, an access-log
+// record and the span describing the same call cannot be joined: request_id
+// only correlates within one service.
+func TraceContext(ctx context.Context) (traceID, spanID string) {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() {
+		return "", ""
+	}
+	return sc.TraceID().String(), sc.SpanID().String()
+}
+
 // otelHook implements vgirpc.DispatchHook with OpenTelemetry tracing and metrics.
 type otelHook struct {
 	cfg               OtelConfig

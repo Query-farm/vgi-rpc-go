@@ -34,8 +34,8 @@ func TestCorsPreflightBypassesAuth(t *testing.T) {
 	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
 		t.Fatalf("expected Access-Control-Allow-Origin=*, got %q", got)
 	}
-	if got := w.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type, Authorization" {
-		t.Fatalf("expected Access-Control-Allow-Headers=Content-Type, Authorization, got %q", got)
+	if got := w.Header().Get("Access-Control-Allow-Headers"); got != defaultCorsAllowHeaders {
+		t.Fatalf("expected Access-Control-Allow-Headers=%q, got %q", defaultCorsAllowHeaders, got)
 	}
 	if got := w.Header().Get("Access-Control-Expose-Headers"); !strings.HasPrefix(got, coreExposeHeaders) {
 		t.Fatalf("expected Access-Control-Expose-Headers to start with %q, got %q", coreExposeHeaders, got)
@@ -186,8 +186,8 @@ func TestCorsAllowHeadersFallbackWhenNoneRequested(t *testing.T) {
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
 
-	if got := w.Header().Get("Access-Control-Allow-Headers"); got != "Content-Type, Authorization" {
-		t.Fatalf("expected fallback Allow-Headers, got %q", got)
+	if got := w.Header().Get("Access-Control-Allow-Headers"); got != defaultCorsAllowHeaders {
+		t.Fatalf("expected fallback Allow-Headers %q, got %q", defaultCorsAllowHeaders, got)
 	}
 }
 

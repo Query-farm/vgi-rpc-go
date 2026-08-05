@@ -103,6 +103,155 @@ def conformance_http_auth_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_auth_reason_port(conformance_http_auth_port: int) -> int:
+    """Port of a worker that honours ``X-Conformance-Auth-Reason``.
+
+    Backs the shared ``TestUnauthorized`` reason-code tests. Membership in
+    the closed set is not enough on its own — a server that answers every
+    401 with ``unauthorized`` satisfies that. These tests prove the codes
+    are *discriminated*, which is what makes them worth branching on.
+
+    The Go worker's ``--http-auth`` mode already reads the header, so this
+    is the same worker under the name the suite looks up.
+    """
+    return conformance_http_auth_port
+
+
+@pytest.fixture(scope="session")
+def conformance_http_cors_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Start a Go HTTP worker that allows the conformance origin.
+
+    Backs the shared ``TestCors`` group, which is the only place the suite
+    can check what a *browser* may read: every other test drives the server
+    with a client that ignores CORS entirely.  Needs its own worker because
+    the companion ``TestCorsOffMode`` requires the default one to grant no
+    origin at all.  The origin is fixed by the suite (``_CORS_ORIGIN``).
+
+    Storage mode is deliberate, not incidental: the derived exposure check
+    can only catch a missing entry for a header the worker actually
+    advertises, so a *plain* worker here would silently skip the whole
+    conditional half of the capability set -- the size caps and the
+    upload-URL trio -- which are exactly the exposures a port is most likely
+    to miss.  ``test_worker_advertises_the_optional_capabilities`` guards
+    this fixture against being pointed back at a bare worker.
+    """
+    yield from _start_http_worker(
+        "--http-with-storage",
+        conformance_fake_storage,
+        "--cors-origin",
+        "https://conformance.example",
+    )
+
+
+@pytest.fixture(scope="session")
+def conformance_http_introspect_port() -> Iterator[int]:
+    """Start a Go HTTP worker with token introspection enabled.
+
+    Backs the shared ``TestTokenIntrospection`` group.  It needs its own
+    worker because the endpoint resolves nothing unless explicitly enabled --
+    which the ungated ``TestTokenIntrospectionOffMode`` asserts against the
+    default worker.  The introspector principal, subject credential and JWS
+    trap token are fixed by the suite; the worker configures exactly those.
+    """
+    yield from _start_http_worker("--http", "--introspect")
+
+
+@pytest.fixture(scope="session")
+def conformance_http_cold_call_cache_port() -> Iterator[int]:
+    """Start a Go HTTP server with the call-state cache disabled.
+
+    Backs the shared ``TestColdCallStateCache`` group. With the cache warm a
+    client that never echoes the call token still works, and only breaks
+    once a continuation lands on a process with no cached entry. Disabling
+    the cache makes every turn take that path.
+    """
+    yield from _start_http_worker("--http", "--no-call-state-cache")
+
+
+@pytest.fixture(scope="session")
+def conformance_http_access_log(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[tuple[int, Path]]:
+    """Go HTTP worker writing JSONL access records, yielding ``(port, path)``.
+
+    Backs the shared ``TestRequestId`` correlation case, which asserts that
+    the ``X-Request-ID`` on a response and the ``request_id`` in the record
+    name the same request. That is the whole value of the field, and nothing
+    observable on the wire can stand in for it: the check has to read back
+    what the server logged for a request the suite itself made.
+
+    The worker needs no new flag — ``--access-log <path>`` is already
+    scanned out of ``os.Args`` (``conformance/cmd/vgi-rpc-conformance-go``)
+    and installs an ``AccessLogHook`` emitting the spec's JSONL, ``logger``
+    field included.
+    """
+    log_path = tmp_path_factory.mktemp("accesslog") / "conformance.log"
+    gen = _start_http_worker("--http", "--access-log", str(log_path))
+    port = next(gen)
+    try:
+        yield port, log_path
+    finally:
+        next(gen, None)
+
+
+# ---------------------------------------------------------------------------
+# Sticky failure-path fixtures (upstream TestSticky; see the reference repo's
+# docs/sticky-sessions-spec.md §9.1)
+# ---------------------------------------------------------------------------
+
+# Shared AEAD key for the peer pair. Both workers can open each other's session
+# tokens, which is the point: the rejection under test has to come from the
+# server_id comparison, not from a decrypt failure.
+_STICKY_PEER_TOKEN_KEY = "5f" * 32
+
+
+@pytest.fixture(scope="session")
+def conformance_http_sticky_short_ttl_port() -> Iterator[int]:
+    """A sticky worker whose default session TTL is short enough to outwait.
+
+    Backs ``TestSticky::test_expired_session_surfaces_session_lost``; the main
+    worker's 300s default is not something a test can sit out.
+    """
+    yield from _start_http_worker("--http", "--sticky-ttl", "1")
+
+
+@pytest.fixture(scope="session")
+def conformance_http_sticky_peer_ports() -> Iterator[tuple[int, int]]:
+    """Two sticky workers sharing one AEAD key but reporting distinct server ids.
+
+    Backs ``TestSticky::test_token_from_other_worker_rejected``. The Go worker
+    otherwise hardcodes ``conformance-go`` as its server id, so without the
+    explicit ``--server-id`` both peers would look like the same worker and the
+    test would have nothing to reject.
+    """
+    gen_a = _start_http_worker(
+        "--http", "--token-key", _STICKY_PEER_TOKEN_KEY, "--server-id", "conformance-go-peer-a"
+    )
+    gen_b = _start_http_worker(
+        "--http", "--token-key", _STICKY_PEER_TOKEN_KEY, "--server-id", "conformance-go-peer-b"
+    )
+    port_a = next(gen_a)
+    try:
+        port_b = next(gen_b)
+        try:
+            yield port_a, port_b
+        finally:
+            next(gen_b, None)
+    finally:
+        next(gen_a, None)
+
+
+@pytest.fixture(scope="session")
+def conformance_http_sticky_auth_port() -> Iterator[int]:
+    """A sticky worker that authenticates the ``X-Conformance-Principal`` header.
+
+    Backs ``TestSticky::test_cross_principal_replay_rejected``, which needs one
+    worker reachable as two identities.
+    """
+    yield from _start_http_worker("--http", "--sticky-auth")
+
+
+@pytest.fixture(scope="session")
 def proof_worker_factory() -> Iterator[Callable[..., Any]]:
     """Spawn Go workers gated on proxy proof, for the shared TestProxyProof group.
 

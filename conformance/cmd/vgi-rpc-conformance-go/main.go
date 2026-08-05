@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/Query-farm/vgi-rpc-go/conformance"
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
@@ -22,7 +24,93 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
+
+// conformanceReasonHeader lets a conformance request name the reason it
+// wants refused with, so the suite can prove this server *discriminates*
+// between reason codes rather than stamping one constant on every 401.
+//
+// This is a fixture affordance, never a protocol behaviour — nothing outside
+// the conformance worker reads it.
+const conformanceReasonHeader = "X-Conformance-Auth-Reason"
+
+// requestableReasons are the reasons a request may ask to be refused with.
+// proxy_required is deliberately absent: the spec derives it from server
+// configuration, never from the request, so a worker that let a caller
+// summon it would be modelling the contract wrong. Anything not in this map
+// falls through to the unclassified path.
+var requestableReasons = map[string]vgirpc.AuthReason{
+	"missing_credential": vgirpc.AuthReasonMissingCredential,
+	"invalid_credential": vgirpc.AuthReasonInvalidCredential,
+	"expired_credential": vgirpc.AuthReasonExpiredCredential,
+	"insufficient_scope": vgirpc.AuthReasonInsufficientScope,
+}
+
+// conformancePrincipalHeader names the principal a request should be
+// authenticated as. Another fixture affordance: it lets one worker be reachable
+// as several identities, which the sticky replay case and the introspector
+// allowlist both need.
+const conformancePrincipalHeader = "X-Conformance-Principal"
+
+// Fixed values the shared TestTokenIntrospection group posts and asserts, so
+// they are part of this worker's contract rather than decoration. They mirror
+// the constants in the upstream _pytest_suite.py.
+const (
+	conformanceIntrospector     = "conformance-introspector"
+	conformanceSubjectToken     = "conformance-opaque-subject-token"
+	conformanceSubjectPrincipal = "subject@conformance.example"
+	conformanceSubjectTokenName = "conformance-subject"
+	// JWS-shaped and deliberately *resolvable*: against an unknown JWS a port
+	// with no shape guard rejects it as unknown and passes the test for the
+	// wrong reason. Resolvable, the guard is the only thing that can produce a
+	// rejection.
+	conformanceJWSTrapToken = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl"
+	// Well above the ~13 introspections the shared group makes in one second,
+	// so the limiter can never turn a conformance run into a flake.
+	conformanceIntrospectRateLimit = 200
+)
+
+// principalFromHeader authenticates as whatever principal the request names.
+// Requests without the header stay anonymous rather than being rejected: the
+// suite probes /health and the capability endpoint before it authenticates
+// anything.
+func principalFromHeader(r *http.Request) (*vgirpc.AuthContext, error) {
+	principal := r.Header.Get(conformancePrincipalHeader)
+	if principal == "" {
+		return vgirpc.Anonymous(), nil
+	}
+	return &vgirpc.AuthContext{
+		Domain:        "conformance",
+		Authenticated: true,
+		Principal:     principal,
+	}, nil
+}
+
+// conformanceTokenResolver resolves the two fixed credentials the shared
+// introspection group posts; everything else is unresolvable.
+func conformanceTokenResolver(credential string) (vgirpc.TokenIdentity, bool, error) {
+	if credential == conformanceSubjectToken || credential == conformanceJWSTrapToken {
+		return vgirpc.TokenIdentity{
+			Principal:  conformanceSubjectPrincipal,
+			TokenName:  conformanceSubjectTokenName,
+			TTLSeconds: 300,
+		}, true, nil
+	}
+	return vgirpc.TokenIdentity{}, false, nil
+}
+
+// rejectAll refuses every request, with the reason the caller named when it
+// named one the spec allows a request to ask for.
+func rejectAll(r *http.Request) (*vgirpc.AuthContext, error) {
+	if reason, ok := requestableReasons[r.Header.Get(conformanceReasonHeader)]; ok {
+		// The detail is the reason code itself so the suite can assert the
+		// header and the JSON body agree without pinning prose.
+		return nil, vgirpc.NewAuthFailure(reason, string(reason))
+	}
+	// Unclassified: must land on the fallback, not a guess.
+	return nil, &vgirpc.RpcError{Type: "ValueError", Message: "auth required"}
+}
 
 func main() {
 	defer func() {
@@ -34,12 +122,37 @@ func main() {
 	server := vgirpc.NewServer()
 	server.SetDebugErrors(true)
 	server.SetServiceName("ConformanceService")
-	server.SetServerID("conformance-go")
+	// --server-id overrides the fixed default. TestSticky's wrong-worker case
+	// runs two workers that share one AEAD key, and asserts up front that they
+	// report distinct server_id — otherwise a token that "belongs to the other
+	// worker" would in fact belong to this one and the test would prove nothing.
+	serverID := "conformance-go"
+	if v := findFlagValue(os.Args, "--server-id"); v != "" {
+		serverID = v
+	}
+	server.SetServerID(serverID)
 	// Match Python ConformanceService.protocol_version. Requires
 	// vgi-rpc >= 0.18.0 on the client (sends the vgi_rpc.protocol_version
 	// request metadata key) — see ci.yml.
 	server.SetProtocolVersion("1.0.0")
 	conformance.RegisterMethods(server)
+
+	// Core carries no OpenTelemetry dependency, so the accessor that lets an
+	// access-log record name the span it ran under is injected here. It reads
+	// whatever span is current — application-opened or framework-opened — so
+	// it is a no-op until something opens one.
+	//
+	// This is vgiotel.TraceContext inlined: the root module resolves
+	// vgirpc/otel to its published release, which predates that helper.
+	// Applications on a released pair should write
+	// vgirpc.SetTraceContextProvider(vgiotel.TraceContext) instead.
+	vgirpc.SetTraceContextProvider(func(ctx context.Context) (string, string) {
+		sc := oteltrace.SpanContextFromContext(ctx)
+		if !sc.IsValid() {
+			return "", ""
+		}
+		return sc.TraceID().String(), sc.SpanID().String()
+	})
 
 	// Cross-language conformance: --access-log <path> may appear anywhere
 	// in os.Args. When present, install an AccessLogHook writing JSONL
@@ -51,7 +164,47 @@ func main() {
 			os.Exit(1)
 		}
 		defer f.Close()
-		server.SetDispatchHook(vgirpc.NewAccessLogHook(f, "vgi-rpc-go-conformance"))
+		hook := vgirpc.NewAccessLogHook(f, "vgi-rpc-go-conformance")
+		// Both optional per the spec, and both fail at startup rather than at
+		// the first request: a sample rate of 100 meaning "100%" would
+		// otherwise silently log everything.
+		if raw := findFlagValue(os.Args, "--access-log-sample"); raw != "" {
+			rate, perr := strconv.ParseFloat(raw, 64)
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "invalid --access-log-sample: %v\n", perr)
+				os.Exit(1)
+			}
+			if serr := hook.SetSampleRate(rate); serr != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", serr)
+				os.Exit(1)
+			}
+		}
+		// At INFO the record carries no `request_data` at all, so every spec
+		// rule governing that field goes unexercised — the validator only
+		// checks it is well-formed *when present*. `vgi-rpc-test
+		// --require-request-data` turns that silence into a failure, and it
+		// needs a worker that can be asked for the payload.
+		if hasFlag(os.Args, "--access-log-debug") {
+			hook.SetDebug(true)
+		}
+		if hasFlag(os.Args, "--access-log-async") {
+			queueSize := 0
+			if raw := findFlagValue(os.Args, "--access-log-queue-size"); raw != "" {
+				v, perr := strconv.Atoi(raw)
+				if perr != nil {
+					fmt.Fprintf(os.Stderr, "invalid --access-log-queue-size: %v\n", perr)
+					os.Exit(1)
+				}
+				queueSize = v
+			}
+			if aerr := hook.SetAsync(queueSize); aerr != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", aerr)
+				os.Exit(1)
+			}
+			// Drain before the file closes, or the queued tail is lost.
+			defer hook.Close()
+		}
+		server.SetDispatchHook(hook)
 	}
 
 	authMode := len(os.Args) > 1 && os.Args[1] == "--http-auth"
@@ -185,7 +338,25 @@ func main() {
 			})
 		}
 
-		httpServer := vgirpc.NewHttpServer(server)
+		// --token-key <hex> pins the AEAD key so two workers can open each
+		// other's session tokens. There is no post-construction setter, so the
+		// choice has to be made here.
+		var httpServer *vgirpc.HttpServer
+		if keyHex := findFlagValue(os.Args, "--token-key"); keyHex != "" {
+			key, err := hex.DecodeString(keyHex)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "invalid --token-key (expected hex): %v\n", err)
+				os.Exit(1)
+			}
+			hs, kerr := vgirpc.NewHttpServerWithKey(server, key)
+			if kerr != nil {
+				fmt.Fprintf(os.Stderr, "invalid --token-key: %v\n", kerr)
+				os.Exit(1)
+			}
+			httpServer = hs
+		} else {
+			httpServer = vgirpc.NewHttpServer(server)
+		}
 		// In storage modes the same fake-storage instance also acts as
 		// the upload-URL provider so client-vended request externalization
 		// works end-to-end. The 4 KiB request cap is small enough that the
@@ -199,11 +370,15 @@ func main() {
 			httpServer.SetMaxRequestBytes(reqCap)
 			httpServer.SetMaxUploadBytes(64 * 1024 * 1024)
 		}
+		// Disabling the call-state cache forces every stream continuation down
+		// the cache-miss path, so the client's obligation to echo the call
+		// token is checked deterministically rather than by luck.
+		if hasFlag(os.Args, "--no-call-state-cache") {
+			httpServer.SetCallStateCacheEntries(0)
+		}
 		if authMode {
 			httpServer.SetPrefix("/vgi")
-			httpServer.SetAuthenticate(func(*http.Request) (*vgirpc.AuthContext, error) {
-				return nil, &vgirpc.RpcError{Type: "ValueError", Message: "auth required"}
-			})
+			httpServer.SetAuthenticate(rejectAll)
 		}
 		if proofMode {
 			// Mirrors the reference worker's CLI so the shared TestProxyProof
@@ -288,7 +463,46 @@ func main() {
 		// TestSticky conformance group runs against the Go worker via
 		// `conformance_http_port`. The default TTL (zero) falls back to
 		// 300 seconds matching Python's `sticky_default_ttl`.
-		httpServer.EnableSticky(0)
+		// --sticky-ttl <seconds> shortens it so the expiry conformance case has
+		// something it can outwait; the header advertises whole seconds, so the
+		// flag is an integer.
+		stickyTTL := time.Duration(0)
+		if v := findFlagValue(os.Args, "--sticky-ttl"); v != "" {
+			secs, terr := strconv.Atoi(v)
+			if terr != nil || secs <= 0 {
+				fmt.Fprintf(os.Stderr, "invalid --sticky-ttl (expected positive integer seconds): %q\n", v)
+				os.Exit(1)
+			}
+			stickyTTL = time.Duration(secs) * time.Second
+		}
+		httpServer.EnableSticky(stickyTTL)
+		// --sticky-auth resolves the principal named in X-Conformance-Principal
+		// so one worker is reachable as two identities, which is what the
+		// cross-principal replay case needs. Requests without the header stay
+		// anonymous rather than being rejected: the suite probes /health and the
+		// capability endpoint before it authenticates anything. Unlike
+		// --http-auth above, this does NOT move the prefix — the suite connects
+		// to this worker exactly as it connects to the plain one.
+		if hasFlag(os.Args, "--sticky-auth") {
+			httpServer.SetAuthenticate(principalFromHeader)
+		}
+		// --introspect enables POST /__introspect_token__ with the fixed
+		// conformance resolver and a single-principal allowlist, backing the
+		// shared TestTokenIntrospection group. It implies principal-header
+		// auth so the allowlist has something to check, and leaves the prefix
+		// where the plain worker serves. The companion off-mode group runs
+		// against the default worker, which is why this needs its own.
+		if hasFlag(os.Args, "--introspect") {
+			httpServer.SetAuthenticate(principalFromHeader)
+			if err := httpServer.EnableTokenIntrospection(vgirpc.TokenIntrospectionConfig{
+				Resolver:           conformanceTokenResolver,
+				Principals:         []string{conformanceIntrospector},
+				RateLimitPerSecond: conformanceIntrospectRateLimit,
+			}); err != nil {
+				fmt.Fprintf(os.Stderr, "EnableTokenIntrospection: %v\n", err)
+				os.Exit(1)
+			}
+		}
 		// The conformance suite's test_echo_header_round_trip probes for
 		// a fixed marker echo header; advertise it under the same name
 		// as the Python worker (x-vgi-conformance-echo) so cross-language
@@ -321,6 +535,12 @@ func main() {
 		if err := httpServer.SetCompressionLevel(compressionLevel); err != nil {
 			fmt.Fprintf(os.Stderr, "failed to set compression level: %v\n", err)
 			os.Exit(1)
+		}
+		// --cors-origin <origin> allows that origin cross-origin, backing the
+		// shared TestCors group. Left unset everywhere else on purpose:
+		// TestCorsOffMode asserts an unconfigured worker grants no origin at all.
+		if origin := findFlagValue(os.Args, "--cors-origin"); origin != "" {
+			httpServer.SetCorsOrigins(origin)
 		}
 		// Emit one batch per HTTP response so infinite producers (e.g.
 		// ``cancellable_producer``) return promptly and the client can follow

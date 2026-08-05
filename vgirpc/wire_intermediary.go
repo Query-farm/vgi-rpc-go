@@ -12,7 +12,8 @@
 //
 //   - [ReadRequest] / [WriteRequest] — parse and re-frame a request body.
 //   - [WriteErrorResponse] — synthesize an in-band error stream.
-//   - [FindStateToken] — extract the stream-state continuation token.
+//   - [FindStateToken] / [FindCallStateToken] / [FindStreamTokens] — extract
+//     a stream's continuation tokens. Forwarding a continuation needs both.
 //   - [FindProtocolVersion] — recover the stamped application protocol_version.
 //   - [ReadUnaryResult] / [WriteUnaryResult] — unwrap/rewrap the unary-response
 //     envelope without a typed decode.
@@ -85,42 +86,93 @@ func WriteRequest(w io.Writer, method string, params arrow.RecordBatch, protocol
 //
 // The returned bytes are the metadata value verbatim (the base64 text the
 // peer echoes back), not a decoded payload.
+//
+// This is the cursor half only. An intermediary that *forwards* a
+// continuation — rather than merely routing or correlating one — must carry
+// the call token too when the upstream server splits its stream state; use
+// [FindStreamTokens].
 func FindStateToken(data []byte) []byte {
+	state, _ := FindStreamTokens(data)
+	return state
+}
+
+// FindCallStateToken returns the stream's call token (key [MetaCallState])
+// carried in a request or response body, or nil when absent or unparseable.
+//
+// Only a server that splits its stream state emits one, and only on the
+// /init response; see [MetaCallState].
+func FindCallStateToken(data []byte) []byte {
+	_, callState := FindStreamTokens(data)
+	return callState
+}
+
+// FindStreamTokens returns both of a stream's continuation tokens — the
+// cursor (key [MetaStreamState]) and the call token (key [MetaCallState]) —
+// from a request or response body, in one walk. Either may be nil when
+// absent or unparseable.
+//
+// An intermediary forwarding a continuation needs both. A server that splits
+// its stream state re-mints only the cursor per turn and never re-issues the
+// call token, so the continuation the intermediary builds has to echo the
+// call token it saw on /init. Forwarding the cursor alone works for as long
+// as that server's call-state cache happens to hold the entry, and fails
+// once it does not — a restarted upstream, an evicted entry, or a request
+// balanced onto a node that never saw the /init. This port's own server does
+// not split yet, so callState is nil against it.
+//
+// Body shapes and first-token semantics are as described on
+// [FindStateToken].
+func FindStreamTokens(data []byte) (state, callState []byte) {
 	r := bytes.NewReader(data)
 	for r.Len() > 0 {
 		before := r.Len()
-		token, err := scanStreamForToken(r)
-		if token != nil {
-			return token
+		s, c, err := scanStreamForTokens(r)
+		if state == nil {
+			state = s
+		}
+		if callState == nil {
+			callState = c
+		}
+		// The call token rides the same /init frame as the cursor, so once
+		// the cursor is in hand there is nothing left to walk for.
+		if state != nil {
+			return state, callState
 		}
 		if err != nil {
-			return nil
+			return state, callState
 		}
 		if r.Len() == before { // no forward progress — avoid an infinite loop
-			return nil
+			return state, callState
 		}
 	}
-	return nil
+	return state, callState
 }
 
-// scanStreamForToken reads one IPC stream off r, scanning batch
-// custom_metadata for [MetaStreamState]. Returns the token if found, or an
-// error when the stream could not be opened or read to its EOS.
-func scanStreamForToken(r io.Reader) ([]byte, error) {
-	reader, err := ipc.NewReader(r)
-	if err != nil {
-		return nil, err
+// scanStreamForTokens reads one IPC stream off r, scanning batch
+// custom_metadata for [MetaStreamState] and [MetaCallState]. Returns the
+// tokens if found, or an error when the stream could not be opened or read
+// to its EOS.
+func scanStreamForTokens(r io.Reader) (state, callState []byte, err error) {
+	reader, rerr := ipc.NewReader(r)
+	if rerr != nil {
+		return nil, nil, rerr
 	}
 	defer reader.Release()
 
 	for reader.Next() {
-		if rb, ok := reader.RecordBatch().(arrow.RecordBatchWithMetadata); ok {
-			if token, found := rb.Metadata().GetValue(MetaStreamState); found && token != "" {
-				return []byte(token), nil
-			}
+		rb, ok := reader.RecordBatch().(arrow.RecordBatchWithMetadata)
+		if !ok {
+			continue
+		}
+		md := rb.Metadata()
+		if call, found := md.GetValue(MetaCallState); found && call != "" && callState == nil {
+			callState = []byte(call)
+		}
+		if token, found := md.GetValue(MetaStreamState); found && token != "" {
+			return []byte(token), callState, nil
 		}
 	}
-	return nil, reader.Err()
+	return nil, callState, reader.Err()
 }
 
 // FindProtocolVersion returns the application protocol_version stamped on a

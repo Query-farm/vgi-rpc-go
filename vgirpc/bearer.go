@@ -5,6 +5,7 @@ package vgirpc
 
 import (
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"strings"
 )
@@ -81,9 +82,9 @@ func BearerAuthenticateStatic(tokens map[string]*AuthContext) AuthenticateFunc {
 
 // ChainAuthenticate returns an [AuthenticateFunc] that tries each authenticator
 // in order. A ValueError [RpcError] from one authenticator causes the chain to
-// fall through to the next. A PermissionError [RpcError] or any non-RpcError
-// propagates immediately. If no authenticator accepts the request, the chain
-// returns a ValueError [RpcError].
+// fall through to the next. A PermissionError [RpcError], an
+// *[AuthUnavailableError] or any other error propagates immediately. If no
+// authenticator accepts the request, the chain returns a ValueError [RpcError].
 //
 // ChainAuthenticate panics if no authenticators are provided.
 func ChainAuthenticate(authenticators ...AuthenticateFunc) AuthenticateFunc {
@@ -95,6 +96,16 @@ func ChainAuthenticate(authenticators ...AuthenticateFunc) AuthenticateFunc {
 			ac, err := auth(r)
 			if err == nil {
 				return ac, nil
+			}
+			// An authenticator that could not *determine* an answer has not
+			// declined the credential, so the chain stops here. Checked
+			// before the fall-through so a wrapped one can never be read as
+			// "not mine, try the next" — that mistake ends as a 401 from the
+			// end of the chain, which turns an outage into a re-login storm
+			// and invites callers to negative-cache it.
+			var unavailable *AuthUnavailableError
+			if errors.As(err, &unavailable) {
+				return nil, err
 			}
 			// If it's a ValueError RpcError, try the next authenticator.
 			if rpcErr, ok := err.(*RpcError); ok && rpcErr.Type == "ValueError" {
