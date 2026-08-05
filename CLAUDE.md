@@ -115,6 +115,23 @@ Three byte figures answer three different questions and must not be conflated: `
 
 `HttpServer.ServeHTTP` echoes the caller's `X-Request-ID` (bounded at 128 chars) or mints a 16-char hex one, set before dispatch so it rides every exit path including 401s and 404s. The shared suite only asserts the header is listed in `Access-Control-Expose-Headers`, which this port passed for a while without emitting anything — `vgirpc/accesslog_test.go` guards emission.
 
+### Large payloads (>2 GiB)
+
+The Python reference wraps every unbuffered transport writer in `_ExactWriter` (vgi-rpc 0.41.0), which loops on the returned count *and* clamps each call to 1 GiB. **This port needs no counterpart, and none was added.** Arrow IPC hands a whole column buffer to a single `Write` (`writeIPCPayload` in arrow-go), but the writers this package hands to `Serve` — `*os.File` for stdio/subprocess, `net.Conn` for unix and TCP — already loop and clamp at `maxRW = 1 << 30` inside `internal/poll`. Nothing here buffers, re-chunks, or trusts a returned count on the way there; the only custom `io.Writer`s (`shmSliceWriter`, `compressResponseWriter`, the HTTP wrappers) are in-memory.
+
+That is a claim about the platform, so it was measured rather than assumed, on darwin/arm64:
+
+- one raw `syscall.Write` of `1<<31 + 1` bytes fails with `EINVAL` on a pipe *and* on a TCP socket — so the hazard is real here and the test below is not vacuous;
+- the same buffer through `(*os.File).Write`, a unix `net.Conn` and a TCP `net.Conn` returns `n == 2147483649, err == nil` with the peer receiving all of it.
+
+The shared suite is what guards this going forward. `large_payload.echo_binary_4mib` runs in every default run; `large_payload.echo_binary_over_int32_max` is opt-in because it allocates >2 GiB on both sides, and it is the only test that reaches the size where the syscall stops accepting a whole buffer:
+
+```bash
+VGI_RPC_CONFORMANCE_HUGE=1 vgi-rpc-test --cmd "$PWD/conformance-worker"   # also --unix / --tcp
+```
+
+Run it on macOS. Linux caps a single transfer at `0x7ffff000` and returns a short count that any correct loop absorbs, so a Linux-only CI cannot tell you whether this still holds. The test is scoped to pipe/unix/tcp; HTTP bodies take a different path with their own caps.
+
 ### Access-log rotation
 
 Unlike the Python reference (which builds rotation and record truncation into `vgi_rpc/logging_utils.py`), Go's `AccessLogHook` writes to any `io.Writer` and leaves rotation to the caller. The recommended pattern wraps `lumberjack.Logger`:

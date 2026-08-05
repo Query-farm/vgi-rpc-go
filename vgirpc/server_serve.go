@@ -92,6 +92,19 @@ func isTerminal(f *os.File) bool {
 }
 
 // Serve runs the server loop on the given reader/writer pair.
+//
+// w must honour the io.Writer contract for a response body of any size: a
+// Write that accepts fewer bytes than offered has to report an error. Arrow
+// IPC hands a whole column buffer to one Write, so a writer that returns a
+// short count with err == nil truncates the body, and the peer then blocks
+// forever waiting for bytes the IPC header promised — a deadlock, not an
+// exception. Above INT_MAX on macOS a single write(2)/send(2) refuses the
+// buffer outright (EINVAL on pipes and on both socket families here), which
+// is why the Python reference had to add a looping, 1 GiB-clamped writer of
+// its own. *os.File and net.Conn already do exactly that inside
+// internal/poll, so every transport this package ships is covered; the
+// obligation only bites a caller passing its own writer. See CLAUDE.md
+// § Large payloads (>2 GiB).
 func (s *Server) Serve(r io.Reader, w io.Writer) {
 	s.ServeWithContext(context.Background(), r, w)
 }
