@@ -165,11 +165,10 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 
 	if !results[1].IsNil() {
 		handlerErr = results[1].Interface().(error)
-		statusCode := http.StatusInternalServerError
-		if _, ok := handlerErr.(*RpcError); ok {
-			statusCode = http.StatusInternalServerError
-		}
-		h.writeHttpError(w, statusCode, handlerErr, nil)
+		// The 500 is what writeArrow rewrites to 200 + X-VGI-RPC-Error: true —
+		// the method ran and failed, so the failure is an application result
+		// (same contract as the unary path).
+		h.writeHttpError(w, http.StatusInternalServerError, handlerErr, nil)
 		return
 	}
 
