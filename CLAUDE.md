@@ -124,13 +124,15 @@ That is a claim about the platform, so it was measured rather than assumed, on d
 - one raw `syscall.Write` of `1<<31 + 1` bytes fails with `EINVAL` on a pipe *and* on a TCP socket — so the hazard is real here and the test below is not vacuous;
 - the same buffer through `(*os.File).Write`, a unix `net.Conn` and a TCP `net.Conn` returns `n == 2147483649, err == nil` with the peer receiving all of it.
 
-The shared suite is what guards this going forward. `large_payload.echo_binary_4mib` runs in every default run; `large_payload.echo_binary_over_int32_max` is opt-in because it allocates >2 GiB on both sides, and it is the only test that reaches the size where the syscall stops accepting a whole buffer:
+The shared suite is what guards this going forward. `large_payload.echo_binary_4mib` catches a writer that never loops; `large_payload.echo_binary_over_int32_max` crosses `INT_MAX`, and is the only test reaching the size where the syscall stops accepting a whole buffer. Both are **required** as of vgi-rpc 0.42.0 — the earlier `VGI_RPC_CONFORMANCE_HUGE` opt-in is gone, on the grounds that a conformance test nobody runs enforces nothing, least of all one guarding a failure that presents as a hung process rather than an error.
 
 ```bash
-VGI_RPC_CONFORMANCE_HUGE=1 vgi-rpc-test --cmd "$PWD/conformance-worker"   # also --unix / --tcp
+vgi-rpc-test --cmd "$PWD/conformance-worker"   # also --unix / --tcp
 ```
 
 Run it on macOS. Linux caps a single transfer at `0x7ffff000` and returns a short count that any correct loop absorbs, so a Linux-only CI cannot tell you whether this still holds. The test is scoped to pipe/unix/tcp; HTTP bodies take a different path with their own caps.
+
+Two CI steps run `vgi-rpc-test`, and the split is deliberate. `_pytest_suite.py` has no `large_payload` tests, so the category is reachable only through the runner; "Run conformance suite (large payloads included)" is where the >2 GiB test executes, with no access log and a 600s budget. The access-log step excludes that one test by name, because at `--access-log-debug` the emitter base64s the whole request batch into the record — a 4 MiB payload already produces a 5,593,736-byte record, so 2 GiB would produce a ~2.9 GB JSONL line for Python to schema-validate. Do not merge the two steps back together.
 
 ### Access-log rotation
 

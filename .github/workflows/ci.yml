@@ -85,6 +85,25 @@ jobs:
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_go_conformance.py -x -v
 
+      # The runner-driven conformance suite, with no access log attached.
+      #
+      # This is a different suite from the pytest step above, not a duplicate:
+      # `_pytest_suite.py` carries no `large_payload` tests at all (its only
+      # matching names are TestExternalLocation's externalisation cases), so
+      # the whole `large_payload` category is reachable ONLY through
+      # `vgi-rpc-test`. Until this step existed the sole `vgi-rpc-test`
+      # invocation in this workflow was the access-log one below, which is the
+      # one place the >2 GiB test must not run — so it would have run nowhere.
+      #
+      # `large_payload.echo_binary_over_int32_max` is required as of vgi-rpc
+      # 0.42.0 (it was opt-in behind VGI_RPC_CONFORMANCE_HUGE before), and it
+      # is the only test reaching the size where a single write(2)/send(2)
+      # stops accepting a whole buffer. It allocates >2 GiB on each side.
+      # The timeout is 600s against the reference's own 300s budget for that
+      # test: the old `timeout 120` would kill a perfectly healthy run.
+      - name: Run conformance suite (large payloads included)
+        run: timeout 600 vgi-rpc-test --cmd "$PWD/conformance-worker"
+
       # Access-log conformance was verified by hand for months and drifted
       # anyway — four people checked it by inspection and the rule was still
       # wrong. It runs here now so it cannot silently rot again.
@@ -94,16 +113,27 @@ jobs:
       # satisfies every rule that governs it, so the whole payload contract
       # goes unchecked. --require-request-data makes that absence a failure.
       #
-      # No --filter: the suite's zero-parameter methods (void*) send an empty
-      # schema and no row, and they are the exact case a row-demanding
-      # validator gets wrong (v0.36.1 shipped that bug). Do not add a filter
-      # that excludes them.
+      # The only --filter here is the >2 GiB payload, and it is an exclusion of
+      # size, not of coverage: at --access-log-debug the emitter base64s the
+      # whole re-serialized request batch into `request_data`, so this one test
+      # would write a single ~2.9 GB JSONL line and then ask Python to
+      # jsonschema-validate it. Measured factor: a 4 MiB payload already yields
+      # a 5,593,736-byte record (5,593,068 base64 chars), and it scales
+      # linearly. The test itself still runs — in the step above, where no
+      # access log is attached. This step's job is the log's *shape*, which a
+      # 4 MiB payload exercises exactly as well as a 2 GiB one.
+      #
+      # Nothing else is filtered: the suite's zero-parameter methods (void*)
+      # send an empty schema and no row, and they are the exact case a
+      # row-demanding validator gets wrong (v0.36.1 shipped that bug). Do not
+      # add a filter that excludes them.
       - name: Verify access log against the spec
         run: |
           timeout 120 vgi-rpc-test \
             --cmd "$PWD/conformance-worker --access-log $RUNNER_TEMP/access-log.jsonl --access-log-debug" \
             --access-log "$RUNNER_TEMP/access-log.jsonl" \
-            --require-request-data
+            --require-request-data \
+            --filter '!large_payload.echo_binary_over_int32_max'
 
       - name: Merge coverage profiles
         run: go tool covdata textfmt -i=_covdata -o=coverage-go.txt
