@@ -267,18 +267,20 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	if h.server.externalConfig != nil {
 		predicted := predictExternalizeBytes(resultBatch, h.server.externalConfig)
 		if h.maxExternalizedResponseBytes > 0 && predicted > h.maxExternalizedResponseBytes {
-			//lint:ignore ST1005 wording must match the Python reference verbatim — cross-lang conformance asserts on the literal substring
-			overshoot := fmt.Errorf("Externalised payload exceeds max_externalized_response_bytes (%d > %d) for method %q",
-				predicted, h.maxExternalizedResponseBytes, info.Name)
+			overshoot := newExternalCapError(info.Name, predicted, h.maxExternalizedResponseBytes)
 			handlerErr = overshoot
 			h.writeUnaryCapError(w, info, req.RequestID, logs, overshoot)
 			return
 		}
-		extBatch, extMeta, extErr := maybeExternalizeBatchCtx(ctx, resultBatch, arrow.Metadata{}, h.server.externalConfig)
+		extBatch, extMeta, rawBytes, extErr := externalizeBatchCtx(ctx, resultBatch, arrow.Metadata{}, h.server.externalConfig)
 		if extErr != nil {
 			slog.Error("failed to externalize unary result", "method", info.Name, "err", extErr)
 		} else if extBatch != resultBatch {
-			externalBytesWritten = predicted
+			// Charge the cap the raw IPC size actually produced, not the
+			// buffer-size estimate the pre-flight ran on: the estimate is
+			// deliberately a lower bound, so using it here would let a call
+			// slip past the cap by the size of the IPC framing.
+			externalBytesWritten = rawBytes
 			// Wrap the pointer batch with the location metadata so the
 			// IPC writer surfaces it on the wire.
 			withMeta := array.NewRecordBatchWithMetadata(extBatch.Schema(), extBatch.Columns(), extBatch.NumRows(), extMeta)

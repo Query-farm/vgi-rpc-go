@@ -321,6 +321,35 @@ def conformance_http_strict_cap_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_externalized_cap_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Go HTTP worker whose *external-channel* cap is the one that bites.
+
+    Backs the shared ``TestExternalizedResponseCap`` group. Two settings
+    make this fixture mean what it says:
+
+    * ``--max-externalized-response-bytes`` is tight (64 KiB) so an
+      externalised response overshoots it.
+    * ``--max-response-bytes`` is deliberately *generous* (8 MiB). An
+      externalised payload leaves only a pointer batch on the wire, so the
+      body cap should never be what fails here -- if it were tight too,
+      the group would pass while proving nothing about the external cap.
+
+    ``--externalize-threshold`` stays at the strict worker's 4 KiB default
+    so a modest payload still externalises, which is what lets the
+    under-cap control exercise the same channel without tripping the cap.
+    """
+    yield from _start_http_worker(
+        "--http-strict",
+        "--fake-storage",
+        conformance_fake_storage,
+        "--max-externalized-response-bytes",
+        str(64 * 1024),
+        "--max-response-bytes",
+        str(8 * 1024 * 1024),
+    )
+
+
+@pytest.fixture(scope="session")
 def conformance_http_externalize_always_port(conformance_fake_storage: str) -> Iterator[int]:
     """Go HTTP worker that externalizes EVERY non-empty response batch.
 

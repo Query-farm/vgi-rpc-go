@@ -35,15 +35,54 @@ func (h *HttpServer) SetMaxExternalizedResponseBytes(n int64) {
 	h.maxExternalizedResponseBytes = n
 }
 
-// predictExternalizeBytes returns the byte size of the external upload
-// that would happen if MaybeExternalizeBatch were invoked on this batch
-// right now, or 0 if the batch would not be externalised.
+// externalCapError reports that a response would push the call past
+// max_externalized_response_bytes.
+//
+// It exists as a distinct type so a caller can tell an operator cap refusal
+// apart from an ordinary handler failure. Producer streams need that
+// distinction: an in-handler error rides a plain 200 with an EXCEPTION
+// batch, while a cap refusal answers with the error-signalling status that
+// [HttpServer.writeArrow] rewrites to 200 + X-VGI-RPC-Error: true — the
+// same contract unary and exchange already follow.
+type externalCapError struct{ msg string }
+
+func (e *externalCapError) Error() string { return e.msg }
+
+// ErrorType is the exception type name the client sees. The Python
+// reference raises a plain RuntimeError for this overshoot, and without
+// this the wire would carry Go's "%T" fallback — a Go-internal type name
+// in a cross-language error payload.
+func (e *externalCapError) ErrorType() string { return "RuntimeError" }
+
+// newExternalCapError builds the overshoot error every external-cap check
+// raises. `projected` is the total the call would reach, not just this
+// batch's contribution.
+//
+// The wording is asserted on verbatim by the cross-language conformance
+// suite, so it must stay byte-identical to the Python reference — including
+// the leading capital, which is why this is the one place that composes it.
+func newExternalCapError(method string, projected, capBytes int64) *externalCapError {
+	return &externalCapError{msg: fmt.Sprintf(
+		"Externalised payload exceeds max_externalized_response_bytes (%d > %d) for method %q",
+		projected, capBytes, method)}
+}
+
+// predictExternalizeBytes estimates the external upload this batch would
+// incur if MaybeExternalizeBatch were invoked on it right now, or 0 if the
+// batch would not be externalised.
 //
 // Mirrors the threshold logic in MaybeExternalizeBatch so a pre-flight
 // check matches what the upload helper actually does. Used to refuse a
 // violating upload BEFORE incurring the storage round-trip — the
 // operator's intent in setting max_externalized_response_bytes is "don't
 // emit data beyond this per call," not "emit and then complain."
+//
+// The estimate is the in-memory Arrow buffer size, which is a lower bound
+// on the raw IPC bytes the cap is actually charged (IPC adds framing).
+// Deliberately so: a pre-flight that overestimated would refuse calls that
+// would in fact have fitted. On the unary and exchange paths the post-flush
+// [enforceResponseBudgets] check closes the gap; producers have only the
+// pre-flight, matching the Python reference.
 func predictExternalizeBytes(batch arrow.RecordBatch, config *ExternalLocationConfig) int64 {
 	if config == nil || config.Storage == nil {
 		return 0
@@ -72,8 +111,7 @@ func enforceResponseBudgets(method string, wireBytes, externalBytes, wireCap, ex
 		return fmt.Errorf("HTTP body exceeds max_response_bytes (%d > %d) for method %q", wireBytes, wireCap, method)
 	}
 	if externalCap > 0 && externalBytes > externalCap {
-		//lint:ignore ST1005 wording must match the Python reference verbatim — cross-lang conformance asserts on the literal substring
-		return fmt.Errorf("Externalised payload exceeds max_externalized_response_bytes (%d > %d) for method %q", externalBytes, externalCap, method)
+		return newExternalCapError(method, externalBytes, externalCap)
 	}
 	return nil
 }

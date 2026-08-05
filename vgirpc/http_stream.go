@@ -6,6 +6,7 @@ package vgirpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -274,7 +275,25 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	h.writeArrow(w, http.StatusOK, buf.Bytes())
+	h.writeArrow(w, streamResponseStatus(handlerErr), buf.Bytes())
+}
+
+// streamResponseStatus picks the status for a stream response that already
+// carries its outcome in the body.
+//
+// An in-handler stream error stays a plain 200 with an EXCEPTION batch —
+// the method ran, and the client learns the outcome by decoding the stream.
+// An operator cap refusal is different in kind: nothing the method did is
+// being delivered, so it answers with the error-signalling status that
+// writeArrow rewrites to 200 + X-VGI-RPC-Error: true, which is what lets a
+// proxy see the failure without parsing Arrow. Mirrors the Python
+// reference, which flips the response status only on cap overshoot.
+func streamResponseStatus(handlerErr error) int {
+	var capErr *externalCapError
+	if errors.As(handlerErr, &capErr) {
+		return http.StatusInternalServerError
+	}
+	return http.StatusOK
 }
 
 // handleStreamExchange dispatches stream exchange or producer continuation.
@@ -531,7 +550,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 			err = cerr
 		}
 	}
-	h.writeArrow(w, http.StatusOK, buf.Bytes())
+	h.writeArrow(w, streamResponseStatus(err), buf.Bytes())
 	return err
 }
 
@@ -599,8 +618,20 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		return err
 	}
 
+	// Refuse an over-budget upload before flushing — exchange is lockstep,
+	// so the whole external budget belongs to this single emit and there is
+	// no prior accumulation to carry.
+	if capErr := h.checkExternalBudget(out, info.Name, 0); capErr != nil {
+		for _, ab := range out.batches {
+			ab.batch.Release()
+		}
+		h.writeExchangeCapError(w, schema, info.Name, capErr)
+		return capErr
+	}
+
 	// Flush output batches, merging state token into the data batch metadata
 	var writeErr error
+	var externalBytes int64
 	for i, ab := range out.batches {
 		isDataBatch := (i == out.dataBatchIdx)
 		if isDataBatch {
@@ -609,6 +640,8 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 			// The token must ride the data batch even when the emit carried
 			// metadata or produced zero rows, or the client sees end-of-stream
 			// mid-exchange (mirrors Python's merge_data_metadata).
+			// Stats stay on the logical batch — externalizing changes where
+			// the bytes travel, not how many the call produced.
 			stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
 			bschema := schema
 			var keys, values []string
@@ -622,15 +655,23 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 			keys = append(keys, MetaStreamState)
 			values = append(values, string(newToken))
 			merged := arrow.NewMetadata(keys, values)
-			batchWithMeta := array.NewRecordBatchWithMetadata(
+			toWrite := array.NewRecordBatchWithMetadata(
 				bschema, ab.batch.Columns(), ab.batch.NumRows(), merged)
-			if werr := writer.Write(batchWithMeta); werr != nil {
+			// Externalize the token-bearing batch, not the bare one: the
+			// client recovers the continuation token from the *fetched*
+			// stream's metadata, so it has to be inside the upload.
+			if extBatch, rawBytes, replaced := h.externalizeStreamDataBatch(ctx, toWrite); replaced {
+				toWrite.Release()
+				toWrite = extBatch
+				externalBytes += rawBytes
+			}
+			if werr := writer.Write(toWrite); werr != nil {
 				h.logIPCWriteErr("data-batch", info.Name, werr)
 				if writeErr == nil {
 					writeErr = werr
 				}
 			}
-			batchWithMeta.Release()
+			toWrite.Release()
 		} else if ab.meta != nil {
 			// Use the batch's own (possibly projection-narrowed) schema and
 			// attach the custom metadata on top.
@@ -661,23 +702,100 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		}
 	}
 
-	// Hard wire-cap enforcement for exchange: if the IPC body exceeded
-	// max_response_bytes, replace the response with a fresh EXCEPTION-only
-	// stream so the client surfaces RpcError. External cap also enforced
-	// here for symmetry with Python (HTTP exchange doesn't externalise
-	// today, so externalBytes=0; harmless when storage is unconfigured).
-	if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), 0,
+	// Hard cap enforcement for exchange, both channels: if the IPC body
+	// exceeded max_response_bytes, or the upload exceeded
+	// max_externalized_response_bytes, replace the response with a fresh
+	// EXCEPTION-only stream so the client surfaces RpcError. The external
+	// arm is a backstop — the pre-flight above refuses the upload before it
+	// happens — and catches the case where the predicted size understated
+	// what actually went out.
+	if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), externalBytes,
 		h.maxResponseBytes, h.maxExternalizedResponseBytes); capErr != nil {
-		var errBuf bytes.Buffer
-		errW := ipc.NewWriter(&errBuf, ipc.WithSchema(schema))
-		h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(errW, schema, capErr, h.server.serverID, "", h.server.debugErrors))
-		h.logIPCWriteErr("close", info.Name, errW.Close())
-		h.writeArrow(w, http.StatusInternalServerError, errBuf.Bytes())
+		h.writeExchangeCapError(w, schema, info.Name, capErr)
 		return capErr
 	}
 
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
 	return writeErr
+}
+
+// writeExchangeCapError discards whatever the exchange turn produced and
+// answers with a fresh IPC stream carrying only the cap-overshoot error.
+// Goes out at the error-signalling status so writeArrow rewrites it to
+// 200 + X-VGI-RPC-Error: true.
+func (h *HttpServer) writeExchangeCapError(w http.ResponseWriter, schema *arrow.Schema, method string, capErr error) {
+	var errBuf bytes.Buffer
+	errW := ipc.NewWriter(&errBuf, ipc.WithSchema(schema))
+	h.logIPCWriteErr("cap-error-batch", method, writeErrorBatch(errW, schema, capErr, h.server.serverID, "", h.server.debugErrors))
+	h.logIPCWriteErr("close", method, errW.Close())
+	h.writeArrow(w, http.StatusInternalServerError, errBuf.Bytes())
+}
+
+// externalizeStreamDataBatch offloads a stream's data batch to external
+// storage when it clears the configured threshold. It returns the batch to
+// write, the raw (pre-compression) byte count to charge against
+// max_externalized_response_bytes, and whether the swap happened. The
+// caller owns the returned batch only when the last result is true;
+// otherwise the batch travels inline and the original is returned as-is.
+//
+// `batch` must already carry every piece of custom metadata the client is
+// meant to see — per-emit annotations and, on the exchange path, the
+// continuation token. The upload serializes the batch *with* its metadata
+// and the client reads that metadata back off the fetched inner stream, so
+// anything left on the pointer batch instead would be silently dropped when
+// the location resolves. (An exchange whose token rode the pointer would
+// end the stream mid-conversation.) This mirrors Python's
+// maybe_externalize_collector, which uploads the whole cycle before
+// replacing it with the pointer.
+//
+// An upload failure is logged and the batch travels inline: externalization
+// is an optimization, not a correctness requirement.
+func (h *HttpServer) externalizeStreamDataBatch(ctx context.Context, batch arrow.RecordBatch) (arrow.RecordBatch, int64, bool) {
+	if h.server.externalConfig == nil || batch.NumRows() == 0 {
+		return batch, 0, false
+	}
+	extBatch, extMeta, rawBytes, err := externalizeBatchCtx(ctx, batch, arrow.Metadata{}, h.server.externalConfig)
+	if err != nil {
+		slog.Error("failed to externalize stream batch", "err", err)
+		return batch, 0, false
+	}
+	if extBatch == batch {
+		return batch, 0, false
+	}
+	// Wrap the pointer batch with the location metadata so the IPC writer
+	// surfaces it on the wire (same step the unary path takes).
+	withMeta := array.NewRecordBatchWithMetadata(extBatch.Schema(), extBatch.Columns(), extBatch.NumRows(), extMeta)
+	extBatch.Release()
+	return withMeta, rawBytes, true
+}
+
+// checkExternalBudget pre-flights the external cap for one collector cycle.
+// It returns a non-nil error when uploading this cycle's data batch would
+// push the call past max_externalized_response_bytes.
+//
+// Pre-flight rather than post-flush because the operator's intent in
+// setting the cap is "don't emit data beyond this per call", not "emit and
+// then complain" — predicting the upload size from the data batch's buffer
+// size refuses a violating upload without paying for the storage
+// round-trip. This is also why the cap is *hard* for producer streams,
+// which get a soft wire cap: by the time a continuation token could carry
+// the overshoot to the next turn, the bytes are already in object storage
+// and the egress is already billed.
+//
+// `alreadyUploaded` is the running total for this HTTP turn, so a producer
+// cannot drip past the cap one iteration at a time.
+func (h *HttpServer) checkExternalBudget(out *OutputCollector, method string, alreadyUploaded int64) error {
+	if h.server.externalConfig == nil || h.maxExternalizedResponseBytes <= 0 || out.dataBatchIdx < 0 {
+		return nil
+	}
+	predicted := predictExternalizeBytes(out.batches[out.dataBatchIdx].batch, h.server.externalConfig)
+	if predicted == 0 {
+		return nil
+	}
+	if projected := alreadyUploaded + predicted; projected > h.maxExternalizedResponseBytes {
+		return newExternalCapError(method, projected, h.maxExternalizedResponseBytes)
+	}
+	return nil
 }
 
 // requestMetadata renders a decoded request's custom metadata as arrow.Metadata,
@@ -714,12 +832,21 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 
 	dataBatches := 0
 	firstTick := true
+	// Running external-channel total for this HTTP turn. The wire cap is
+	// soft for producers (a continuation token absorbs the overshoot); this
+	// one is not, so it has to be tallied across iterations rather than
+	// judged one batch at a time.
+	var externalBytes int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return true, nil
 		}
 		out := newOutputCollector(schema, h.server.serverID, true)
-		out.setBudgets(h.maxResponseBytes, h.maxExternalizedResponseBytes, h.server.externalConfig != nil)
+		remainingExternal := h.maxExternalizedResponseBytes
+		if remainingExternal > 0 {
+			remainingExternal = max(0, remainingExternal-externalBytes)
+		}
+		out.setBudgets(h.maxResponseBytes, remainingExternal, h.server.externalConfig != nil)
 		callCtx := &CallContext{
 			Ctx:               ctx,
 			ServerID:          h.server.serverID,
@@ -761,6 +888,17 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 			}
 		}
 
+		// Refuse an over-budget upload before flushing anything from this
+		// cycle — see checkExternalBudget for why the external cap gets no
+		// continuation-token escape.
+		if capErr := h.checkExternalBudget(out, info.Name, externalBytes); capErr != nil {
+			for _, ab := range out.batches {
+				ab.batch.Release()
+			}
+			h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(writer, schema, capErr, h.server.serverID, "", h.server.debugErrors))
+			return false, capErr
+		}
+
 		// Flush output. The data batch is the one at out.dataBatchIdx; it may
 		// carry per-batch metadata (e.g. vgi_batch_index, vgi_partition_values)
 		// yet must still count as a data batch and toward producerBatchLimit.
@@ -771,14 +909,31 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 		for i, ab := range out.batches {
 			isDataBatch := i == out.dataBatchIdx
 			if isDataBatch {
+				// Stats stay on the *logical* batch: output_bytes answers "how
+				// much Arrow data did this call produce", which externalizing
+				// does not change — only where the bytes travel. The upload
+				// itself is reported separately as externalized_bytes.
 				stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
+				// Attach per-emit metadata BEFORE offering the batch for
+				// externalization: the uploaded stream is where the client
+				// reads that metadata back from.
 				toWrite := ab.batch
+				owned := false
 				if ab.meta != nil {
 					toWrite = array.NewRecordBatchWithMetadata(
 						schema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
+					owned = true
+				}
+				if extBatch, rawBytes, replaced := h.externalizeStreamDataBatch(ctx, toWrite); replaced {
+					if owned {
+						toWrite.Release()
+					}
+					toWrite = extBatch
+					owned = true
+					externalBytes += rawBytes
 				}
 				werr := writer.Write(toWrite)
-				if ab.meta != nil {
+				if owned {
 					toWrite.Release()
 				}
 				if werr != nil {

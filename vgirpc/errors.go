@@ -185,6 +185,8 @@ func buildErrorExtra(err error, debug bool) string {
 		errType = e.ErrorType()
 	case *ProtocolVersionError:
 		errType = e.ErrorType()
+	case *externalCapError:
+		errType = e.ErrorType()
 	}
 
 	extra := errorExtra{

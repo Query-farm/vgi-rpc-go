@@ -234,26 +234,51 @@ func maybeExternalizeBatchCtx(
 	meta arrow.Metadata,
 	config *ExternalLocationConfig,
 ) (arrow.RecordBatch, arrow.Metadata, error) {
+	outBatch, outMeta, _, err := externalizeBatchCtx(ctx, batch, meta, config)
+	return outBatch, outMeta, err
+}
+
+// externalizeBatchCtx is [maybeExternalizeBatchCtx] plus the byte count the
+// upload should be charged for when enforcing
+// max_externalized_response_bytes: the RAW IPC size, measured before any
+// optional compression, and 0 when the batch travelled inline.
+//
+// Three different byte figures live in this function and they must not be
+// conflated. The threshold decision uses the in-memory Arrow buffer size
+// (O(1), no serialization). The *cap* is charged the raw IPC size, so
+// turning compression on cannot quietly raise how much data a call is
+// allowed to emit — the client still has to materialise those bytes.
+// The access log's externalized_bytes counts what actually left the
+// process, which is the compressed size when compression is enabled.
+// This split mirrors the Python reference's maybe_externalize_batch, which
+// returns raw_size while _traced_upload counts len(ipc_bytes).
+func externalizeBatchCtx(
+	ctx context.Context,
+	batch arrow.RecordBatch,
+	meta arrow.Metadata,
+	config *ExternalLocationConfig,
+) (arrow.RecordBatch, arrow.Metadata, int64, error) {
 	if config == nil || config.Storage == nil {
-		return batch, meta, nil
+		return batch, meta, 0, nil
 	}
 
 	// Never externalize zero-row batches (logs, errors, pointer batches)
 	if batch.NumRows() == 0 {
-		return batch, meta, nil
+		return batch, meta, 0, nil
 	}
 
 	// Check threshold
 	size := batchBufferSize(batch)
 	if size < config.threshold() {
-		return batch, meta, nil
+		return batch, meta, 0, nil
 	}
 
 	// Serialize to IPC
 	ipcData, err := serializeBatchAsIPC(batch, nil)
 	if err != nil {
-		return batch, meta, fmt.Errorf("serializing batch for external storage: %w", err)
+		return batch, meta, 0, fmt.Errorf("serializing batch for external storage: %w", err)
 	}
+	rawBytes := int64(len(ipcData))
 
 	// Compute SHA-256 of raw IPC bytes (before compression)
 	hash := sha256.Sum256(ipcData)
@@ -268,7 +293,7 @@ func maybeExternalizeBatchCtx(
 		}
 		encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(level))
 		if err != nil {
-			return batch, meta, fmt.Errorf("creating zstd encoder: %w", err)
+			return batch, meta, 0, fmt.Errorf("creating zstd encoder: %w", err)
 		}
 		ipcData = encoder.EncodeAll(ipcData, nil)
 		encoder.Close()
@@ -286,12 +311,12 @@ func maybeExternalizeBatchCtx(
 	// Upload
 	locationURL, err := config.Storage.Upload(ipcData, batch.Schema(), contentEncoding)
 	if err != nil {
-		return batch, meta, fmt.Errorf("uploading to external storage: %w", err)
+		return batch, meta, 0, fmt.Errorf("uploading to external storage: %w", err)
 	}
 
 	// Create pointer batch with SHA-256 checksum
 	pointerBatch, pointerMeta := MakeExternalLocationBatch(batch.Schema(), locationURL, sha256Hex)
-	return pointerBatch, pointerMeta, nil
+	return pointerBatch, pointerMeta, rawBytes, nil
 }
 
 // ---------------------------------------------------------------------------
