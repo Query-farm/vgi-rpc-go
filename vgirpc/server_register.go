@@ -17,7 +17,7 @@ func Unary[P any, R any](s *Server, name string, handler func(context.Context, *
 	paramsType := reflect.TypeOf(p)
 	resultType := reflect.TypeOf(r)
 
-	paramsSchema, err := structToSchema(paramsType)
+	paramsSchema, err := paramsSchemaFor(p, paramsType)
 	if err != nil {
 		panic(fmt.Sprintf("vgirpc: registering %q: invalid params type %T: %v", name, p, err))
 	}
@@ -44,7 +44,7 @@ func UnaryVoid[P any](s *Server, name string, handler func(context.Context, *Cal
 	var p P
 	paramsType := reflect.TypeOf(p)
 
-	paramsSchema, err := structToSchema(paramsType)
+	paramsSchema, err := paramsSchemaFor(p, paramsType)
 	if err != nil {
 		panic(fmt.Sprintf("vgirpc: registering %q: invalid params type %T: %v", name, p, err))
 	}
@@ -72,7 +72,7 @@ func Producer[P any](s *Server, name string, outputSchema *arrow.Schema,
 	}
 	var p P
 	paramsType := reflect.TypeOf(p)
-	paramsSchema, err := structToSchema(paramsType)
+	paramsSchema, err := paramsSchemaFor(p, paramsType)
 	if err != nil {
 		panic(fmt.Sprintf("vgirpc: registering %q: invalid params type %T: %v", name, p, err))
 	}
@@ -97,7 +97,7 @@ func ProducerWithHeader[P any](s *Server, name string, outputSchema *arrow.Schem
 	}
 	var p P
 	paramsType := reflect.TypeOf(p)
-	paramsSchema, err := structToSchema(paramsType)
+	paramsSchema, err := paramsSchemaFor(p, paramsType)
 	if err != nil {
 		panic(fmt.Sprintf("vgirpc: registering %q: invalid params type %T: %v", name, p, err))
 	}
@@ -127,7 +127,7 @@ func Exchange[P any](s *Server, name string, outputSchema, inputSchema *arrow.Sc
 	}
 	var p P
 	paramsType := reflect.TypeOf(p)
-	paramsSchema, err := structToSchema(paramsType)
+	paramsSchema, err := paramsSchemaFor(p, paramsType)
 	if err != nil {
 		panic(fmt.Sprintf("vgirpc: registering %q: invalid params type %T: %v", name, p, err))
 	}
@@ -156,7 +156,7 @@ func ExchangeWithHeader[P any](s *Server, name string, outputSchema, inputSchema
 	}
 	var p P
 	paramsType := reflect.TypeOf(p)
-	paramsSchema, err := structToSchema(paramsType)
+	paramsSchema, err := paramsSchemaFor(p, paramsType)
 	if err != nil {
 		panic(fmt.Sprintf("vgirpc: registering %q: invalid params type %T: %v", name, p, err))
 	}
@@ -185,7 +185,7 @@ func DynamicStreamWithHeader[P any](s *Server, name string,
 	headerSchema *arrow.Schema, handler func(context.Context, *CallContext, P) (*StreamResult, error)) {
 	var p P
 	paramsType := reflect.TypeOf(p)
-	paramsSchema, err := structToSchema(paramsType)
+	paramsSchema, err := paramsSchemaFor(p, paramsType)
 	if err != nil {
 		panic(fmt.Sprintf("vgirpc: registering %q: invalid params type %T: %v", name, p, err))
 	}
@@ -206,3 +206,31 @@ func DynamicStreamWithHeader[P any](s *Server, name string,
 // RunStdio runs the server loop reading from stdin and writing to stdout.
 // If stdin or stdout is connected to a terminal, a warning is printed to
 // stderr (matching the Python vgi-rpc behaviour).
+
+// ParamsSchemaDeclarer lets a params type advertise a wire schema different
+// from the one its Go fields imply.
+//
+// The catalog methods need this: their protocol shape is a single wrapped
+// `request` binary column holding an IPC-encoded inner batch, while the Go
+// handler declares the inner batch's fields directly and relies on
+// deserializeParams to unwrap. Without an override, `__describe__` advertises
+// the flat fields — and a client that builds its request from the advertised
+// schema (as the TypeScript client does) then finds none of its keys and sends
+// a batch of all-nulls. Decoding stays tolerant of both shapes; only what the
+// server *claims* changes.
+type ParamsSchemaDeclarer interface {
+	// VgiRpcParamsSchema returns the schema to advertise for this params type.
+	VgiRpcParamsSchema() *arrow.Schema
+}
+
+// paramsSchemaFor returns the schema to advertise for a params type: the
+// type's own declaration when it implements ParamsSchemaDeclarer, otherwise
+// the one derived from its struct tags.
+func paramsSchemaFor(p any, paramsType reflect.Type) (*arrow.Schema, error) {
+	if d, ok := p.(ParamsSchemaDeclarer); ok {
+		if sc := d.VgiRpcParamsSchema(); sc != nil {
+			return sc, nil
+		}
+	}
+	return structToSchema(paramsType)
+}
