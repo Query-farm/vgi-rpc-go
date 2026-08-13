@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+# © Copyright 2025-2026, Query.Farm LLC - https://query.farm
+# SPDX-License-Identifier: Apache-2.0
+
+r"""Regenerate every brand asset in ``docs/assets`` from one master logo.
+
+The master is committed as ``docs/assets/logo-master.png``: the shield mark on
+a white background, at the highest resolution we have.  Every other asset is
+derived, so a new master is a one-command reroll rather than eight hand edits
+that drift apart:
+
+    uv run --with pillow --with numpy python scripts/regenerate_logo_assets.py
+
+Pass ``--master PATH`` to cut the assets from a different source, which also
+replaces the committed master.
+
+Two things here are less obvious than they look.
+
+**Background is every near-white pixel, not just the outer margin.** Keying
+only what the border can reach leaves the enclosed gaps opaque — the sky
+between the tree and the barn wall, the holes between the cloud's connector
+traces — which read as white specks on the cream page and glare on a dark one.
+The mark's lightest real ink is cream at min-channel 193, far below the
+threshold, so a global key cannot eat it.  That margin is not guaranteed for
+some future master, so the script reports how much keyed area was *enclosed*
+rather than border-connected: a master with genuine white ink shows up there
+as a large number instead of a few hundred stray pixels.
+
+**Antialiased edges need partial alpha, not a hard cut.** The outline blends
+into white over 1-2px.  Those pixels get alpha from how far they are from
+white, and their colour is then un-premultiplied so the result composites back
+over white exactly as the master did — and degrades gracefully over the cream
+page background rather than showing a white fringe.
+"""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+# Repository paths.
+_REPO = Path(__file__).resolve().parent.parent
+_ASSETS = _REPO / "docs" / "assets"
+_MASTER = _ASSETS / "logo-master.png"
+
+# A pixel is "background candidate" when every channel is at least this.  The
+# master's white is not perfectly flat (252-255), so an exact-white test leaves
+# a speckled halo.
+_WHITE_FLOOR = 244
+
+# How far the partial-alpha band reaches into the mark from the keyed region.
+# Two pixels covers the master's antialiasing; more would eat into solid ink.
+_EDGE_BAND = 2
+
+# Apple composites a transparent home-screen icon onto black on some iOS
+# versions, so that one asset stays opaque.  Cream matches the page background
+# the mark was drawn for.
+_ICON_BACKGROUND = (250, 248, 240)
+
+# This repo's social card carries no text — it is the mark alone on the cream
+# page colour — so it is drawn from scratch rather than patched in place.  The
+# geometry reproduces the card it replaces: 716px wide, centred in 1200x630.
+_CARD_SIZE = (1200, 630)
+_CARD_BACKGROUND = (239, 229, 194)
+_CARD_LOGO_WIDTH = 716
+
+
+def _connected_to_border(candidate: np.ndarray) -> np.ndarray:
+    """Return the subset of *candidate* reachable from the image border.
+
+    Args:
+        candidate: 2-D bool array marking every near-white pixel.
+
+    Returns:
+        A 2-D bool array: the background proper, with interior white left out.
+
+    """
+    reached = np.zeros_like(candidate)
+    reached[0, :] = candidate[0, :]
+    reached[-1, :] = candidate[-1, :]
+    reached[:, 0] = candidate[:, 0]
+    reached[:, -1] = candidate[:, -1]
+
+    # Iterated 8-connected dilation clipped to the candidate set. Simple enough
+    # to trust by reading, and a few seconds on a 1200x900 master.
+    while True:
+        grown = reached.copy()
+        for shift, axis in ((1, 0), (-1, 0), (1, 1), (-1, 1)):
+            grown |= np.roll(reached, shift, axis=axis)
+        # Diagonals, so a 1px-wide gap between two shapes still lets the fill through.
+        for dy in (-1, 1):
+            for dx in (-1, 1):
+                grown |= np.roll(np.roll(reached, dy, axis=0), dx, axis=1)
+        grown &= candidate
+        if np.array_equal(grown, reached):
+            return reached
+        reached = grown
+
+
+def _dilate(mask: np.ndarray, radius: int) -> np.ndarray:
+    """Grow *mask* by *radius* pixels in 8-connectivity."""
+    out = mask.copy()
+    for _ in range(radius):
+        grown = out.copy()
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                grown |= np.roll(np.roll(out, dy, axis=0), dx, axis=1)
+        out = grown
+    return out
+
+
+def _already_transparent(master: Image.Image) -> bool:
+    """True when *master* carries its own alpha channel and actually uses it.
+
+    A master exported straight to transparency needs no keying, and keying it
+    anyway would be destructive: ``convert("RGB")`` drops the alpha and leaves
+    whatever RGB sits under the transparent pixels, which is as likely to be
+    black as white — the white-floor test then keys nothing and the result is
+    the mark on a black slab.
+
+    "Uses it" is deliberately a threshold rather than "has an A band": a fully
+    opaque RGBA export is the white-background case wearing an alpha channel,
+    and belongs on the keying path.
+    """
+    if master.mode not in ("RGBA", "LA", "PA"):
+        return False
+    alpha = np.asarray(master.convert("RGBA"))[..., 3]
+    return bool((alpha < 250).mean() > 0.01)
+
+
+def key_out_background(master: Image.Image) -> Image.Image:
+    """Replace the master's white background with transparency.
+
+    A master that is already transparent is passed through on its own alpha —
+    cropped to the mark, but otherwise untouched. Round-tripping it through
+    white would re-blend every antialiased edge against a background it was
+    never drawn on.
+
+    Args:
+        master: The logo on a white background, or one already transparent.
+
+    Returns:
+        An RGBA image cropped to the mark's bounding box.
+
+    """
+    if _already_transparent(master):
+        image = master.convert("RGBA")
+        opaque = int((np.asarray(image)[..., 3] > 0).sum())
+        print(f"master is already transparent: {opaque:,} px of mark, no keying applied")
+        bbox = image.getbbox()
+        return image.crop(bbox) if bbox else image
+
+    rgb = np.asarray(master.convert("RGB")).astype(np.float64)
+    background = rgb.min(axis=2) >= _WHITE_FLOOR
+    edge = _dilate(background, _EDGE_BAND) & ~background
+
+    # Enclosed keyed area is the tell that a master carries genuine white ink
+    # rather than gaps in the silhouette.  A few hundred pixels is the sky
+    # showing through the artwork; a few thousand means read the output before
+    # trusting it.
+    enclosed = int((background & ~_connected_to_border(background)).sum())
+    print(f"keyed {int(background.sum()):,} px, of which {enclosed:,} enclosed (gaps in the mark, not its margin)")
+
+    # Distance from white drives alpha in the edge band: solid ink is far from
+    # white and stays opaque, a pixel half-blended into the page is half
+    # transparent.  Keyed pixels snap to zero rather than inheriting the
+    # master's not-quite-white noise — otherwise the margin survives at alpha
+    # 1-3, invisible but enough to defeat the bounding-box crop below.
+    alpha = np.ones(rgb.shape[:2], dtype=np.float64)
+    alpha[background] = 0.0
+    alpha[edge] = 1.0 - rgb.min(axis=2)[edge] / 255.0
+
+    # Un-premultiply against white. Without this every edge keeps the white it
+    # was blended with and the mark wears a pale outline on a coloured page.
+    safe = np.maximum(alpha, 1e-6)[..., None]
+    straight = np.where(
+        alpha[..., None] > 0.0,
+        (rgb - (1.0 - safe) * 255.0) / safe,
+        0.0,
+    )
+
+    out = np.empty((*rgb.shape[:2], 4), dtype=np.uint8)
+    out[..., :3] = np.clip(straight, 0, 255).astype(np.uint8)
+    out[..., 3] = np.clip(alpha * 255.0, 0, 255).astype(np.uint8)
+    image = Image.fromarray(out, mode="RGBA")
+
+    # Crop the dead margin so every derived size is tight and predictable.
+    bbox = image.getbbox()
+    return image.crop(bbox) if bbox else image
+
+
+def _scaled_to_width(logo: Image.Image, width: int) -> Image.Image:
+    """Resample *logo* to *width*, preserving aspect ratio."""
+    height = round(logo.height * width / logo.width)
+    return logo.resize((width, height), Image.LANCZOS)
+
+
+def _letterboxed(logo: Image.Image, size: int, background: tuple[int, int, int] | None) -> Image.Image:
+    """Centre *logo* in a square canvas of *size*, padding rather than cropping.
+
+    Args:
+        logo: The transparent mark.
+        size: Side length of the square result.
+        background: Fill colour, or ``None`` for a transparent canvas.
+
+    Returns:
+        A square RGBA image.
+
+    """
+    # Inset slightly: a mark that touches the icon's edge reads as clipped.
+    fitted = _scaled_to_width(logo, round(size * 0.94))
+    if fitted.height > size:
+        fitted = fitted.resize((round(fitted.width * size / fitted.height), size), Image.LANCZOS)
+    canvas = Image.new("RGBA", (size, size), (*background, 255) if background else (0, 0, 0, 0))
+    canvas.alpha_composite(fitted, ((size - fitted.width) // 2, (size - fitted.height) // 2))
+    return canvas
+
+
+def _rebuild_social_card(logo: Image.Image, card_path: Path) -> None:
+    """Draw the social card: the mark centred on the cream page colour.
+
+    Unlike the sibling ports, this card is wordless, so nothing on it has to
+    survive the reroll and it is redrawn rather than patched — no dependency on
+    the previous card existing, and no fonts involved.
+
+    Args:
+        logo: The transparent mark.
+        card_path: The card to write.
+
+    """
+    card = Image.new("RGBA", _CARD_SIZE, (*_CARD_BACKGROUND, 255))
+    fitted = _scaled_to_width(logo, _CARD_LOGO_WIDTH)
+    card.alpha_composite(
+        fitted,
+        ((_CARD_SIZE[0] - fitted.width) // 2, (_CARD_SIZE[1] - fitted.height) // 2),
+    )
+    card.convert("RGB").save(card_path)
+
+
+def main() -> None:
+    """Cut every derived asset from the master and report what was written."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--master",
+        type=Path,
+        default=None,
+        help="Source logo on a white background. Replaces the committed master when given.",
+    )
+    args = parser.parse_args()
+
+    if args.master is not None:
+        shutil.copyfile(args.master, _MASTER)
+    if not _MASTER.exists():
+        parser.error(f"no master at {_MASTER}; pass --master PATH")
+
+    logo = key_out_background(Image.open(_MASTER))
+    print(f"master {Image.open(_MASTER).size} -> keyed mark {logo.size}")
+
+    # Full-resolution transparent mark. The README embeds this directly.
+    logo.save(_ASSETS / "logo-shield.png")
+
+    # Served on the landing / describe / 404 / 401 pages, which render it at
+    # 120-200 CSS px, and as the docs hero at 200. 600 keeps that 3x.
+    _scaled_to_width(logo, 600).save(_ASSETS / "logo-hero.png")
+
+    # mkdocs nav logo, rendered around 48px tall.
+    _scaled_to_width(logo, 512).save(_ASSETS / "logo.png")
+
+    _letterboxed(logo, 180, _ICON_BACKGROUND).save(_ASSETS / "apple-touch-icon.png")
+    _letterboxed(logo, 32, None).save(_ASSETS / "favicon-32x32.png")
+    _letterboxed(logo, 16, None).save(_ASSETS / "favicon-16x16.png")
+    _letterboxed(logo, 48, None).save(
+        _ASSETS / "favicon.ico",
+        sizes=[(16, 16), (32, 32), (48, 48)],
+    )
+
+    _rebuild_social_card(logo, _ASSETS / "social-card.png")
+
+    for name in [*sorted(p.name for p in _ASSETS.glob("*.png")), "favicon.ico"]:
+        path = _ASSETS / name
+        print(f"  {name:24} {Image.open(path).size!s:12} {path.stat().st_size // 1024:>5} KiB")
+
+
+if __name__ == "__main__":
+    main()
