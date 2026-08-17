@@ -66,6 +66,12 @@ const (
 	// wrong reason. Resolvable, the guard is the only thing that can produce a
 	// rejection.
 	conformanceJWSTrapToken = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl"
+	// The credential whose resolution is *unknowable* rather than unknown. The
+	// shared suite posts it to check that a backing-store outage surfaces as a
+	// transient 503 and not as this endpoint's own definitive 404 — which a
+	// caller may negative-cache, so a briefly unreachable store would be
+	// remembered as a bad credential for the cache's lifetime.
+	conformanceUnavailableToken = "conformance-unavailable-token"
 	// Well above the ~13 introspections the shared group makes in one second,
 	// so the limiter can never turn a conformance run into a flake.
 	conformanceIntrospectRateLimit = 200
@@ -87,9 +93,16 @@ func principalFromHeader(r *http.Request) (*vgirpc.AuthContext, error) {
 	}, nil
 }
 
-// conformanceTokenResolver resolves the two fixed credentials the shared
-// introspection group posts; everything else is unresolvable.
+// conformanceTokenResolver resolves the fixed credentials the shared
+// introspection group posts.
+//
+// Three answers, deliberately: an identity, ok=false for "does not resolve",
+// and an error for "I could not find out". The third is not a flavour of the
+// second — ok=false becomes the definitive 404 a caller may negative-cache.
 func conformanceTokenResolver(credential string) (vgirpc.TokenIdentity, bool, error) {
+	if credential == conformanceUnavailableToken {
+		return vgirpc.TokenIdentity{}, false, vgirpc.NewAuthUnavailable("conformance: mapping store unreachable")
+	}
 	if credential == conformanceSubjectToken || credential == conformanceJWSTrapToken {
 		return vgirpc.TokenIdentity{
 			Principal:  conformanceSubjectPrincipal,
