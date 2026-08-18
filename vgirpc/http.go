@@ -345,11 +345,12 @@ func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool)
 }
 
 // isMaxBytesExempt returns true for routes that should bypass the
-// max_request_bytes enforcement: __upload_url__ (its payloads are
-// intrinsically small) and health checks.
+// max_request_bytes enforcement. Health checks have no request payload.
+// The upload-URL control route is deliberately not exempt: it accepts a
+// client-controlled Arrow body and must reject an oversized request before
+// allocating storage.
 func (h *HttpServer) isMaxBytesExempt(path string) bool {
 	for _, base := range []string{
-		h.prefix + "/__upload_url__",
 		h.prefix + "/health",
 		"/health",
 	} {
@@ -593,8 +594,8 @@ func (h *HttpServer) SetUploadURLProvider(p UploadURLProvider) {
 // the server will accept on RPC routes. Requests with a Content-Length
 // exceeding this limit receive HTTP 413. The value is also advertised
 // via the VGI-Max-Request-Bytes capability header. Set to 0 to disable
-// (no advertisement, no enforcement). The /__upload_url__ and /health
-// routes are exempt from enforcement.
+// (no advertisement, no enforcement). Health routes are exempt from
+// enforcement.
 func (h *HttpServer) SetMaxRequestBytes(n int64) {
 	h.maxRequestBytes = n
 }
@@ -857,9 +858,9 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Add CORS headers to all non-OPTIONS responses.
 	h.addCorsHeaders(w, r, false)
 
-	// Enforce the advertised max_request_bytes cap on RPC routes (the
-	// upload-URL and health routes are exempt because their payloads
-	// are intrinsically tiny and not user-controlled).
+	// Enforce the advertised max_request_bytes cap on RPC routes. The
+	// upload-URL control request is included because its Arrow payload is
+	// client-controlled; only payload-free health routes are exempt.
 	if h.maxRequestBytes > 0 && r.ContentLength > h.maxRequestBytes && !h.isMaxBytesExempt(r.URL.Path) {
 		http.Error(w, fmt.Sprintf(
 			"Request body of %d bytes exceeds max_request_bytes=%d. Use the upload-URL flow (__upload_url__/init) to externalize large inputs.",

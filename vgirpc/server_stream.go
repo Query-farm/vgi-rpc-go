@@ -44,16 +44,33 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		callCtx.LogLevel = LogTrace
 	}
 
-	// Call handler to get StreamResult
-	results := info.Handler.Call([]reflect.Value{
-		reflect.ValueOf(ctx),
-		reflect.ValueOf(callCtx),
-		params,
-	})
+	// Call handler to get StreamResult. Recover user panics at the RPC
+	// boundary so the process keeps serving and dispatch cleanup still runs.
+	var streamResult *StreamResult
+	var callErr error
+	func() {
+		defer func() {
+			if rv := recover(); rv != nil {
+				callErr = &RpcError{
+					Type:    "RuntimeError",
+					Message: fmt.Sprintf("handler panicked: %v", rv),
+				}
+			}
+		}()
+		results := info.Handler.Call([]reflect.Value{
+			reflect.ValueOf(ctx),
+			reflect.ValueOf(callCtx),
+			params,
+		})
+		if !results[1].IsNil() {
+			callErr = results[1].Interface().(error)
+			return
+		}
+		streamResult = results[0].Interface().(*StreamResult)
+	}()
 
 	// Check for init error
-	if !results[1].IsNil() {
-		callErr := results[1].Interface().(error)
+	if callErr != nil {
 
 		// Write the error inside the expected output stream format (not a
 		// standalone error stream) so the client can read it during the
@@ -70,8 +87,16 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		drainInputStream(r)
 		return callErr, nil
 	}
-
-	streamResult := results[0].Interface().(*StreamResult)
+	if streamResult == nil {
+		callErr = &RpcError{Type: "RuntimeError", Message: "stream handler returned a nil result"}
+		outputSchema := info.OutputSchema
+		if outputSchema == nil {
+			outputSchema = arrow.NewSchema(nil, nil)
+		}
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, callErr, s.serverID, req.RequestID, s.debugErrors))
+		drainInputStream(r)
+		return callErr, nil
+	}
 	outputSchema := streamResult.OutputSchema
 	state := streamResult.State
 
@@ -176,6 +201,16 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			break
 		}
 		inputBatch := inputReader.RecordBatch()
+		// inputReader owns its current record until Next. Resolution and casting
+		// allocate replacement records which this iteration owns and must release
+		// before another input is read.
+		var ownedInput arrow.RecordBatch
+		releaseInput := func() {
+			if ownedInput != nil {
+				ownedInput.Release()
+				ownedInput = nil
+			}
+		}
 		slog.Debug("stream: got input batch", "method", info.Name, "rows", inputBatch.NumRows(), "cols", inputBatch.NumCols())
 
 		// Client cancellation signal: a batch carrying vgi_rpc.cancel metadata
@@ -234,6 +269,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				break
 			}
 			inputBatch = resolved
+			ownedInput = resolved
 			if release {
 				_ = req.Shm.FreeOffset(releaseOff)
 			}
@@ -247,9 +283,19 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			}
 			resolvedBatch, _, resolveErr := ResolveExternalLocation(inputBatch, inputMeta, s.externalConfig)
 			if resolveErr != nil {
-				slog.Error("failed to resolve external input", "err", resolveErr)
-			} else {
+				slog.Error("failed to resolve external input", "method", req.Method, "err", resolveErr)
+				streamErr = &RpcError{
+					Type:    "IOError",
+					Message: fmt.Sprintf("external input resolve failed: %v", resolveErr),
+				}
+				s.logIPCWriteErr("stream-external-resolve-error", req.Method,
+					writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.debugErrors))
+				releaseInput()
+				break
+			} else if resolvedBatch != inputBatch {
+				releaseInput()
 				inputBatch = resolvedBatch
+				ownedInput = resolvedBatch
 			}
 		}
 
@@ -259,10 +305,14 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			if castErr != nil {
 				streamErr = castErr
 				s.logIPCWriteErr("cast-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, castErr, s.serverID, req.RequestID, s.debugErrors))
+				releaseInput()
 				break
 			}
-			defer castBatch.Release()
-			inputBatch = castBatch
+			if castBatch != inputBatch {
+				releaseInput()
+				inputBatch = castBatch
+				ownedInput = castBatch
+			}
 		}
 
 		// Record input stats per streaming batch
@@ -312,6 +362,8 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 
 		if streamErr != nil {
 			s.logIPCWriteErr("stream-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.debugErrors))
+			out.releaseBatches()
+			releaseInput()
 			break
 		}
 
@@ -320,6 +372,8 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			if err := out.validate(); err != nil {
 				streamErr = err
 				s.logIPCWriteErr("validate-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, err, s.serverID, req.RequestID, s.debugErrors))
+				out.releaseBatches()
+				releaseInput()
 				break
 			}
 		}
@@ -372,6 +426,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				break
 			}
 		}
+		releaseInput()
 
 		if transportErr != nil {
 			break

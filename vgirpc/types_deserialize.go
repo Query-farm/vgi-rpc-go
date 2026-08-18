@@ -93,6 +93,19 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 	if desc.Err != nil {
 		return reflect.Value{}, desc.Err
 	}
+	// Parameter batches are a declared wire contract, not a best-effort
+	// struct mapping.  Accepting a subset, reordered columns, or merely
+	// convertible types lets malformed requests reach handlers with silently
+	// defaulted or mis-bound values.  Schema.Equal compares field order, name,
+	// type, and nullability while deliberately ignoring schema metadata (RPC
+	// routing metadata lives on the record batch, not in the parameter schema).
+	if !batch.Schema().Equal(desc.Schema) {
+		return reflect.Value{}, fmt.Errorf(
+			"parameter schema mismatch: expected %s, got %s",
+			desc.Schema,
+			batch.Schema(),
+		)
+	}
 
 	result := reflect.New(target).Elem()
 

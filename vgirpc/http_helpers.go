@@ -30,6 +30,17 @@ func (e *unsupportedEncodingError) Error() string {
 	return fmt.Sprintf("Unsupported Content-Encoding: %q", e.Encoding)
 }
 
+// requestBodyTooLargeError distinguishes the advertised max_request_bytes
+// refusal from malformed-body errors so chunked requests (which have no
+// Content-Length for ServeHTTP's fast check) still receive HTTP 413.
+type requestBodyTooLargeError struct {
+	Limit int64
+}
+
+func (e *requestBodyTooLargeError) Error() string {
+	return fmt.Sprintf("Request body exceeds max_request_bytes=%d", e.Limit)
+}
+
 func buildHTTPTransportMeta(ipcMeta map[string]string, r *http.Request) map[string]string {
 	meta := make(map[string]string, len(ipcMeta)+4)
 	for k, v := range ipcMeta {
@@ -129,6 +140,12 @@ func (h *HttpServer) handleDescribe(w http.ResponseWriter, r *http.Request) {
 // huge decompressed size cannot OOM the server (decompression-bomb DoS).
 func (h *HttpServer) readHTTPBody(r *http.Request) ([]byte, error) {
 	limit := h.maxBodySize
+	requestCapApplied := false
+	if h.maxRequestBytes > 0 && !h.isMaxBytesExempt(r.URL.Path) &&
+		(limit <= 0 || h.maxRequestBytes <= limit) {
+		limit = h.maxRequestBytes
+		requestCapApplied = true
+	}
 
 	var body []byte
 	var err error
@@ -141,6 +158,9 @@ func (h *HttpServer) readHTTPBody(r *http.Request) ([]byte, error) {
 		return nil, err
 	}
 	if limit > 0 && int64(len(body)) > limit {
+		if requestCapApplied {
+			return nil, &requestBodyTooLargeError{Limit: limit}
+		}
 		return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Request body exceeds maximum size of %d bytes", limit)}
 	}
 
@@ -170,10 +190,16 @@ func (h *HttpServer) writeHttpError(w http.ResponseWriter, statusCode int, err e
 
 // writeBodyReadError maps an error from readHTTPBody to the right HTTP
 // status code: 415 for unsupported Content-Encoding (capability-aware
-// clients can refresh VGI-Supported-Encodings and retry once), 400
-// otherwise. addCapabilityHeaders runs on every response, so the 415
+// clients can refresh VGI-Supported-Encodings and retry once), 413 for an
+// actual-body max_request_bytes overrun, and 400 otherwise.
+// addCapabilityHeaders runs on every response, so the 415
 // response already carries the supported-encodings hint for retry.
 func (h *HttpServer) writeBodyReadError(w http.ResponseWriter, err error, schema *arrow.Schema) {
+	var tooLarge *requestBodyTooLargeError
+	if errors.As(err, &tooLarge) {
+		h.writeHttpError(w, http.StatusRequestEntityTooLarge, err, schema)
+		return
+	}
 	var unsup *unsupportedEncodingError
 	if errors.As(err, &unsup) {
 		h.writeHttpError(w, http.StatusUnsupportedMediaType, err, schema)

@@ -57,7 +57,36 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
 	}
-	defer req.Batch.Release()
+	defer func() { req.Batch.Release() }()
+	if req.Method != method {
+		h.writeHttpError(w, http.StatusBadRequest, &RpcError{
+			Type:    "ProtocolError",
+			Message: fmt.Sprintf("Method mismatch: route names %q, request metadata names %q", method, req.Method),
+		}, nil)
+		return
+	}
+
+	// Stream init accepts the same externally uploaded request shape as unary.
+	// The routing metadata remains on req.Metadata; only the parameter batch is
+	// replaced by the fetched, materialized batch.
+	if h.server.externalConfig != nil {
+		var outerMeta arrow.Metadata
+		if rb, ok := req.Batch.(arrow.RecordBatchWithMetadata); ok {
+			outerMeta = rb.Metadata()
+		}
+		if IsExternalLocationBatch(req.Batch, outerMeta) {
+			resolved, _, resolveErr := ResolveExternalLocation(req.Batch, outerMeta, h.server.externalConfig)
+			if resolveErr != nil {
+				h.writeHttpError(w, http.StatusInternalServerError, &RpcError{
+					Type:    "ValueError",
+					Message: fmt.Sprintf("resolving external request: %v", resolveErr),
+				}, nil)
+				return
+			}
+			req.Batch.Release()
+			req.Batch = resolved
+		}
+	}
 
 	var handlerErr error
 	stats := &CallStatistics{}
@@ -159,21 +188,41 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Call stream handler
-	results := info.Handler.Call([]reflect.Value{
-		reflect.ValueOf(ctx), reflect.ValueOf(callCtx), params,
-	})
+	// Call stream handler. Keep panics inside the RPC boundary so sticky
+	// cleanup and dispatch-end hooks still run and the client receives a
+	// RuntimeError batch.
+	var streamResult *StreamResult
+	func() {
+		defer func() {
+			if rv := recover(); rv != nil {
+				handlerErr = &RpcError{
+					Type:    "RuntimeError",
+					Message: fmt.Sprintf("handler panicked: %v", rv),
+				}
+			}
+		}()
+		results := info.Handler.Call([]reflect.Value{
+			reflect.ValueOf(ctx), reflect.ValueOf(callCtx), params,
+		})
+		if !results[1].IsNil() {
+			handlerErr = results[1].Interface().(error)
+			return
+		}
+		streamResult = results[0].Interface().(*StreamResult)
+	}()
 
-	if !results[1].IsNil() {
-		handlerErr = results[1].Interface().(error)
+	if handlerErr != nil {
 		// The 500 is what writeArrow rewrites to 200 + X-VGI-RPC-Error: true —
 		// the method ran and failed, so the failure is an application result
 		// (same contract as the unary path).
 		h.writeHttpError(w, http.StatusInternalServerError, handlerErr, nil)
 		return
 	}
-
-	streamResult := results[0].Interface().(*StreamResult)
+	if streamResult == nil {
+		handlerErr = &RpcError{Type: "RuntimeError", Message: "stream handler returned a nil result"}
+		h.writeHttpError(w, http.StatusInternalServerError, handlerErr, nil)
+		return
+	}
 	outputSchema := streamResult.OutputSchema
 	state := streamResult.State
 
@@ -194,6 +243,23 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		isProducer = info.Type == MethodProducer
+		if isProducer {
+			if _, ok := state.(ProducerState); !ok {
+				handlerErr = &RpcError{
+					Type:    "RuntimeError",
+					Message: fmt.Sprintf("stream state %T does not implement ProducerState", state),
+				}
+				h.writeHttpError(w, http.StatusInternalServerError, handlerErr, nil)
+				return
+			}
+		} else if _, ok := state.(ExchangeState); !ok {
+			handlerErr = &RpcError{
+				Type:    "RuntimeError",
+				Message: fmt.Sprintf("stream state %T does not implement ExchangeState", state),
+			}
+			h.writeHttpError(w, http.StatusInternalServerError, handlerErr, nil)
+			return
+		}
 	}
 
 	var buf bytes.Buffer
@@ -360,6 +426,36 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		}
 		if _, found := meta.GetValue(MetaCancel); found {
 			cancelled = true
+		}
+	}
+
+	// Materialize an externally uploaded exchange batch before schema casting
+	// and application dispatch. Tokens found on the small pointer batch remain
+	// valid as a compatibility fallback; metadata surfaced to the handler comes
+	// from the fetched data batch.
+	var resolvedInput arrow.RecordBatch
+	if !cancelled && h.server.externalConfig != nil && IsExternalLocationBatch(inputBatch, inputMeta) {
+		resolved, resolvedMeta, resolveErr := ResolveExternalLocation(inputBatch, inputMeta, h.server.externalConfig)
+		if resolveErr != nil {
+			h.writeHttpError(w, http.StatusInternalServerError, &RpcError{
+				Type:    "ValueError",
+				Message: fmt.Sprintf("resolving external request: %v", resolveErr),
+			}, nil)
+			return
+		}
+		resolvedInput = resolved
+		defer resolvedInput.Release()
+		inputBatch = resolvedInput
+		inputMeta = resolvedMeta
+		if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
+			meta := bwm.Metadata()
+			inputMeta = meta
+			if v, found := meta.GetValue(MetaStreamState); found {
+				tokenBytes = []byte(v)
+			}
+			if v, found := meta.GetValue(MetaCallState); found {
+				callTokenBytes = []byte(v)
+			}
 		}
 	}
 
@@ -596,6 +692,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
 
 	if exchangeErr != nil {
+		out.releaseBatches()
 		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, exchangeErr, h.server.serverID, "", h.server.debugErrors))
 		h.logIPCWriteErr("close", info.Name, writer.Close())
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
@@ -603,6 +700,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	}
 
 	if err := out.validate(); err != nil {
+		out.releaseBatches()
 		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
 		h.logIPCWriteErr("close", info.Name, writer.Close())
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
@@ -612,6 +710,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	// Serialize updated state into new token (carry schema for dynamic methods)
 	newToken, err := h.packCursorToken(callID, state, auth)
 	if err != nil {
+		out.releaseBatches()
 		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
 		h.logIPCWriteErr("close", info.Name, writer.Close())
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
@@ -622,9 +721,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	// so the whole external budget belongs to this single emit and there is
 	// no prior accumulation to carry.
 	if capErr := h.checkExternalBudget(out, info.Name, 0); capErr != nil {
-		for _, ab := range out.batches {
-			ab.batch.Release()
-		}
+		out.releaseBatches()
 		h.writeExchangeCapError(w, schema, info.Name, capErr)
 		return capErr
 	}
@@ -877,12 +974,14 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 		}()
 
 		if produceErr != nil {
+			out.releaseBatches()
 			h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, produceErr, h.server.serverID, "", h.server.debugErrors))
 			return false, produceErr
 		}
 
 		if !out.Finished() {
 			if err := out.validate(); err != nil {
+				out.releaseBatches()
 				h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
 				return false, err
 			}
@@ -892,9 +991,7 @@ func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, sch
 		// cycle — see checkExternalBudget for why the external cap gets no
 		// continuation-token escape.
 		if capErr := h.checkExternalBudget(out, info.Name, externalBytes); capErr != nil {
-			for _, ab := range out.batches {
-				ab.batch.Release()
-			}
+			out.releaseBatches()
 			h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(writer, schema, capErr, h.server.serverID, "", h.server.debugErrors))
 			return false, capErr
 		}

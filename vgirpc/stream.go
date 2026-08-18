@@ -274,6 +274,17 @@ func (o *OutputCollector) validate() error {
 	return nil
 }
 
+// releaseBatches releases every batch still owned by the collector. Dispatch
+// error paths call this when a handler panics or returns after emitting, before
+// the normal flush loop has transferred/released those records.
+func (o *OutputCollector) releaseBatches() {
+	for _, ab := range o.batches {
+		ab.batch.Release()
+	}
+	o.batches = nil
+	o.dataBatchIdx = -1
+}
+
 // buildArrayFromSlice builds an Arrow array from a slice of interface values.
 func buildArrayFromSlice(mem memory.Allocator, dt arrow.DataType, vals []interface{}) arrow.Array {
 	switch dt.ID() {

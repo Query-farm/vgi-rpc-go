@@ -158,7 +158,9 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 		}
 		return err // transport error, stop serving
 	}
-	defer req.Batch.Release()
+	// Resolve paths may replace req.Batch. Defer through the field so the
+	// final owner is released rather than capturing the original pointer now.
+	defer func() { req.Batch.Release() }()
 
 	// Attach (or reuse) the shared-memory segment for this connection. The
 	// client advertises (segment_name, segment_size) once on init requests and

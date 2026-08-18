@@ -86,14 +86,24 @@ func (f *FakeStorage) GenerateUploadURL(_ *arrow.Schema) (vgirpc.UploadURL, erro
 		return vgirpc.UploadURL{}, fmt.Errorf("fake storage alloc returned %d: %s", allocResp.StatusCode, body)
 	}
 	var alloc struct {
-		ObjectURL string `json:"object_url"`
+		ObjectURL   string `json:"object_url"`
+		UploadURL   string `json:"upload_url"`
+		DownloadURL string `json:"download_url"`
 	}
 	if err := json.NewDecoder(allocResp.Body).Decode(&alloc); err != nil {
 		return vgirpc.UploadURL{}, fmt.Errorf("fake storage alloc decode: %w", err)
 	}
+	uploadURL := alloc.UploadURL
+	if uploadURL == "" {
+		uploadURL = alloc.ObjectURL
+	}
+	downloadURL := alloc.DownloadURL
+	if downloadURL == "" {
+		downloadURL = alloc.ObjectURL
+	}
 	return vgirpc.UploadURL{
-		UploadURL:   alloc.ObjectURL,
-		DownloadURL: alloc.ObjectURL,
+		UploadURL:   uploadURL,
+		DownloadURL: downloadURL,
 		ExpiresAt:   time.Now().UTC().Add(1 * time.Hour),
 	}, nil
 }

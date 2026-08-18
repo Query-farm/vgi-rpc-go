@@ -60,6 +60,13 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { req.Batch.Release() }()
+	if req.Method != method {
+		h.writeHttpError(w, http.StatusBadRequest, &RpcError{
+			Type:    "ProtocolError",
+			Message: fmt.Sprintf("Method mismatch: route names %q, request metadata names %q", method, req.Method),
+		}, nil)
+		return
+	}
 
 	// If the client externalized the parameters via __upload_url__/init,
 	// the request batch is a zero-row pointer batch carrying
@@ -75,7 +82,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		if IsExternalLocationBatch(req.Batch, outerMeta) {
 			resolved, _, rerr := ResolveExternalLocation(req.Batch, outerMeta, h.server.externalConfig)
 			if rerr != nil {
-				h.writeHttpError(w, http.StatusBadRequest, &RpcError{
+				h.writeHttpError(w, http.StatusInternalServerError, &RpcError{
 					Type:    "ValueError",
 					Message: fmt.Sprintf("resolving external request: %v", rerr),
 				}, nil)
@@ -257,7 +264,10 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		h.writeHttpError(w, http.StatusInternalServerError, handlerErr, info.ResultSchema)
 		return
 	}
-	defer resultBatch.Release()
+	// Use a closure so the final owner is released. A deferred method call
+	// captures its receiver immediately; that would retain the original batch
+	// here, double-release it after replacement, and leak the pointer wrapper.
+	defer func() { resultBatch.Release() }()
 
 	// Externalize the result batch if it exceeds the configured threshold.
 	// Pre-flight max_externalized_response_bytes BEFORE incurring the

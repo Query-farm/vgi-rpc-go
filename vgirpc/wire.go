@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -90,6 +91,13 @@ func ReadRequest(r io.Reader) (*Request, error) {
 		return nil, &RpcError{
 			Type:    "ProtocolError",
 			Message: "Missing 'vgi_rpc.method' in request batch custom_metadata",
+		}
+	}
+	if !utf8.ValidString(method) {
+		batch.Release()
+		return nil, &RpcError{
+			Type:    "ProtocolError",
+			Message: "Invalid UTF-8 in 'vgi_rpc.method' request metadata",
 		}
 	}
 

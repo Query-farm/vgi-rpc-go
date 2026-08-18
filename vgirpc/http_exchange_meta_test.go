@@ -51,7 +51,8 @@ func (s *metaTokenExchangeState) Exchange(_ context.Context, _ arrow.RecordBatch
 	defer arr.Release()
 	schema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Float64}}, nil)
 	batch := array.NewRecordBatch(schema, []arrow.Array{arr}, 0)
-	defer batch.Release()
+	// EmitWithMetadata takes ownership of batch (and may release it immediately
+	// while re-wrapping it onto the registered output schema).
 	return out.EmitWithMetadata(batch, meta)
 }
 

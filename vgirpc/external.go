@@ -424,7 +424,7 @@ func ResolveExternalLocation(
 	}
 
 	// Parse IPC stream
-	reader, err := ipc.NewReader(bytes.NewReader(fetchedData))
+	reader, err := ipc.NewReader(bytes.NewReader(fetchedData), ipc.WithAllocator(defaultAllocator()))
 	if err != nil {
 		return batch, meta, fmt.Errorf("parsing external IPC data: %w", err)
 	}

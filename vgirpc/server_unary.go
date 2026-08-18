@@ -44,32 +44,42 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 		callCtx.LogLevel = LogTrace // default: allow all, client filters
 	}
 
-	// Call handler
+	// Call handler. A user panic is an application failure, not a reason to
+	// terminate the serving process (and skip the dispatch-end hook).
 	var resultVal reflect.Value
 	var callErr error
-
-	if info.ResultType == nil {
-		// Void handler: func(context.Context, *CallContext, P) error
-		results := info.Handler.Call([]reflect.Value{
-			reflect.ValueOf(ctx),
-			reflect.ValueOf(callCtx),
-			params,
-		})
-		if !results[0].IsNil() {
-			callErr = results[0].Interface().(error)
+	func() {
+		defer func() {
+			if rv := recover(); rv != nil {
+				callErr = &RpcError{
+					Type:    "RuntimeError",
+					Message: fmt.Sprintf("handler panicked: %v", rv),
+				}
+			}
+		}()
+		if info.ResultType == nil {
+			// Void handler: func(context.Context, *CallContext, P) error
+			results := info.Handler.Call([]reflect.Value{
+				reflect.ValueOf(ctx),
+				reflect.ValueOf(callCtx),
+				params,
+			})
+			if !results[0].IsNil() {
+				callErr = results[0].Interface().(error)
+			}
+		} else {
+			// Valued handler: func(context.Context, *CallContext, P) (R, error)
+			results := info.Handler.Call([]reflect.Value{
+				reflect.ValueOf(ctx),
+				reflect.ValueOf(callCtx),
+				params,
+			})
+			resultVal = results[0]
+			if !results[1].IsNil() {
+				callErr = results[1].Interface().(error)
+			}
 		}
-	} else {
-		// Valued handler: func(context.Context, *CallContext, P) (R, error)
-		results := info.Handler.Call([]reflect.Value{
-			reflect.ValueOf(ctx),
-			reflect.ValueOf(callCtx),
-			params,
-		})
-		resultVal = results[0]
-		if !results[1].IsNil() {
-			callErr = results[1].Interface().(error)
-		}
-	}
+	}()
 
 	logs := callCtx.drainLogs()
 
@@ -97,7 +107,10 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID, s.debugErrors))
 		return handlerErr, nil
 	}
-	defer resultBatch.Release()
+	// Use a closure so the final owner is released. A deferred method call
+	// captures its receiver immediately; that would retain the original batch
+	// here, double-release it after replacement, and leak the pointer wrapper.
+	defer func() { resultBatch.Release() }()
 
 	// Maybe externalize large result batch
 	if s.externalConfig != nil {
