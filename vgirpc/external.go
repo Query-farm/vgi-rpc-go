@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,6 +91,14 @@ type ExternalLocationConfig struct {
 	// HTTPClient is the HTTP client used for fetching external data.
 	// Default: http.DefaultClient.
 	HTTPClient *http.Client
+	// MaxFetchBytes is the encoded response-body limit. It is enforced while
+	// streaming, before any Content-Encoding is decoded. Default: 256 MiB.
+	MaxFetchBytes int64
+	// MaxDecompressedBytes is the decoded payload limit. Default: 4 GiB.
+	MaxDecompressedBytes int64
+	// MaxRedirects bounds redirect following. Every target is passed to
+	// URLValidator before the hop is issued. Default: 5.
+	MaxRedirects int
 }
 
 // DefaultExternalLocationConfig returns a config with sensible defaults.
@@ -100,6 +109,9 @@ func DefaultExternalLocationConfig(storage ExternalStorage) *ExternalLocationCon
 		URLValidator:              HTTPSOnlyValidator,
 		MaxRetries:                2,
 		RetryDelay:                500 * time.Millisecond,
+		MaxFetchBytes:             256 * 1024 * 1024,
+		MaxDecompressedBytes:      defaultExternalFetchDecompressionCap,
+		MaxRedirects:              5,
 	}
 }
 
@@ -132,6 +144,27 @@ func (c *ExternalLocationConfig) httpClient() *http.Client {
 		return c.HTTPClient
 	}
 	return http.DefaultClient
+}
+
+func (c *ExternalLocationConfig) maxFetchBytes() int64 {
+	if c.MaxFetchBytes <= 0 {
+		return 256 * 1024 * 1024
+	}
+	return c.MaxFetchBytes
+}
+
+func (c *ExternalLocationConfig) maxDecompressedBytes() int64 {
+	if c.MaxDecompressedBytes <= 0 {
+		return defaultExternalFetchDecompressionCap
+	}
+	return c.MaxDecompressedBytes
+}
+
+func (c *ExternalLocationConfig) maxRedirects() int {
+	if c.MaxRedirects <= 0 {
+		return 5
+	}
+	return c.MaxRedirects
 }
 
 // HTTPSOnlyValidator rejects non-HTTPS URLs.
@@ -389,7 +422,8 @@ func ResolveExternalLocation(
 	// Validate URL
 	if config.URLValidator != nil {
 		if err := config.URLValidator(locationURL); err != nil {
-			return batch, meta, fmt.Errorf("URL validation failed: %w", err)
+			message := strings.ReplaceAll(err.Error(), locationURL, redactExternalURL(locationURL))
+			return batch, meta, fmt.Errorf("URL rejected by validator: %s", message)
 		}
 	}
 
@@ -405,7 +439,14 @@ func ResolveExternalLocation(
 		if attempt > 0 {
 			time.Sleep(config.retryDelay())
 		}
-		fetchedData, fetchErr = fetchExternalData(client, locationURL)
+		fetchedData, fetchErr = fetchExternalData(
+			client,
+			locationURL,
+			config.URLValidator,
+			config.maxFetchBytes(),
+			config.maxDecompressedBytes(),
+			config.maxRedirects(),
+		)
 		if fetchErr == nil {
 			break
 		}
@@ -464,31 +505,81 @@ func ResolveExternalLocation(
 }
 
 // fetchExternalData fetches data from a URL, handling zstd decompression.
-func fetchExternalData(client *http.Client, rawURL string) ([]byte, error) {
-	resp, err := client.Get(rawURL)
+func fetchExternalData(
+	client *http.Client,
+	rawURL string,
+	validator func(string) error,
+	maxFetchBytes int64,
+	maxDecompressedBytes int64,
+	maxRedirects int,
+) ([]byte, error) {
+	// Shallow-copy the caller's client so its transport, timeout and jar are
+	// preserved while redirect policy remains local to this fetch.
+	fetchClient := *client
+	previousRedirectPolicy := fetchClient.CheckRedirect
+	fetchClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) > maxRedirects {
+			return fmt.Errorf("external fetch redirect limit (%d) exceeded", maxRedirects)
+		}
+		if validator != nil {
+			if err := validator(req.URL.String()); err != nil {
+				return fmt.Errorf("URL rejected by validator")
+			}
+		}
+		if previousRedirectPolicy != nil {
+			return previousRedirectPolicy(req, via)
+		}
+		return nil
+	}
+
+	resp, err := fetchClient.Get(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", rawURL, err)
+		if strings.Contains(err.Error(), "redirect limit") {
+			return nil, fmt.Errorf("external fetch redirect limit (%d) exceeded", maxRedirects)
+		}
+		if strings.Contains(err.Error(), "URL rejected") {
+			return nil, fmt.Errorf("URL rejected by validator")
+		}
+		return nil, fmt.Errorf("GET %s failed", redactExternalURL(rawURL))
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: status %d", rawURL, resp.StatusCode)
+		return nil, fmt.Errorf("GET %s: status %d", redactExternalURL(rawURL), resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	if resp.ContentLength > maxFetchBytes {
+		return nil, fmt.Errorf("external response Content-Length %d exceeds max_fetch_bytes=%d", resp.ContentLength, maxFetchBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("reading response body from %s: %w", rawURL, err)
+		return nil, fmt.Errorf("reading external response body from %s", redactExternalURL(rawURL))
+	}
+	if int64(len(data)) > maxFetchBytes {
+		return nil, fmt.Errorf("external response exceeds max_fetch_bytes=%d", maxFetchBytes)
 	}
 
 	// Decompress if needed
 	if resp.Header.Get("Content-Encoding") == "zstd" {
-		data, err = decompressZstdCapped(data, defaultExternalFetchDecompressionCap)
+		data, err = decompressZstdCapped(data, maxDecompressedBytes)
 		if err != nil {
-			return nil, fmt.Errorf("decompressing zstd data from %s: %w", rawURL, err)
+			return nil, fmt.Errorf("decompressing zstd data from %s exceeds max_decompressed_bytes=%d: %w", redactExternalURL(rawURL), maxDecompressedBytes, err)
 		}
 	}
 
 	return data, nil
+}
+
+func redactExternalURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "<invalid external URL>"
+	}
+	u.User = nil
+	u.RawQuery = ""
+	u.ForceQuery = false
+	u.Fragment = ""
+	return u.String()
 }
 
 // batchMetadata extracts custom metadata from a record batch.

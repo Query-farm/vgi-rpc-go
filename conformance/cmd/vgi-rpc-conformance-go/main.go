@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strconv"
@@ -223,10 +224,11 @@ func main() {
 	authMode := len(os.Args) > 1 && os.Args[1] == "--http-auth"
 	storageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-storage"
 	zstdStorageMode := len(os.Args) > 1 && os.Args[1] == "--http-with-zstd-storage"
+	externalSecurityMode := len(os.Args) > 1 && os.Args[1] == "--http-external-security"
 	pkceMode := len(os.Args) > 1 && os.Args[1] == "--http-pkce"
 	strictMode := len(os.Args) > 1 && os.Args[1] == "--http-strict"
 	proofMode := len(os.Args) > 1 && os.Args[1] == "--http-proof"
-	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode || storageMode || zstdStorageMode || pkceMode || strictMode || proofMode {
+	if (len(os.Args) > 1 && os.Args[1] == "--http") || authMode || storageMode || zstdStorageMode || externalSecurityMode || pkceMode || strictMode || proofMode {
 		// Parse optional flags that may follow positional args:
 		//   --otel-export <path>
 		//   --externalize-threshold <bytes>   (overrides default 8 KiB in storage modes)
@@ -281,7 +283,7 @@ func main() {
 		// Configure external location when in storage modes. The fake
 		// storage URL is the second argument.
 		var fakeStorage *conformance.FakeStorage
-		if storageMode || zstdStorageMode {
+		if storageMode || zstdStorageMode || externalSecurityMode {
 			if len(os.Args) < 3 {
 				fmt.Fprintf(os.Stderr, "missing storage URL argument\n")
 				os.Exit(1)
@@ -290,6 +292,20 @@ func main() {
 			cfg := vgirpc.DefaultExternalLocationConfig(fakeStorage)
 			cfg.URLValidator = conformance.AllowAllValidator
 			cfg.ExternalizeThresholdBytes = 8 * 1024 // 8 KiB so the test thresholds line up
+			if externalSecurityMode {
+				cfg.MaxFetchBytes = 4 * 1024
+				cfg.MaxDecompressedBytes = 8 * 1024
+				cfg.URLValidator = func(rawURL string) error {
+					u, err := url.Parse(rawURL)
+					if err != nil {
+						return fmt.Errorf("URL rejected: invalid external URL")
+					}
+					if strings.EqualFold(u.Hostname(), "localhost") {
+						return fmt.Errorf("URL rejected: localhost is not allowed")
+					}
+					return nil
+				}
+			}
 			if externalizeThreshold > 0 {
 				cfg.ExternalizeThresholdBytes = externalizeThreshold
 			}

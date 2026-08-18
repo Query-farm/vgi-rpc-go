@@ -314,6 +314,12 @@ def conformance_http_with_zstd_storage_port(conformance_fake_storage: str) -> It
 
 
 @pytest.fixture(scope="session")
+def conformance_http_external_security_port(conformance_fake_storage: str) -> Iterator[int]:
+    """Go worker with independent fetch caps and per-hop URL validation."""
+    yield from _start_http_worker("--http-external-security", conformance_fake_storage)
+
+
+@pytest.fixture(scope="session")
 def conformance_http_strict_cap_port() -> Iterator[int]:
     """Go HTTP worker with strict response caps (matches Python's --http-strict).
 
