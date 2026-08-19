@@ -170,7 +170,9 @@ func (h *HttpServer) readHTTPBody(r *http.Request) ([]byte, error) {
 		return body, nil
 	case "zstd", "gzip":
 		decompressedCap := h.maxDecompressedBodySize
-		if decompressedCap <= 0 && limit > 0 {
+		if requestCapApplied && (decompressedCap <= 0 || limit < decompressedCap) {
+			decompressedCap = limit
+		} else if decompressedCap <= 0 && limit > 0 {
 			decompressedCap = limit * 16
 		}
 		return decompressBounded(encoding, body, decompressedCap)

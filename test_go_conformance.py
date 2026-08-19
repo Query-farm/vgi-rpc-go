@@ -103,6 +103,12 @@ def conformance_http_no_compression_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_small_request_cap_port() -> Iterator[int]:
+    """Go HTTP worker with the shared suite's canonical 4 KiB request cap."""
+    yield from _start_http_worker("--http", "--max-request-bytes", "4096")
+
+
+@pytest.fixture(scope="session")
 def conformance_http_auth_port() -> Iterator[int]:
     """Start a Go HTTP server that rejects every RPC call with 401."""
     yield from _start_http_worker("--http-auth")

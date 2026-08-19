@@ -130,6 +130,13 @@ func decompressBounded(encoding string, data []byte, maxOutput int64) ([]byte, e
 	var reader io.Reader
 	switch encoding {
 	case "zstd":
+		if maxOutput > 0 {
+			var header zstd.Header
+			if err := header.Decode(data); err == nil && header.HasFCS &&
+				header.FrameContentSize > uint64(maxOutput) {
+				return nil, &requestBodyTooLargeError{Limit: maxOutput}
+			}
+		}
 		opts := []zstd.DOption{}
 		if maxOutput > 0 {
 			opts = append(opts, zstd.WithDecoderMaxMemory(uint64(maxOutput)))
@@ -162,7 +169,7 @@ func decompressBounded(encoding string, data []byte, maxOutput int64) ([]byte, e
 		return nil, fmt.Errorf("%s decompression: %w", encoding, err)
 	}
 	if maxOutput > 0 && int64(len(out)) > maxOutput {
-		return nil, &RpcError{Type: "ValueError", Message: fmt.Sprintf("Decompressed body exceeds maximum size of %d bytes", maxOutput)}
+		return nil, &requestBodyTooLargeError{Limit: maxOutput}
 	}
 	return out, nil
 }

@@ -392,12 +392,12 @@ func main() {
 		// large-payload conformance tests trigger the 413 → upload flow.
 		if fakeStorage != nil {
 			httpServer.SetUploadURLProvider(fakeStorage)
-			reqCap := int64(4096)
-			if maxRequestBytes > 0 {
-				reqCap = maxRequestBytes
-			}
-			httpServer.SetMaxRequestBytes(reqCap)
 			httpServer.SetMaxUploadBytes(64 * 1024 * 1024)
+		}
+		if maxRequestBytes > 0 {
+			httpServer.SetMaxRequestBytes(maxRequestBytes)
+		} else if fakeStorage != nil {
+			httpServer.SetMaxRequestBytes(4096)
 		}
 		// Disabling the call-state cache forces every stream continuation down
 		// the cache-miss path, so the client's obligation to echo the call
