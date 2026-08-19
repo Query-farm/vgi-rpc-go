@@ -58,6 +58,29 @@ func RegisterStateType(v interface{})
 | `SetTokenTTL(d time.Duration)` | Set state token maximum age |
 | `ServeHTTP(w http.ResponseWriter, r *http.Request)` | Implements `http.Handler` |
 
+## HttpClient
+
+```go
+func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, error)
+```
+
+| Method | Description |
+|---|---|
+| `CallUnary(ctx, method, params, outputSchema)` | Invoke a unary RPC and return an owned `ClientBatch` |
+| `OpenProducer(ctx, method, params, schema)` | Initialize a producer stream |
+| `OpenExchange(ctx, method, params, schema)` | Initialize a typed exchange stream |
+| `Close()` | Close client-owned idle HTTP connections; local and idempotent |
+
+`HttpClientStream.Next` receives the next producer batch,
+`HttpClientStream.Exchange` sends exactly one declared-schema batch, and
+`HttpClientStream.Cancel` explicitly asks the server to cancel. Returned
+`ClientBatch` values and stream headers are caller-owned and must be released.
+`HttpClientStream.Close` only releases local state.
+
+Client options configure the underlying `net/http` client, URL prefix, request
+headers, protocol version, request and response size limits, and the
+client-directed log handler.
+
 ## Stream Interfaces
 
 ### ProducerState

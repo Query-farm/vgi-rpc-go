@@ -82,6 +82,11 @@ jobs:
       - name: Create coverage directory
         run: mkdir -p _covdata
 
+      - name: Run native Go client conformance
+        env:
+          VGI_RPC_PYTHON: python
+        run: go test ./vgirpc -run '^TestPythonNativeClientTypedExchange$' -count=1 -v
+
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_go_conformance.py -x -v
 

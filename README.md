@@ -47,6 +47,7 @@ func main() {
 - **Client-directed logging** at configurable levels
 - **`context.Context` support** for cancellation and deadlines
 - **HTTP transport** with signed state tokens, zstd/gzip request decompression, and negotiated response compression (on by default at zstd level 1; tune or disable via `SetCompressionLevel`)
+- **Native HTTP client** for unary, producer, and exact-schema exchange calls
 - **Raw Unix/TCP socket transports** (`Server.RunUnix` / `Server.RunTcp`) speaking the lean Arrow-IPC framing for co-located workers. Raw TCP carries no auth/TLS and defaults to loopback (`127.0.0.1`) — trusted networks only; use the HTTP transport otherwise.
 - **ArrowSerializable** interface for complex nested types
 - **OpenTelemetry support** via optional `vgirpc/otel` module (tracing + metrics)

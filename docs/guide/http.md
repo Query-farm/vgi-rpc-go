@@ -20,6 +20,31 @@ Routes use an empty prefix by default:
 
 All request and response bodies use `Content-Type: application/vnd.apache.arrow.stream`.
 
+## Native Go client
+
+`HttpClient` provides unary, producer, and typed exchange calls over these
+routes. The stream schema is declared when a producer or exchange is opened;
+each exchange input is checked against that schema before dispatch.
+
+```go
+client, err := vgirpc.NewHttpClient("https://rpc.example.com")
+if err != nil {
+    log.Fatal(err)
+}
+defer client.Close()
+
+stream, err := client.OpenExchange(ctx, "transform", params,
+    vgirpc.ClientStreamSchema{Input: inputSchema, Output: outputSchema})
+if err != nil {
+    log.Fatal(err)
+}
+defer stream.Close()
+```
+
+`Close` is local. Call `stream.Cancel(ctx)` for explicit best-effort remote
+cancellation. A failed exchange continuation cannot be retried because the
+server may already have advanced its opaque state token.
+
 ## Request Compression
 
 The server transparently decompresses request bodies sent with `Content-Encoding: zstd` or `gzip`. The Python vgi-rpc client compresses by default (level 3), picking zstd or gzip depending on whether `zstandard` is installed, so this is handled automatically.
