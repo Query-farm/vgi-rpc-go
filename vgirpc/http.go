@@ -827,7 +827,7 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// request — the transport binding has not been committed and a retry
 	// will re-fire the hook.
 	if err := h.server.notifyTransport(TransportKindHTTP, nil); err != nil {
-		http.Error(w, fmt.Sprintf("server startup hook failed: %v", err), http.StatusServiceUnavailable)
+		http.Error(w, "server startup hook failed", http.StatusInternalServerError)
 		return
 	}
 

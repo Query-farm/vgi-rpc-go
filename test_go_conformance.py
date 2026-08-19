@@ -7,7 +7,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 try:
     # vgi-rpc 0.40.1 moved its HTTP client dependency from httpx to httpx2,
@@ -54,7 +54,7 @@ def _wait_for_http(port: int, timeout: float = 5.0) -> None:
     raise TimeoutError(f"HTTP server on port {port} did not start within {timeout}s")
 
 
-def _start_http_worker(*extra_args: str) -> Iterator[int]:
+def _start_http_worker(*extra_args: str, tcp_only_ready: bool = False) -> Iterator[int]:
     """Spawn the Go HTTP conformance worker and yield its TCP port."""
     proc = subprocess.Popen(
         [GO_WORKER, *extra_args],
@@ -67,7 +67,10 @@ def _start_http_worker(*extra_args: str) -> Iterator[int]:
         assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
         port = int(line.split(":", 1)[1])
 
-        _wait_for_http(port)
+        if tcp_only_ready:
+            _wait_for_tcp("127.0.0.1", port)
+        else:
+            _wait_for_http(port)
 
         yield port
     finally:
@@ -106,6 +109,20 @@ def conformance_http_no_compression_port() -> Iterator[int]:
 def conformance_http_small_request_cap_port() -> Iterator[int]:
     """Go HTTP worker with the shared suite's canonical 4 KiB request cap."""
     yield from _start_http_worker("--http", "--max-request-bytes", "4096")
+
+
+@pytest.fixture(scope="class")
+def conformance_http_serve_start_fail_once_port() -> Iterator[int]:
+    """Worker whose first HTTP transport notification fails, then retries.
+
+    Readiness is TCP-only because an HTTP probe would consume the injected
+    first-request failure before the shared lifecycle test can observe it.
+    """
+    yield from _start_http_worker(
+        "--http",
+        "--fail-serve-start-once",
+        tcp_only_ready=True,
+    )
 
 
 @pytest.fixture(scope="session")
@@ -464,6 +481,75 @@ def go_tcp_addr() -> Iterator[tuple[str, int]]:
     finally:
         proc.terminate()
         proc.wait(timeout=_WORKER_TEARDOWN_TIMEOUT)
+
+
+class _KindProbe(Protocol):
+    def report_transport_kind(self) -> str: ...
+
+
+@pytest.fixture(scope="class")
+def conformance_transport_kind_probes() -> tuple[tuple[str, Callable[[], str]], ...]:
+    """Real Go-worker probes for every transport kind the port supports."""
+
+    def probe_pipe() -> str:
+        transport = SubprocessTransport([GO_WORKER, "--transport-kind-probe"])
+        try:
+            return str(_RpcProxy(_KindProbe, transport, None).report_transport_kind())
+        finally:
+            transport.close()
+
+    def probe_http() -> str:
+        worker = _start_http_worker("--http", "--transport-kind-probe")
+        port = next(worker)
+        try:
+            with http_connect(_KindProbe, f"http://127.0.0.1:{port}") as proxy:
+                return str(proxy.report_transport_kind())
+        finally:
+            next(worker, None)
+
+    def probe_unix() -> str:
+        path = _short_unix_path("kind")
+        proc = subprocess.Popen(
+            [GO_WORKER, "--unix", path, "--transport-kind-probe"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            assert proc.stdout is not None
+            line = proc.stdout.readline().decode().strip()
+            assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
+            _wait_for_unix(path)
+            with unix_connect(_KindProbe, path) as proxy:
+                return str(proxy.report_transport_kind())
+        finally:
+            proc.terminate()
+            proc.wait(timeout=_WORKER_TEARDOWN_TIMEOUT)
+
+    def probe_tcp() -> str:
+        proc = subprocess.Popen(
+            [GO_WORKER, "--tcp", "127.0.0.1:0", "--transport-kind-probe"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            assert proc.stdout is not None
+            line = proc.stdout.readline().decode().strip()
+            assert line.startswith("TCP:"), f"Expected TCP:<host>:<port>, got: {line!r}"
+            host, _, raw_port = line[len("TCP:") :].rpartition(":")
+            port = int(raw_port)
+            _wait_for_tcp(host, port)
+            with tcp_connect(_KindProbe, host, port) as proxy:
+                return str(proxy.report_transport_kind())
+        finally:
+            proc.terminate()
+            proc.wait(timeout=_WORKER_TEARDOWN_TIMEOUT)
+
+    return (
+        ("pipe", probe_pipe),
+        ("http", probe_http),
+        ("unix", probe_unix),
+        ("tcp", probe_tcp),
+    )
 
 
 ConnFactory = Callable[..., contextlib.AbstractContextManager[Any]]

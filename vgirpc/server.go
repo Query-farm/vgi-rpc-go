@@ -98,6 +98,7 @@ type Server struct {
 	implementation       any
 
 	// Transport binding state, set lazily by notifyTransport.
+	transportNotifyMu     sync.Mutex
 	transportMu           sync.Mutex
 	transportKind         TransportKind
 	transportCapabilities map[string]bool
@@ -203,6 +204,13 @@ func (s *Server) TransportCapabilities() map[string]bool {
 // transient hook failure leaves transportKind unset and the next request
 // re-fires the hook rather than silently skipping it.
 func (s *Server) notifyTransport(kind TransportKind, capabilities map[string]bool) error {
+	// Serialize the check/hook/commit transaction. The state mutex cannot be
+	// held while the hook runs because hooks may inspect TransportKind(), which
+	// also takes that mutex. Without this separate gate, concurrent first HTTP
+	// requests can all observe an unbound server and fire the one-shot hook.
+	s.transportNotifyMu.Lock()
+	defer s.transportNotifyMu.Unlock()
+
 	s.transportMu.Lock()
 	if s.transportKind == kind && capabilitiesEqual(s.transportCapabilities, capabilities) {
 		s.transportMu.Unlock()

@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -46,6 +47,16 @@ var requestableReasons = map[string]vgirpc.AuthReason{
 	"invalid_credential": vgirpc.AuthReasonInvalidCredential,
 	"expired_credential": vgirpc.AuthReasonExpiredCredential,
 	"insufficient_scope": vgirpc.AuthReasonInsufficientScope,
+}
+
+type transportKindProbeParams struct{}
+
+func reportTransportKind(
+	_ context.Context,
+	ctx *vgirpc.CallContext,
+	_ transportKindProbeParams,
+) (string, error) {
+	return string(ctx.Kind), nil
 }
 
 // conformancePrincipalHeader names the principal a request should be
@@ -135,7 +146,12 @@ func main() {
 
 	server := vgirpc.NewServer()
 	server.SetDebugErrors(true)
-	server.SetServiceName("ConformanceService")
+	transportKindProbe := hasFlag(os.Args, "--transport-kind-probe")
+	if transportKindProbe {
+		server.SetServiceName("TransportKindProbe")
+	} else {
+		server.SetServiceName("ConformanceService")
+	}
 	// --server-id overrides the fixed default. TestSticky's wrong-worker case
 	// runs two workers that share one AEAD key, and asserts up front that they
 	// report distinct server_id — otherwise a token that "belongs to the other
@@ -148,8 +164,22 @@ func main() {
 	// Match Python ConformanceService.protocol_version. Requires
 	// vgi-rpc >= 0.18.0 on the client (sends the vgi_rpc.protocol_version
 	// request metadata key) — see ci.yml.
-	server.SetProtocolVersion("1.0.0")
-	conformance.RegisterMethods(server)
+	if transportKindProbe {
+		vgirpc.Unary(server, "report_transport_kind", reportTransportKind)
+	} else {
+		server.SetProtocolVersion("1.0.0")
+		conformance.RegisterMethods(server)
+	}
+
+	if hasFlag(os.Args, "--fail-serve-start-once") {
+		var serveStartCalls atomic.Int64
+		server.SetServeStartHook(func(vgirpc.TransportKind, map[string]bool) error {
+			if serveStartCalls.Add(1) == 1 {
+				return fmt.Errorf("conformance injected on_serve_start failure")
+			}
+			return nil
+		})
+	}
 
 	// Core carries no OpenTelemetry dependency, so the accessor that lets an
 	// access-log record name the span it ran under is injected here. It reads
@@ -617,32 +647,13 @@ func main() {
 		}
 	} else if len(os.Args) > 2 && os.Args[1] == "--unix" {
 		path := os.Args[2]
-		os.Remove(path)
-
-		listener, err := net.Listen("unix", path)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "failed to listen on unix socket: %v\n", err)
+		if err := server.RunUnix(path, 0, func(boundPath string) {
+			fmt.Printf("UNIX:%s\n", boundPath)
+			_ = os.Stdout.Sync()
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "unix serve error: %v\n", err)
 			os.Exit(1)
 		}
-		fmt.Printf("UNIX:%s\n", path)
-		os.Stdout.Sync()
-
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-		go func() {
-			<-sigCh
-			listener.Close()
-		}()
-
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				break
-			}
-			server.Serve(conn, conn)
-			conn.Close()
-		}
-		os.Remove(path)
 	} else if len(os.Args) > 2 && os.Args[1] == "--tcp" {
 		// Raw-TCP transport: same Arrow-IPC framing as --unix, only the
 		// listening socket differs. Address is [HOST:]PORT; host defaults to
