@@ -74,10 +74,14 @@ jobs:
 
       # The conformance extra pulls jsonschema, which `vgi-rpc-test
       # --access-log` needs to validate records against access_log.schema.json.
+      # httpx2 2.12.0 on Python 3.13 advertises zstd but leaves the response
+      # body encoded. Pin the last verified decoder until that upstream
+      # regression is fixed; otherwise larger HTTP Arrow replies reach
+      # PyArrow as zstd frames.
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "${RUNNER_TEMP}/vgi-rpc-python[http,cli,external,conformance]" pytest pytest-timeout
+          pip install "${RUNNER_TEMP}/vgi-rpc-python[http,cli,external,conformance]" pytest pytest-timeout "httpx2==2.9.1"
 
       - name: Create coverage directory
         run: mkdir -p _covdata
