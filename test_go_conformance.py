@@ -90,6 +90,59 @@ def conformance_http_port(go_http_port: int) -> int:
     return go_http_port
 
 
+@pytest.fixture
+def conformance_resource_soak_target() -> Iterator[Any]:
+    """Expose one isolated Go HTTP worker to the shared resource soak.
+
+    The dedicated process is important: sampling the session-wide worker would
+    mix unrelated conformance activity into the descriptor, thread, and RSS
+    measurements.  stderr is inherited so a failed soak cannot deadlock on an
+    unread pipe and leaves useful diagnostics in the pytest log.
+    """
+    from vgi_rpc.conformance._resource_soak_pytest import (
+        ResourceSoakLimits,
+        ResourceSoakTarget,
+    )
+
+    proc = subprocess.Popen(
+        [GO_WORKER, "--http"],
+        stdout=subprocess.PIPE,
+    )
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line.startswith("PORT:"), f"Expected PORT:<n>, got: {line!r}"
+        port = int(line.split(":", 1)[1])
+        _wait_for_http(port)
+
+        def connect() -> contextlib.AbstractContextManager[Any]:
+            return http_connect(ConformanceService, f"http://127.0.0.1:{port}")
+
+        yield ResourceSoakTarget(
+            name="go-http",
+            pid=proc.pid,
+            connect=connect,
+            limits=ResourceSoakLimits(
+                rss_growth_bytes=32 * 1024 * 1024,
+                rss_slope_bytes_per_epoch=2 * 1024 * 1024,
+                descriptor_growth=3,
+                thread_growth=4,
+                child_growth=0,
+            ),
+            # Go Arrow's allocator reaches a stable reserved-arena plateau only
+            # after several equivalent workloads. Keep the measured budget
+            # strict, but establish the baseline after that legitimate warm-up.
+            warmup_multiplier=8,
+        )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=_WORKER_TEARDOWN_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=_WORKER_TEARDOWN_TIMEOUT)
+
+
 @pytest.fixture(scope="session")
 def conformance_http_no_compression_port() -> Iterator[int]:
     """Go HTTP worker with response compression disabled.
