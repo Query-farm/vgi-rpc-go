@@ -1,6 +1,6 @@
 module github.com/Query-farm/vgi-rpc-go/vgirpc/s3
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/Query-farm/vgi-rpc-go v0.15.0

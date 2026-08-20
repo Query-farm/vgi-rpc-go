@@ -1,6 +1,6 @@
 module github.com/Query-farm/vgi-rpc-go
 
-go 1.25.0
+go 1.26.0
 
 require (
 	github.com/Query-farm/vgi-rpc-go/vgirpc/otel v0.16.0
