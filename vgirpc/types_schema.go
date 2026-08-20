@@ -177,6 +177,30 @@ func goTypeToArrowType(t reflect.Type, tag tagInfo) (arrow.DataType, bool, error
 	}
 }
 
+// SchemaForStruct is [structToSchema] for callers outside this package: the
+// Arrow schema this library will derive from a struct's vgirpc tags.
+//
+// Exported so a peer SDK can CHECK that derivation against the schema its
+// protocol codegen emits. Those two must agree — the tags are the only
+// description of the wire shape on the Go side, and codegen is the only one
+// everywhere else — but nothing compared them, so a struct could drift from the
+// protocol silently and be discovered by a client rejecting the response. That
+// is exactly what happened in the Java SDK, where two fields were declared
+// nullable against a non-null protocol and the client refused the whole
+// response as an "out-of-date Apache Arrow schema".
+//
+// Reflection-only and memoized, so a test may call it freely.
+func SchemaForStruct(t reflect.Type) (*arrow.Schema, error) {
+	return structToSchema(t)
+}
+
+// SchemaForResult is [resultSchema] for callers outside this package: the Arrow
+// schema of a method's RETURN type, which is wrapped in a single `result`
+// column. See [SchemaForStruct] for why this is exported.
+func SchemaForResult(t reflect.Type) (*arrow.Schema, error) {
+	return resultSchema(t)
+}
+
 // structToSchema builds an Arrow schema from a Go struct type using vgirpc tags.
 // The reflection walk is memoized per type; see types_cache.go. The returned
 // schema is shared across callers — arrow.Schema is immutable, so this is
