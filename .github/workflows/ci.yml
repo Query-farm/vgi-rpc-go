@@ -10,6 +10,22 @@ permissions:
   contents: read
 
 jobs:
+  minimum-go:
+    name: Go 1.25 compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+
+      - name: Build
+        run: make build
+
+      - name: Go unit tests
+        run: go test ./...
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -17,7 +33,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
+          go-version: "1.26.x"
 
       - name: Build
         run: go build ./...
@@ -33,7 +49,7 @@ jobs:
         run: go test ./...
 
       - name: Install staticcheck
-        run: go install honnef.co/go/tools/cmd/staticcheck@latest
+        run: go install honnef.co/go/tools/cmd/staticcheck@v0.8.0
 
       - name: Staticcheck
         run: staticcheck ./...
@@ -44,7 +60,7 @@ jobs:
         run: go run ./tools/docverify
 
   conformance:
-    needs: lint
+    needs: [minimum-go, lint]
     runs-on: ubuntu-latest
     env:
       GOCOVERDIR: ${{ github.workspace }}/_covdata
@@ -53,7 +69,7 @@ jobs:
 
       - uses: actions/setup-go@v6
         with:
-          go-version: "1.25"
+          go-version: "1.26.x"
 
       - uses: actions/setup-python@v6
         with:
