@@ -578,12 +578,13 @@ func buildStructArray(mem memory.Allocator, st *arrow.StructType, rv reflect.Val
 	return sb.NewArray(), nil
 }
 
-// getFieldValue finds a Go struct field value by arrow tag name.
+// getFieldValue finds a Go struct field value by its Arrow child name,
+// resolved through the `arrow` tag and then the `vgirpc` tag
+// (see goFieldForArrowName). Returns nil when no field carries that name,
+// which the caller writes to the column as null.
 func getFieldValue(rv reflect.Value, rt reflect.Type, arrowName string) any {
-	for i := range rt.NumField() {
-		if rt.Field(i).Tag.Get("arrow") == arrowName {
-			return rv.Field(i).Interface()
-		}
+	if i := goFieldForArrowName(rt, arrowName); i >= 0 {
+		return rv.Field(i).Interface()
 	}
 	return nil
 }
@@ -770,19 +771,13 @@ func appendToBuilder(b array.Builder, dt arrow.DataType, value any) error {
 		for ci := range structType.NumFields() {
 			sf := structType.Field(ci)
 			fb := sb.FieldBuilder(ci)
-			// Find matching Go field by arrow tag
-			found := false
-			for fi := range rt.NumField() {
-				if rt.Field(fi).Tag.Get("arrow") == sf.Name {
-					if err := appendToBuilder(fb, sf.Type, rv.Field(fi).Interface()); err != nil {
-						return fmt.Errorf("struct field %s: %w", sf.Name, err)
-					}
-					found = true
-					break
-				}
-			}
-			if !found {
+			fi := goFieldForArrowName(rt, sf.Name)
+			if fi < 0 {
 				fb.AppendNull()
+				continue
+			}
+			if err := appendToBuilder(fb, sf.Type, rv.Field(fi).Interface()); err != nil {
+				return fmt.Errorf("struct field %s: %w", sf.Name, err)
 			}
 		}
 	default:

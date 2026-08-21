@@ -37,11 +37,11 @@ var annotatedReturnType = reflect.TypeOf((*AnnotatedReturn)(nil)).Elem()
 type tagInfo struct {
 	Name      string
 	Default   *string // nil if no default
-	ArrowType string  // explicit type override: "int32", "float32", "enum", "binary"
+	ArrowType string  // explicit type override: "int32", "float32", "enum", "binary", "struct"
 	Nullable  bool    // force nullable for non-pointer primitive fields
 }
 
-// parseTag parses a vgirpc struct tag like "name", "name,default=foo", "name,enum", "name,int32", "name,nullable".
+// parseTag parses a vgirpc struct tag like "name", "name,default=foo", "name,enum", "name,int32", "name,nullable", "name,struct".
 func parseTag(tag string) tagInfo {
 	parts := strings.Split(tag, ",")
 	info := tagInfo{Name: parts[0]}
@@ -58,9 +58,24 @@ func parseTag(tag string) tagInfo {
 	return info
 }
 
+// maxStructNestDepth bounds the recursive derivation of `struct`-tagged
+// fields. Nothing on the VGI wire nests structs more than two deep, and the
+// bound is what makes a self-referential Go type (type T struct{ Next *T
+// `vgirpc:"next,struct"` }) a clean error instead of a stack overflow — the
+// per-type memo cannot break the cycle, because the entry is only stored once
+// the walk that would consult it has finished.
+const maxStructNestDepth = 8
+
 // goTypeToArrowType maps a Go reflect.Type to an Arrow DataType.
-// The tag provides additional type hints (e.g., "enum", "int32", "binary").
+// The tag provides additional type hints (e.g., "enum", "int32", "binary",
+// "struct").
 func goTypeToArrowType(t reflect.Type, tag tagInfo) (arrow.DataType, bool, error) {
+	return goTypeToArrowTypeAt(t, tag, 0)
+}
+
+// goTypeToArrowTypeAt is goTypeToArrowType carrying the struct-nesting depth
+// of the field being described; see maxStructNestDepth.
+func goTypeToArrowTypeAt(t reflect.Type, tag tagInfo, depth int) (arrow.DataType, bool, error) {
 	nullable := tag.Nullable
 
 	// Handle pointer types (optional/nullable)
@@ -94,6 +109,22 @@ func goTypeToArrowType(t reflect.Type, tag tagInfo) (arrow.DataType, bool, error
 		}, nullable, nil
 	case "binary":
 		return arrow.BinaryTypes.Binary, nullable, nil
+	case "struct":
+		// An INLINE Arrow struct column, derived from the Go struct's own
+		// vgirpc-tagged fields by the same rules used here — so a child
+		// declared `vgirpc:"file_path"` comes out `utf8 not null` and one
+		// declared `*[]byte` comes out `binary` nullable.
+		//
+		// This is deliberately distinct from ArrowSerializable, which means
+		// "carry me as IPC stream bytes in a binary column". Some protocol
+		// fields are declared inline (BindRequest.copy_from / .copy_to), and
+		// a peer that validates its parameter contract with Schema.Equal
+		// rejects binary where the protocol says struct.
+		dt, err := structArrowType(t, depth)
+		if err != nil {
+			return nil, false, err
+		}
+		return dt, nullable, nil
 	case "large_string":
 		return arrow.BinaryTypes.LargeString, nullable, nil
 	case "large_binary":
@@ -157,17 +188,17 @@ func goTypeToArrowType(t reflect.Type, tag tagInfo) (arrow.DataType, bool, error
 			return arrow.BinaryTypes.Binary, nullable, nil
 		}
 		// List type
-		elemType, _, err := goTypeToArrowType(t.Elem(), tagInfo{})
+		elemType, _, err := goTypeToArrowTypeAt(t.Elem(), tagInfo{}, depth)
 		if err != nil {
 			return nil, false, fmt.Errorf("list element: %w", err)
 		}
 		return arrow.ListOf(elemType), nullable, nil
 	case reflect.Map:
-		keyType, _, err := goTypeToArrowType(t.Key(), tagInfo{})
+		keyType, _, err := goTypeToArrowTypeAt(t.Key(), tagInfo{}, depth)
 		if err != nil {
 			return nil, false, fmt.Errorf("map key: %w", err)
 		}
-		valType, _, err := goTypeToArrowType(t.Elem(), tagInfo{})
+		valType, _, err := goTypeToArrowTypeAt(t.Elem(), tagInfo{}, depth)
 		if err != nil {
 			return nil, false, fmt.Errorf("map value: %w", err)
 		}
@@ -175,6 +206,105 @@ func goTypeToArrowType(t reflect.Type, tag tagInfo) (arrow.DataType, bool, error
 	default:
 		return nil, false, fmt.Errorf("unsupported Go type: %v (kind: %v)", t, t.Kind())
 	}
+}
+
+// structFieldsOf derives the Arrow fields of a vgirpc-tagged Go struct, and
+// the parallel fieldDesc list that maps each column back to its Go field.
+//
+// It is the single derivation used by BOTH the top-level parameter/result
+// schema (depth 0, via buildStructDesc) and a `struct`-tagged field's inline
+// child schema (depth n, via structArrowType), so an inline struct is
+// described by exactly the same tag rules as the record that carries it.
+func structFieldsOf(t reflect.Type, depth int) ([]arrow.Field, []fieldDesc, error) {
+	if t.Kind() == reflect.Ptr {
+		t = t.Elem()
+	}
+	if t.Kind() != reflect.Struct {
+		return nil, nil, fmt.Errorf("expected struct type, got %v", t.Kind())
+	}
+
+	n := t.NumField()
+	fields := make([]arrow.Field, 0, n)
+	descs := make([]fieldDesc, 0, n)
+
+	for i := range n {
+		f := t.Field(i)
+		tag := f.Tag.Get("vgirpc")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		info := parseTag(tag)
+
+		arrowType, nullable, err := goTypeToArrowTypeAt(f.Type, info, depth)
+		if err != nil {
+			return nil, nil, fmt.Errorf("field %s: %w", f.Name, err)
+		}
+		fields = append(fields, arrow.Field{
+			Name:     info.Name,
+			Type:     arrowType,
+			Nullable: nullable,
+		})
+		descs = append(descs, fieldDesc{Index: i, Type: f.Type, Info: info})
+	}
+
+	return fields, descs, nil
+}
+
+// structArrowType derives the arrow.StructType of a `struct`-tagged field.
+// t is the field's type with any pointer already stripped by the caller, so a
+// *T field and a T field derive the same struct type and differ only in the
+// field's own nullability.
+func structArrowType(t reflect.Type, depth int) (arrow.DataType, error) {
+	if depth >= maxStructNestDepth {
+		return nil, fmt.Errorf("struct field nesting exceeds %d levels at %v (recursive type?)", maxStructNestDepth, t)
+	}
+	if t.Kind() != reflect.Struct {
+		return nil, fmt.Errorf(`vgirpc "struct" tag requires a struct (or *struct) field, got %v`, t)
+	}
+	fields, _, err := structFieldsOf(t, depth+1)
+	if err != nil {
+		return nil, fmt.Errorf("struct %v: %w", t, err)
+	}
+	if len(fields) == 0 {
+		return nil, fmt.Errorf(`struct %v has no vgirpc-tagged fields; a "struct" field needs at least one`, t)
+	}
+	return arrow.StructOf(fields...), nil
+}
+
+// tagName is the name part of a struct tag value — everything before the
+// first comma, since both the `vgirpc` and `arrow` tags spell options after
+// the name ("function_type,enum"). Returns "" for an absent or "-" tag, which
+// never matches a real field name.
+func tagName(tag string) string {
+	if tag == "" || tag == "-" {
+		return ""
+	}
+	if i := strings.IndexByte(tag, ','); i >= 0 {
+		return tag[:i]
+	}
+	return tag
+}
+
+// goFieldForArrowName finds the index of the Go struct field that carries the
+// Arrow struct child named `name`, or -1.
+//
+// The `arrow` tag wins, matching the historical lookup this replaces; the
+// `vgirpc` tag is the fallback, so a struct described purely by vgirpc tags
+// (what a `struct`-tagged field derives from) also round-trips. Matching is on
+// the tag's NAME part, so an option-carrying tag such as `arrow:"phase,enum"`
+// resolves too — the old exact-string compare silently missed those.
+func goFieldForArrowName(rt reflect.Type, name string) int {
+	for i := range rt.NumField() {
+		if tagName(rt.Field(i).Tag.Get("arrow")) == name {
+			return i
+		}
+	}
+	for i := range rt.NumField() {
+		if tagName(rt.Field(i).Tag.Get("vgirpc")) == name {
+			return i
+		}
+	}
+	return -1
 }
 
 // SchemaForStruct is [structToSchema] for callers outside this package: the

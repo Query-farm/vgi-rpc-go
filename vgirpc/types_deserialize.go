@@ -403,31 +403,26 @@ func setStructField(field reflect.Value, fieldType reflect.Type, isPtr bool, str
 	result := reflect.New(fieldType).Elem()
 	structType := structArr.DataType().(*arrow.StructType)
 
-	for fi := range fieldType.NumField() {
-		goField := fieldType.Field(fi)
-		arrowTag := goField.Tag.Get("arrow")
-		if arrowTag == "" {
+	// Walk the ARROW children and find each one's Go field (rather than the
+	// reverse), so a child the Go type does not declare is skipped rather
+	// than mis-bound. Name resolution goes through the `arrow` tag and then
+	// the `vgirpc` tag, so a struct described purely by vgirpc tags — which
+	// is what a `struct`-tagged field derives its schema from — decodes too.
+	for ci := range structType.NumFields() {
+		sf := structType.Field(ci)
+		fi := goFieldForArrowName(fieldType, sf.Name)
+		if fi < 0 {
 			continue
 		}
 
-		// Find the child array by arrow tag name
-		childIdx := -1
-		for ci := range structType.NumFields() {
-			if structType.Field(ci).Name == arrowTag {
-				childIdx = ci
-				break
-			}
-		}
-		if childIdx == -1 {
-			continue
-		}
-
-		childArr := structArr.Field(childIdx)
+		childArr := structArr.Field(ci)
 		if childArr.IsNull(idx) {
+			// Leave the Go field at its zero value; for a pointer field that
+			// is nil, which is how "this child was null" reaches user code.
 			continue
 		}
-		if err := setFieldFromArrow(result.Field(fi), goField.Type, childArr, idx, tagInfo{}); err != nil {
-			return fmt.Errorf("struct field %s: %w", arrowTag, err)
+		if err := setFieldFromArrow(result.Field(fi), fieldType.Field(fi).Type, childArr, idx, tagInfo{}); err != nil {
+			return fmt.Errorf("struct field %s: %w", sf.Name, err)
 		}
 	}
 

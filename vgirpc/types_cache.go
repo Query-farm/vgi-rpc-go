@@ -4,7 +4,6 @@
 package vgirpc
 
 import (
-	"fmt"
 	"reflect"
 	"sync"
 
@@ -51,39 +50,14 @@ func describeStruct(t reflect.Type) *structDesc {
 	return actual.(*structDesc)
 }
 
-// buildStructDesc does the uncached reflection walk.
+// buildStructDesc does the uncached reflection walk. The walk itself lives in
+// structFieldsOf (types_schema.go), which a `struct`-tagged field's inline
+// child schema reuses at greater depth.
 func buildStructDesc(t reflect.Type) *structDesc {
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
+	fields, descs, err := structFieldsOf(t, 0)
+	if err != nil {
+		return &structDesc{Err: err}
 	}
-	if t.Kind() != reflect.Struct {
-		return &structDesc{Err: fmt.Errorf("expected struct type, got %v", t.Kind())}
-	}
-
-	n := t.NumField()
-	fields := make([]arrow.Field, 0, n)
-	descs := make([]fieldDesc, 0, n)
-
-	for i := range n {
-		f := t.Field(i)
-		tag := f.Tag.Get("vgirpc")
-		if tag == "" || tag == "-" {
-			continue
-		}
-		info := parseTag(tag)
-
-		arrowType, nullable, err := goTypeToArrowType(f.Type, info)
-		if err != nil {
-			return &structDesc{Err: fmt.Errorf("field %s: %w", f.Name, err)}
-		}
-		fields = append(fields, arrow.Field{
-			Name:     info.Name,
-			Type:     arrowType,
-			Nullable: nullable,
-		})
-		descs = append(descs, fieldDesc{Index: i, Type: f.Type, Info: info})
-	}
-
 	return &structDesc{Schema: arrow.NewSchema(fields, nil), Fields: descs}
 }
 
