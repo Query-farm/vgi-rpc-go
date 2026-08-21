@@ -292,3 +292,57 @@ func TestStructTagRejectsNonStructField(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+// --------------------------------------------------------------------------- //
+// elem= — a list whose ITEM type is overridden
+// --------------------------------------------------------------------------- //
+
+// elemTagRecord mirrors the shape the VGI protocol declares for
+// InitRequest.join_keys / .split_tokens: a list of large_binary. A Go
+// `[][]byte` derives as list<binary> by default, and there is no way to say
+// otherwise with a bare type option — that would describe the field, which is
+// not a list.
+type elemTagRecord struct {
+	Plain []([]byte) `vgirpc:"plain"`
+	Large []([]byte) `vgirpc:"large,elem=large_binary"`
+}
+
+func TestElemTagOverridesListItemType(t *testing.T) {
+	schema, err := SchemaForStruct(reflect.TypeOf(elemTagRecord{}))
+	if err != nil {
+		t.Fatalf("deriving the schema failed: %v", err)
+	}
+
+	plain, ok := schema.Field(0).Type.(*arrow.ListType)
+	if !ok {
+		t.Fatalf("plain: want a list, got %s", schema.Field(0).Type)
+	}
+	if plain.Elem().ID() != arrow.BINARY {
+		t.Errorf("plain: want list<binary> without elem=, got list<%s>", plain.Elem())
+	}
+
+	large, ok := schema.Field(1).Type.(*arrow.ListType)
+	if !ok {
+		t.Fatalf("large: want a list, got %s", schema.Field(1).Type)
+	}
+	if large.Elem().ID() != arrow.LARGE_BINARY {
+		t.Errorf("large: elem=large_binary must reach the ITEM, got list<%s>", large.Elem())
+	}
+}
+
+func TestElemTagRoundTrips(t *testing.T) {
+	// The derivation is only half of it: a schema that says large_binary while
+	// the builder writes binary fails at serialize, and a reader that cannot
+	// decode large_binary fails on the way back. Both halves have to work or
+	// the tag is a lie told to the peer.
+	want := elemTagRecord{
+		Plain: [][]byte{{0x01}, {0x02, 0x03}},
+		Large: [][]byte{{0x0a, 0x0b}, {}, {0xff}},
+	}
+
+	got := roundTrip(t, want).Interface().(elemTagRecord)
+
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("round trip changed the value:\n got %#v\nwant %#v", got, want)
+	}
+}

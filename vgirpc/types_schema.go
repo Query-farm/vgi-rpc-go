@@ -38,10 +38,23 @@ type tagInfo struct {
 	Name      string
 	Default   *string // nil if no default
 	ArrowType string  // explicit type override: "int32", "float32", "enum", "binary", "struct"
+	ElemType  string  // explicit ELEMENT type override for a slice field; see parseTag
 	Nullable  bool    // force nullable for non-pointer primitive fields
 }
 
-// parseTag parses a vgirpc struct tag like "name", "name,default=foo", "name,enum", "name,int32", "name,nullable", "name,struct".
+// parseTag parses a `vgirpc` struct tag.
+//
+// Forms: "name", "name,default=foo", "name,enum", "name,int32", "name,nullable",
+// "name,struct", "name,elem=large_binary".
+//
+// `elem=` overrides the type of a SLICE field's ELEMENT, where a bare type
+// option overrides the field's own type. The two are distinct because a Go
+// `[][]byte` is a list whose items are binary, and there is no other way to
+// say "list of large_binary": a bare `large_binary` on that field would
+// describe the field itself, which is not a list at all. The protocol needs
+// exactly this for InitRequest.join_keys / .split_tokens and
+// TableFunctionPlanRequest.join_keys — a set of join keys or a batch of split
+// tokens can exceed the 2 GiB that 32-bit offsets address.
 func parseTag(tag string) tagInfo {
 	parts := strings.Split(tag, ",")
 	info := tagInfo{Name: parts[0]}
@@ -49,6 +62,8 @@ func parseTag(tag string) tagInfo {
 		if strings.HasPrefix(part, "default=") {
 			val := strings.TrimPrefix(part, "default=")
 			info.Default = &val
+		} else if strings.HasPrefix(part, "elem=") {
+			info.ElemType = strings.TrimPrefix(part, "elem=")
 		} else if part == "nullable" {
 			info.Nullable = true
 		} else {
@@ -187,8 +202,10 @@ func goTypeToArrowTypeAt(t reflect.Type, tag tagInfo, depth int) (arrow.DataType
 		if t.Elem().Kind() == reflect.Uint8 {
 			return arrow.BinaryTypes.Binary, nullable, nil
 		}
-		// List type
-		elemType, _, err := goTypeToArrowTypeAt(t.Elem(), tagInfo{}, depth)
+		// List type. `elem=` carries a type override down to the item; nothing
+		// else from this field's tag applies to the element (a `default=` or
+		// `nullable` describes the column, not its items).
+		elemType, _, err := goTypeToArrowTypeAt(t.Elem(), tagInfo{ArrowType: tag.ElemType}, depth)
 		if err != nil {
 			return nil, false, fmt.Errorf("list element: %w", err)
 		}
