@@ -680,7 +680,13 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		stickySink:        sink,
 		// Surface the request batch's custom metadata to the handler, matching
 		// the pipe transports (server_stream.go sets it from the input batch).
-		InputMetadata: inputMeta,
+		// The framework's own transport keys are stripped first, exactly as on
+		// the producer continuation turn: the pipe transports keep stream/call
+		// state in the connection and never on a batch, so without this an
+		// identical worker sees clean user metadata over subprocess and
+		// framework internals over HTTP. MetaStreamState in particular is a
+		// sealed cursor token that must not reach application code.
+		InputMetadata: stripFrameworkTickMetadata(inputMeta),
 	}
 
 	var exchangeErr error
