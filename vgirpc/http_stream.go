@@ -578,7 +578,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	}
 
 	if isProducer {
-		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx)
+		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx, inputMeta)
 	} else {
 		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, inputMeta, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx)
 	}
@@ -623,13 +623,20 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 // handleProducerContinuation runs the produce loop for a continuation request.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink) error {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, requestMeta arrow.Metadata) error {
 
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-	// A continuation turn is not the producer's first tick, so it carries no
-	// first-tick metadata.
-	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies, sink, arrow.Metadata{})
+	// The continuation request's custom metadata is this turn's tick metadata:
+	// on the pipe transports every producer turn is a tick batch whose metadata
+	// reaches the worker, and DuckDB uses that to push updated dynamic filters
+	// (vgi_pushdown_filters — Top-N boundary tightening, join-key IN sets)
+	// between ticks. Over HTTP a turn is a continuation POST, so its metadata
+	// has to be forwarded here or those updates are silently dropped. The
+	// framework's own transport keys are stripped first — the pipe transports
+	// never put them on a tick, and the stream-state value is a sealed cursor
+	// token that must not surface to user code.
+	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies, sink, stripFrameworkTickMetadata(requestMeta))
 	if err == nil && !finished {
 		// Batch limit reached — append continuation token
 		token, tokenErr := h.packCursorToken(callID, state, auth)
@@ -914,16 +921,53 @@ func requestMetadata(req *Request) arrow.Metadata {
 	return arrow.NewMetadata(keys, values)
 }
 
+// frameworkTickMetadataKeys are the metadata keys the HTTP transport itself
+// puts on a stream continuation request. They are transport plumbing, not
+// application metadata: the pipe transports carry the equivalent state in the
+// connection rather than on the batch, so a worker must never see them on a
+// tick. MetaStreamState in particular is a sealed cursor token.
+var frameworkTickMetadataKeys = map[string]struct{}{
+	MetaStreamState: {},
+	MetaCallState:   {},
+	MetaCancel:      {},
+}
+
+// stripFrameworkTickMetadata returns meta with the framework's transport keys
+// removed, preserving the relative order of the remaining keys.
+func stripFrameworkTickMetadata(meta arrow.Metadata) arrow.Metadata {
+	if meta.Len() == 0 {
+		return arrow.Metadata{}
+	}
+	srcKeys := meta.Keys()
+	srcValues := meta.Values()
+	keys := make([]string, 0, len(srcKeys))
+	values := make([]string, 0, len(srcValues))
+	for i, k := range srcKeys {
+		if _, framework := frameworkTickMetadataKeys[k]; framework {
+			continue
+		}
+		keys = append(keys, k)
+		values = append(values, srcValues[i])
+	}
+	if len(keys) == 0 {
+		return arrow.Metadata{}
+	}
+	return arrow.NewMetadata(keys, values)
+}
+
 // runProduceLoop runs the producer state machine until completion or the batch
 // limit is reached. Returns (true, nil) when the producer has finished,
 // (false, nil) when the batch limit was reached (caller should emit a
 // continuation token), or (false, err) on error.
 //
 // firstTickMeta is surfaced as CallContext.InputMetadata on the FIRST Produce
-// call only. On the pipe transports a producer's first turn is a distinct tick
-// batch whose custom metadata reaches the worker; over HTTP that turn folds
-// into the /init request, so without this the metadata a client attached to
-// /init would never be seen. Pass nil (an empty Metadata) on continuation turns.
+// call of this HTTP turn only. On the pipe transports every producer turn is a
+// distinct tick batch whose custom metadata reaches the worker; over HTTP the
+// first turn folds into the /init request and later turns are continuation
+// POSTs, so callers pass the corresponding request's metadata (framework
+// transport keys stripped). If a byte/batch cap makes one turn emit several
+// batches, the later ticks in that turn legitimately see empty metadata — the
+// client has no opportunity to update mid-turn.
 func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, schema *arrow.Schema,
 	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, sink *stickySink, firstTickMeta arrow.Metadata) (bool, error) {
 
