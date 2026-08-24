@@ -257,29 +257,6 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 		}
 	}
 
-	// Build dispatch info and stats for hooks. For stream methods, mint a
-	// stable stream_id up front; pipe transport processes the entire stream
-	// lifetime within this one serveOne call, so a single ID covers init
-	// and all continuations.
-	var streamID string
-	if methodTypeString(info.Type) == DispatchMethodStream {
-		streamID = RandomStreamID()
-	}
-	dispatchInfo := DispatchInfo{
-		Method:            req.Method,
-		MethodType:        methodTypeString(info.Type),
-		ServerID:          s.serverID,
-		Protocol:          s.serviceName,
-		ProtocolHash:      s.ProtocolHash(),
-		ProtocolVersion:   s.protocolVersion,
-		RequestID:         req.RequestID,
-		TransportMetadata: req.Metadata,
-		Auth:              Anonymous(),
-		RequestData:       reqBytes,
-		StreamID:          streamID,
-		Implementation:    s.implementation,
-	}
-
 	// Application-protocol-version gate. Fires only when the operator
 	// declared a protocol_version via [Server.SetProtocolVersion].
 	// ``__describe__`` is exempt (it's the diagnostic path a mismatched
@@ -301,9 +278,32 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 
 	var hookToken HookToken
 	var hookActive bool
-	stats := &CallStatistics{}
+	var dispatchInfo DispatchInfo
+	var stats *CallStatistics
 
 	if s.dispatchHook != nil {
+		// Build observability-only metadata only when a hook will consume it.
+		// For streams, one ID covers init and all continuations because the raw
+		// transport processes the whole stream inside this serveOne call.
+		var streamID string
+		if methodTypeString(info.Type) == DispatchMethodStream {
+			streamID = RandomStreamID()
+		}
+		dispatchInfo = DispatchInfo{
+			Method:            req.Method,
+			MethodType:        methodTypeString(info.Type),
+			ServerID:          s.serverID,
+			Protocol:          s.serviceName,
+			ProtocolHash:      s.ProtocolHash(),
+			ProtocolVersion:   s.protocolVersion,
+			RequestID:         req.RequestID,
+			TransportMetadata: req.Metadata,
+			Auth:              Anonymous(),
+			RequestData:       reqBytes,
+			StreamID:          streamID,
+			Implementation:    s.implementation,
+		}
+		stats = &CallStatistics{}
 		func() {
 			defer func() {
 				if rv := recover(); rv != nil {

@@ -26,7 +26,9 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 	}
 
 	// Record input stats
-	stats.RecordInput(req.Batch.NumRows(), batchBufferSize(req.Batch))
+	if stats != nil {
+		stats.RecordInput(req.Batch.NumRows(), batchBufferSize(req.Batch))
+	}
 
 	// Build call context
 	callCtx := &CallContext{
@@ -126,7 +128,9 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 	}
 
 	// Record output stats
-	stats.RecordOutput(resultBatch.NumRows(), batchBufferSize(resultBatch))
+	if stats != nil {
+		stats.RecordOutput(resultBatch.NumRows(), batchBufferSize(resultBatch))
+	}
 
 	// If the client advertised a shared-memory segment, try to ship the
 	// result through it. On success the pipe carries only a small pointer

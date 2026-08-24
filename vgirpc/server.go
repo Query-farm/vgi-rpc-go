@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"sync"
+	"sync/atomic"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
@@ -101,6 +102,7 @@ type Server struct {
 	transportNotifyMu     sync.Mutex
 	transportMu           sync.Mutex
 	transportKind         TransportKind
+	transportKindFast     atomic.Value // stores TransportKind after a successful binding
 	transportCapabilities map[string]bool
 	serveStartHook        ServeStartHook
 }
@@ -177,6 +179,9 @@ func (s *Server) SetServeStartHook(hook ServeStartHook) {
 // TransportKind returns the kind of transport the server is bound to,
 // or empty string before the first request is dispatched.
 func (s *Server) TransportKind() TransportKind {
+	if kind := s.transportKindFast.Load(); kind != nil {
+		return kind.(TransportKind)
+	}
 	s.transportMu.Lock()
 	defer s.transportMu.Unlock()
 	return s.transportKind
@@ -236,6 +241,7 @@ func (s *Server) notifyTransport(kind TransportKind, capabilities map[string]boo
 	s.transportKind = kind
 	s.transportCapabilities = capabilities
 	s.transportMu.Unlock()
+	s.transportKindFast.Store(kind)
 	return nil
 }
 
@@ -311,6 +317,12 @@ func (s *Server) checkProtocolVersion(clientVersion string, present bool) *Proto
 				"metadata key. This is either a vgi-rpc framework bug or a " +
 				"non-VGI client connecting to a VGI worker.",
 		}
+	}
+	// Exact equality is overwhelmingly the common case and has already been
+	// validated when the server was configured. Avoid running the semver regexp
+	// and allocating its capture slice on every RPC in that case.
+	if clientVersion == s.protocolVersion {
+		return nil
 	}
 	major, minor, _, err := parseSemver(clientVersion)
 	if err != nil {

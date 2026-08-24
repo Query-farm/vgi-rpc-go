@@ -316,7 +316,9 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		}
 
 		// Record input stats per streaming batch
-		stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
+		if stats != nil {
+			stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
+		}
 
 		// Create OutputCollector for this iteration
 		out := newOutputCollector(outputSchema, s.serverID, isProducer)
@@ -412,7 +414,9 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					}
 				}
 				// Data batch — record output stats
-				stats.RecordOutput(dataBatch.NumRows(), batchBufferSize(dataBatch))
+				if stats != nil {
+					stats.RecordOutput(dataBatch.NumRows(), batchBufferSize(dataBatch))
+				}
 				writeErr = outputWriter.Write(dataBatch)
 				dataBatch.Release()
 			}
