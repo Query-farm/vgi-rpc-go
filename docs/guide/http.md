@@ -111,7 +111,7 @@ httpServer.SetTokenTTL(30 * time.Minute)
 
 ## Concurrency Limits
 
-`HttpServer` does not cap the number of concurrent streams or connections. A long-running producer holds an HTTP connection open until it finishes (or the batch limit is reached), so an unbounded client population combined with slow producers can pin batch buffers and connections.
+`HttpServer` does not cap the number of concurrent streams or connections. Each producer request drives one lock-step transition, but a long-running `Produce` callback still holds its HTTP connection until that transition returns. An unbounded client population combined with slow callbacks can therefore pin batch buffers and connections.
 
 vgi-rpc deliberately delegates this concern to your reverse proxy or load balancer. Recommended controls:
 
@@ -120,7 +120,7 @@ vgi-rpc deliberately delegates this concern to your reverse proxy or load balanc
 - **HAProxy**: `maxconn` (frontend) and `rate-limit sessions`.
 - **AWS ALB / GCP HTTPS LB**: target group connection limits and idle timeouts.
 
-When stream methods may run for minutes, configure the proxy timeout accordingly, or use `SetProducerBatchLimit` to force the client to issue fresh `/exchange` requests inside the proxy's per-request timeout window.
+Configure the proxy timeout to accommodate the longest individual producer transition. Active producers automatically issue a fresh `/exchange` request after each transition.
 
 If you cannot place a proxy in front of the server, wrap `HttpServer` with a middleware `http.Handler` that maintains a `chan struct{}` semaphore and rejects new requests with `503 Service Unavailable` once the cap is reached.
 
@@ -150,7 +150,7 @@ if err := srv.Shutdown(shutdownCtx); err != nil {
 }
 ```
 
-A long-running producer that ignores its context will not exit until the shutdown deadline expires, at which point the connection is closed and the goroutine is left running until it returns. Handlers that loop independently of vgi-rpc's produce loop should observe `ctx.Done()` themselves.
+A long-running producer transition that ignores its context will not exit until the shutdown deadline expires, at which point the connection is closed and the goroutine is left running until it returns. Handlers that perform their own long-running work should observe `ctx.Done()` themselves.
 
 ## Full Example
 

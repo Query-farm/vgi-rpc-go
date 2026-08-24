@@ -79,10 +79,8 @@ func WriteRequest(w io.Writer, method string, params arrow.RecordBatch, protocol
 //     header lives in its own stream with a different schema), so the token
 //     can be in a later stream.
 //
-// Returns the first token found across all concatenated streams. For a
-// response that rotates the token across multiple data batches, the last
-// token is the continuation the peer will send next; this returns the
-// first. Single-token responses (the common case) make them identical.
+// Returns the first token found across all concatenated streams. Lock-step
+// responses carry one continuation token per turn.
 //
 // The returned bytes are the metadata value verbatim (the base64 text the
 // peer echoes back), not a decoded payload.

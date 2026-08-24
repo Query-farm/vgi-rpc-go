@@ -89,9 +89,8 @@ type HttpServer struct {
 	// correctness never depends on a hit. See [callStateCache].
 	callStates *callStateCache
 
-	rehydrateFunc      RehydrateFunc    // called after unpacking state tokens
-	producerBatchLimit int              // max data batches per producer response; 0 = unlimited
-	authenticateFunc   AuthenticateFunc // optional auth callback; nil = anonymous
+	rehydrateFunc    RehydrateFunc    // called after unpacking state tokens
+	authenticateFunc AuthenticateFunc // optional auth callback; nil = anonymous
 
 	// OAuth Protected Resource Metadata (RFC 9728)
 	oauthMetadata     *OAuthResourceMetadata
@@ -632,13 +631,13 @@ func (h *HttpServer) SetRehydrateFunc(fn RehydrateFunc) {
 	h.rehydrateFunc = fn
 }
 
-// SetProducerBatchLimit sets the maximum number of data batches a producer
-// emits per HTTP response. When the limit is reached, the server serializes
-// the producer state into a continuation token appended to the response.
-// The client sends the token back via /exchange to resume production.
-// Set to 0 (default) for unlimited batches per response.
+// SetProducerBatchLimit is retained for source compatibility. HTTP producer
+// dispatch is always lock-step: every request drives exactly one Produce call
+// and therefore at most one data batch, regardless of limit.
+//
+// Deprecated: producer responses are always limited to one transition.
 func (h *HttpServer) SetProducerBatchLimit(limit int) {
-	h.producerBatchLimit = limit
+	_ = limit
 }
 
 // SetAuthenticate registers a callback that extracts authentication

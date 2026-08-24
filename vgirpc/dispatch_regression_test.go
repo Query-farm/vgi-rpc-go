@@ -241,7 +241,6 @@ func TestHTTPStreamInitResolvesExternalParams(t *testing.T) {
 			return &StreamResult{OutputSchema: regressionSchema, State: &finishProducerState{}}, nil
 		})
 	h := NewHttpServer(s)
-	h.SetProducerBatchLimit(1)
 	h.InitPages()
 
 	pointer, locationMeta := MakeExternalLocationBatch(regressionSchema, fetch.URL)

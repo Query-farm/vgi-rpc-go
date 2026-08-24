@@ -57,13 +57,15 @@ type StreamResult struct {
 }
 
 // OutputCollector accumulates output batches during a produce/exchange call.
-// It enforces that exactly one data batch is emitted per call (plus any number
-// of log batches). Batches are stored in order because interleaving order
+// It permits at most one data batch per call (plus any number of log batches).
+// An unfinished turn must emit that one data batch; a producer may instead
+// finish without data. Batches are stored in order because interleaving order
 // matters for the wire protocol (logs must precede the data batch they annotate).
 type OutputCollector struct {
 	schema       *arrow.Schema
 	batches      []annotatedBatch
 	dataBatchIdx int // -1 if no data batch yet
+	protocolErr  error
 	finished     bool
 	producerMode bool
 	serverID     string
@@ -126,7 +128,9 @@ func (o *OutputCollector) Emit(batch arrow.RecordBatch) error {
 // per-batch annotations such as vgi_batch_index and vgi_partition_values#b64.
 func (o *OutputCollector) EmitWithMetadata(batch arrow.RecordBatch, meta map[string]string) error {
 	if o.dataBatchIdx >= 0 {
-		return fmt.Errorf("OutputCollector: only one data batch may be emitted per call")
+		err := &RpcError{Type: "ProtocolError", Message: "OutputCollector: only one data batch may be emitted per call"}
+		o.protocolErr = err
+		return err
 	}
 	if o.EmitInterceptor != nil {
 		var err error
@@ -167,7 +171,11 @@ func (o *OutputCollector) EmitArrays(arrays []arrow.Array, numRows int64) error 
 		s = o.ProcessSchema
 	}
 	batch := array.NewRecordBatch(s, arrays, numRows)
-	return o.Emit(batch)
+	if err := o.Emit(batch); err != nil {
+		batch.Release()
+		return err
+	}
+	return nil
 }
 
 // EmitMap builds a 1-row RecordBatch from column name/value pairs using the
@@ -193,7 +201,11 @@ func (o *OutputCollector) EmitMap(data map[string][]interface{}) error {
 	for _, c := range cols {
 		c.Release()
 	}
-	return o.Emit(batch)
+	if err := o.Emit(batch); err != nil {
+		batch.Release()
+		return err
+	}
+	return nil
 }
 
 // Finish signals end-of-stream for producer streams.
@@ -266,9 +278,13 @@ func (o *OutputCollector) ClientLog(level LogLevel, message string, extras ...KV
 	o.batches = append(o.batches, annotatedBatch{batch: batch, meta: &meta})
 }
 
-// validate checks that exactly one data batch was emitted.
+// validate checks that no prior protocol violation occurred and that an
+// unfinished turn emitted its required data batch.
 func (o *OutputCollector) validate() error {
-	if o.dataBatchIdx < 0 {
+	if o.protocolErr != nil {
+		return o.protocolErr
+	}
+	if o.dataBatchIdx < 0 && !o.finished {
 		return &RpcError{Type: "RuntimeError", Message: "No data batch was emitted"}
 	}
 	return nil
@@ -283,6 +299,7 @@ func (o *OutputCollector) releaseBatches() {
 	}
 	o.batches = nil
 	o.dataBatchIdx = -1
+	o.protocolErr = nil
 }
 
 // buildArrayFromSlice builds an Arrow array from a slice of interface values.

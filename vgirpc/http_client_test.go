@@ -88,6 +88,52 @@ func TestHttpClientUnaryAndProducerLifecycle(t *testing.T) {
 	}
 }
 
+func TestHttpClientRejectsMultipleProducerBatchesPerTurn(t *testing.T) {
+	schema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int32}}, nil)
+	builder := array.NewInt32Builder(memory.DefaultAllocator)
+	builder.AppendValues([]int32{1, 2}, nil)
+	values := builder.NewInt32Array()
+	builder.Release()
+	firstValues := array.NewSlice(values, 0, 1)
+	secondValues := array.NewSlice(values, 1, 2)
+	first := array.NewRecordBatch(schema, []arrow.Array{firstValues}, 1)
+	second := array.NewRecordBatch(schema, []arrow.Array{secondValues}, 1)
+	firstValues.Release()
+	secondValues.Release()
+	values.Release()
+	var body bytes.Buffer
+	writer := ipc.NewWriter(&body, ipc.WithSchema(schema))
+	if err := writer.Write(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Write(second); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
+	second.Release()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", arrowContentType)
+		_, _ = w.Write(body.Bytes())
+	}))
+	defer server.Close()
+	client, err := NewHttpClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	params := emptyBatch(arrow.NewSchema(nil, nil))
+	defer params.Release()
+	_, err = client.OpenProducer(context.Background(), "numbers", params, ClientStreamSchema{Output: schema})
+	var rpcErr *RpcError
+	if !errors.As(err, &rpcErr) || rpcErr.Type != "ProtocolError" {
+		t.Fatalf("OpenProducer error = %v, want ProtocolError", err)
+	}
+}
+
 func TestHttpClientParses200ExceptionEnvelope(t *testing.T) {
 	server := NewServer()
 	Unary(server, "fail", func(context.Context, *CallContext, struct{}) (string, error) {

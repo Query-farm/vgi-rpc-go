@@ -167,7 +167,7 @@ func main() {
 	if transportKindProbe {
 		vgirpc.Unary(server, "report_transport_kind", reportTransportKind)
 	} else {
-		server.SetProtocolVersion("1.0.0")
+		server.SetProtocolVersion("2.0.0")
 		conformance.RegisterMethods(server)
 	}
 
@@ -601,12 +601,6 @@ func main() {
 		if origin := findFlagValue(os.Args, "--cors-origin"); origin != "" {
 			httpServer.SetCorsOrigins(origin)
 		}
-		// Emit one batch per HTTP response so infinite producers (e.g.
-		// ``cancellable_producer``) return promptly and the client can follow
-		// continuation tokens or cancel mid-stream. Matches the Python
-		// reference server's default.
-		httpServer.SetProducerBatchLimit(1)
-
 		listenAddr := "127.0.0.1:0"
 		if portFlag := findFlagValue(os.Args, "--port"); portFlag != "" {
 			listenAddr = "127.0.0.1:" + portFlag

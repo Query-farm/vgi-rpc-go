@@ -274,7 +274,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if isProducer {
-		// Run produce loop (may be limited by producerBatchLimit)
+		// Run exactly one producer transition for this init tick.
 		writer := ipc.NewWriter(&buf, ipc.WithSchema(outputSchema))
 
 		// Write any buffered init logs
@@ -286,10 +286,10 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		// The producer's first turn folds into this /init request, so the init
 		// request's custom metadata is what the pipe transports would have
 		// delivered on the first tick batch.
-		finished, err := h.runProduceLoop(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, transportMeta, callCtx.Cookies, callCtx.stickySink, requestMetadata(req))
+		finished, err := h.runProduceTurn(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, transportMeta, callCtx.Cookies, callCtx.stickySink, requestMetadata(req))
 		handlerErr = err
 		if err == nil && !finished {
-			// Batch limit reached — append continuation token
+			// The producer remains active — append a continuation token.
 			token, tokenErr := h.packCursorToken(callID, state, auth)
 			callToken, callErr := h.packCallToken(callID, outputSchema, auth, streamID)
 			if tokenErr != nil {
@@ -620,7 +620,7 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 	return nil
 }
 
-// handleProducerContinuation runs the produce loop for a continuation request.
+// handleProducerContinuation runs one producer transition for a continuation request.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
 	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, requestMeta arrow.Metadata) error {
@@ -636,9 +636,9 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 	// framework's own transport keys are stripped first — the pipe transports
 	// never put them on a tick, and the stream-state value is a sealed cursor
 	// token that must not surface to user code.
-	finished, err := h.runProduceLoop(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies, sink, stripFrameworkTickMetadata(requestMeta))
+	finished, err := h.runProduceTurn(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies, sink, stripFrameworkTickMetadata(requestMeta))
 	if err == nil && !finished {
-		// Batch limit reached — append continuation token
+		// The producer remains active — append a continuation token.
 		token, tokenErr := h.packCursorToken(callID, state, auth)
 		if tokenErr != nil {
 			err = tokenErr
@@ -733,7 +733,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	// Refuse an over-budget upload before flushing — exchange is lockstep,
 	// so the whole external budget belongs to this single emit and there is
 	// no prior accumulation to carry.
-	if capErr := h.checkExternalBudget(out, info.Name, 0); capErr != nil {
+	if capErr := h.checkExternalBudget(out, info.Name); capErr != nil {
 		out.releaseBatches()
 		h.writeExchangeCapError(w, schema, info.Name, capErr)
 		return capErr
@@ -879,8 +879,8 @@ func (h *HttpServer) externalizeStreamDataBatch(ctx context.Context, batch arrow
 	return withMeta, rawBytes, true
 }
 
-// checkExternalBudget pre-flights the external cap for one collector cycle.
-// It returns a non-nil error when uploading this cycle's data batch would
+// checkExternalBudget pre-flights the external cap for one collector turn.
+// It returns a non-nil error when uploading this turn's data batch would
 // push the call past max_externalized_response_bytes.
 //
 // Pre-flight rather than post-flush because the operator's intent in
@@ -891,10 +891,7 @@ func (h *HttpServer) externalizeStreamDataBatch(ctx context.Context, batch arrow
 // which get a soft wire cap: by the time a continuation token could carry
 // the overshoot to the next turn, the bytes are already in object storage
 // and the egress is already billed.
-//
-// `alreadyUploaded` is the running total for this HTTP turn, so a producer
-// cannot drip past the cap one iteration at a time.
-func (h *HttpServer) checkExternalBudget(out *OutputCollector, method string, alreadyUploaded int64) error {
+func (h *HttpServer) checkExternalBudget(out *OutputCollector, method string) error {
 	if h.server.externalConfig == nil || h.maxExternalizedResponseBytes <= 0 || out.dataBatchIdx < 0 {
 		return nil
 	}
@@ -902,8 +899,8 @@ func (h *HttpServer) checkExternalBudget(out *OutputCollector, method string, al
 	if predicted == 0 {
 		return nil
 	}
-	if projected := alreadyUploaded + predicted; projected > h.maxExternalizedResponseBytes {
-		return newExternalCapError(method, projected, h.maxExternalizedResponseBytes)
+	if predicted > h.maxExternalizedResponseBytes {
+		return newExternalCapError(method, predicted, h.maxExternalizedResponseBytes)
 	}
 	return nil
 }
@@ -961,163 +958,134 @@ func stripFrameworkTickMetadata(meta arrow.Metadata) arrow.Metadata {
 	return arrow.NewMetadata(keys, values)
 }
 
-// runProduceLoop runs the producer state machine until completion or the batch
-// limit is reached. Returns (true, nil) when the producer has finished,
-// (false, nil) when the batch limit was reached (caller should emit a
-// continuation token), or (false, err) on error.
+// runProduceTurn drives exactly one lock-step producer transition. Returns
+// (true, nil) when the producer has finished, (false, nil) when the caller
+// should emit a continuation token, or (false, err) on error.
 //
-// firstTickMeta is surfaced as CallContext.InputMetadata on the FIRST Produce
-// call of this HTTP turn only. On the pipe transports every producer turn is a
+// firstTickMeta is surfaced as CallContext.InputMetadata on the Produce
+// call of this HTTP turn. On the pipe transports every producer turn is a
 // distinct tick batch whose custom metadata reaches the worker; over HTTP the
 // first turn folds into the /init request and later turns are continuation
 // POSTs, so callers pass the corresponding request's metadata (framework
-// transport keys stripped). If a byte/batch cap makes one turn emit several
-// batches, the later ticks in that turn legitimately see empty metadata — the
-// client has no opportunity to update mid-turn.
-func (h *HttpServer) runProduceLoop(ctx context.Context, writer *ipc.Writer, schema *arrow.Schema,
+// transport keys stripped).
+func (h *HttpServer) runProduceTurn(ctx context.Context, writer *ipc.Writer, schema *arrow.Schema,
 	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, sink *stickySink, firstTickMeta arrow.Metadata) (bool, error) {
 
-	dataBatches := 0
-	firstTick := true
-	// Running external-channel total for this HTTP turn. The wire cap is
-	// soft for producers (a continuation token absorbs the overshoot); this
-	// one is not, so it has to be tallied across iterations rather than
-	// judged one batch at a time.
-	var externalBytes int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return true, nil
-		}
-		out := newOutputCollector(schema, h.server.serverID, true)
-		remainingExternal := h.maxExternalizedResponseBytes
-		if remainingExternal > 0 {
-			remainingExternal = max(0, remainingExternal-externalBytes)
-		}
-		out.setBudgets(h.maxResponseBytes, remainingExternal, h.server.externalConfig != nil)
-		callCtx := &CallContext{
-			Ctx:               ctx,
-			ServerID:          h.server.serverID,
-			Method:            info.Name,
-			LogLevel:          LogTrace,
-			Auth:              auth,
-			TransportMetadata: transportMeta,
-			Cookies:           cookies,
-			Kind:              TransportKindHTTP,
-			Implementation:    h.server.implementation,
-			stickySink:        sink,
-		}
-		if firstTick {
-			callCtx.InputMetadata = firstTickMeta
-			firstTick = false
-		}
+	if err := ctx.Err(); err != nil {
+		return true, nil
+	}
+	out := newOutputCollector(schema, h.server.serverID, true)
+	remainingExternal := h.maxExternalizedResponseBytes
+	out.setBudgets(h.maxResponseBytes, remainingExternal, h.server.externalConfig != nil)
+	callCtx := &CallContext{
+		Ctx:               ctx,
+		ServerID:          h.server.serverID,
+		Method:            info.Name,
+		LogLevel:          LogTrace,
+		Auth:              auth,
+		TransportMetadata: transportMeta,
+		Cookies:           cookies,
+		Kind:              TransportKindHTTP,
+		Implementation:    h.server.implementation,
+		stickySink:        sink,
+	}
+	callCtx.InputMetadata = firstTickMeta
 
-		var produceErr error
-		func() {
-			defer func() {
-				if rv := recover(); rv != nil {
-					produceErr = &RpcError{Type: "RuntimeError", Message: fmt.Sprintf("%v", rv)}
-				}
-			}()
-			if err := state.Produce(ctx, out, callCtx); err != nil {
-				produceErr = err
+	var produceErr error
+	func() {
+		defer func() {
+			if rv := recover(); rv != nil {
+				produceErr = &RpcError{Type: "RuntimeError", Message: fmt.Sprintf("%v", rv)}
 			}
 		}()
-
-		if produceErr != nil {
-			out.releaseBatches()
-			h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, produceErr, h.server.serverID, "", h.server.debugErrors))
-			return false, produceErr
+		if err := state.Produce(ctx, out, callCtx); err != nil {
+			produceErr = err
 		}
+	}()
 
-		if !out.Finished() {
-			if err := out.validate(); err != nil {
-				out.releaseBatches()
-				h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
-				return false, err
+	if produceErr != nil {
+		out.releaseBatches()
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, produceErr, h.server.serverID, "", h.server.debugErrors))
+		return false, produceErr
+	}
+
+	if err := out.validate(); err != nil {
+		out.releaseBatches()
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))
+		return false, err
+	}
+
+	// Refuse an over-budget upload before flushing anything from this
+	// cycle — see checkExternalBudget for why the external cap gets no
+	// continuation-token escape.
+	if capErr := h.checkExternalBudget(out, info.Name); capErr != nil {
+		out.releaseBatches()
+		h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(writer, schema, capErr, h.server.serverID, "", h.server.debugErrors))
+		return false, capErr
+	}
+
+	// Flush output. The data batch is the one at out.dataBatchIdx; it may
+	// carry per-batch metadata (e.g. vgi_batch_index, vgi_partition_values).
+	// Classifying purely by "has metadata" would mis-file an annotated data
+	// batch as a log batch.
+	for i, ab := range out.batches {
+		isDataBatch := i == out.dataBatchIdx
+		if isDataBatch {
+			// Stats stay on the *logical* batch: output_bytes answers "how
+			// much Arrow data did this call produce", which externalizing
+			// does not change — only where the bytes travel. The upload
+			// itself is reported separately as externalized_bytes.
+			stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
+			// Attach per-emit metadata BEFORE offering the batch for
+			// externalization: the uploaded stream is where the client
+			// reads that metadata back from.
+			toWrite := ab.batch
+			owned := false
+			if ab.meta != nil {
+				toWrite = array.NewRecordBatchWithMetadata(
+					schema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
+				owned = true
 			}
-		}
-
-		// Refuse an over-budget upload before flushing anything from this
-		// cycle — see checkExternalBudget for why the external cap gets no
-		// continuation-token escape.
-		if capErr := h.checkExternalBudget(out, info.Name, externalBytes); capErr != nil {
-			out.releaseBatches()
-			h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(writer, schema, capErr, h.server.serverID, "", h.server.debugErrors))
-			return false, capErr
-		}
-
-		// Flush output. The data batch is the one at out.dataBatchIdx; it may
-		// carry per-batch metadata (e.g. vgi_batch_index, vgi_partition_values)
-		// yet must still count as a data batch and toward producerBatchLimit.
-		// Classifying purely by "has metadata" mis-files an annotated data batch
-		// as a log batch, so it never counts toward the limit and a single
-		// producer turn drains the whole stream — which over HTTP collapses a
-		// multi-worker scan onto one connection (no parallelism).
-		for i, ab := range out.batches {
-			isDataBatch := i == out.dataBatchIdx
-			if isDataBatch {
-				// Stats stay on the *logical* batch: output_bytes answers "how
-				// much Arrow data did this call produce", which externalizing
-				// does not change — only where the bytes travel. The upload
-				// itself is reported separately as externalized_bytes.
-				stats.RecordOutput(ab.batch.NumRows(), batchBufferSize(ab.batch))
-				// Attach per-emit metadata BEFORE offering the batch for
-				// externalization: the uploaded stream is where the client
-				// reads that metadata back from.
-				toWrite := ab.batch
-				owned := false
-				if ab.meta != nil {
-					toWrite = array.NewRecordBatchWithMetadata(
-						schema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
-					owned = true
-				}
-				if extBatch, rawBytes, replaced := h.externalizeStreamDataBatch(ctx, toWrite); replaced {
-					if owned {
-						toWrite.Release()
-					}
-					toWrite = extBatch
-					owned = true
-					externalBytes += rawBytes
-				}
-				werr := writer.Write(toWrite)
+			if extBatch, _, replaced := h.externalizeStreamDataBatch(ctx, toWrite); replaced {
 				if owned {
 					toWrite.Release()
 				}
-				if werr != nil {
-					h.logIPCWriteErr("data-batch", info.Name, werr)
-					ab.batch.Release()
-					return false, werr
-				}
-				dataBatches++
-			} else if ab.meta != nil {
-				batchWithMeta := array.NewRecordBatchWithMetadata(
-					schema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
-				if werr := writer.Write(batchWithMeta); werr != nil {
-					h.logIPCWriteErr("log-batch", info.Name, werr)
-					batchWithMeta.Release()
-					ab.batch.Release()
-					return false, werr
-				}
-				batchWithMeta.Release()
-			} else {
-				if werr := writer.Write(ab.batch); werr != nil {
-					h.logIPCWriteErr("batch", info.Name, werr)
-					ab.batch.Release()
-					return false, werr
-				}
+				toWrite = extBatch
+				owned = true
 			}
-			ab.batch.Release()
+			werr := writer.Write(toWrite)
+			if owned {
+				toWrite.Release()
+			}
+			if werr != nil {
+				h.logIPCWriteErr("data-batch", info.Name, werr)
+				ab.batch.Release()
+				return false, werr
+			}
+		} else if ab.meta != nil {
+			batchWithMeta := array.NewRecordBatchWithMetadata(
+				schema, ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
+			if werr := writer.Write(batchWithMeta); werr != nil {
+				h.logIPCWriteErr("log-batch", info.Name, werr)
+				batchWithMeta.Release()
+				ab.batch.Release()
+				return false, werr
+			}
+			batchWithMeta.Release()
+		} else {
+			if werr := writer.Write(ab.batch); werr != nil {
+				h.logIPCWriteErr("batch", info.Name, werr)
+				ab.batch.Release()
+				return false, werr
+			}
 		}
-
-		if out.Finished() {
-			return true, nil
-		}
-
-		// Check batch limit
-		if h.producerBatchLimit > 0 && dataBatches >= h.producerBatchLimit {
-			return false, nil
-		}
+		ab.batch.Release()
 	}
+
+	if out.Finished() {
+		return true, nil
+	}
+	return false, nil
 }
 
 // startDispatchHook runs OnDispatchStart (if a hook is configured) and returns

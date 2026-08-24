@@ -54,8 +54,8 @@ func (r *tickMetaRecorder) snapshot() []arrow.Metadata {
 var tickMetaProbe = &tickMetaRecorder{}
 
 // tickMetaProducer records its per-tick InputMetadata and emits one row per
-// Produce call without ever finishing, so a batch limit of 1 makes every turn
-// end with a continuation token.
+// Produce call without ever finishing, so global lock-step dispatch makes
+// every turn end with a continuation token.
 type tickMetaProducer struct{ Seq int64 }
 
 func (p *tickMetaProducer) Produce(_ context.Context, out *OutputCollector, callCtx *CallContext) error {
@@ -77,9 +77,6 @@ func TestHTTPProducerContinuationCarriesRequestMetadata(t *testing.T) {
 			return &StreamResult{OutputSchema: regressionSchema, State: &tickMetaProducer{}}, nil
 		})
 	h := NewHttpServer(s)
-	// One data batch per turn: the client gets one tick per batch, which is
-	// the shape DuckDB's HTTP client drives.
-	h.SetProducerBatchLimit(1)
 	h.InitPages()
 
 	params := regressionBatch(t, 1)
@@ -94,7 +91,7 @@ func TestHTTPProducerContinuationCarriesRequestMetadata(t *testing.T) {
 	}
 	token, callToken := FindStreamTokens(initW.Body.Bytes())
 	if token == nil || callToken == nil {
-		t.Fatalf("init response missing stream tokens (batch limit did not trigger a continuation)")
+		t.Fatalf("init response missing stream tokens after one lock-step transition")
 	}
 
 	// The continuation turn: a tick batch carrying a *tightened* filter

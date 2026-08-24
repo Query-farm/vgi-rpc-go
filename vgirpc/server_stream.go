@@ -367,15 +367,14 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			break
 		}
 
-		// Validate (unless finished)
-		if !out.Finished() {
-			if err := out.validate(); err != nil {
-				streamErr = err
-				s.logIPCWriteErr("validate-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, err, s.serverID, req.RequestID, s.debugErrors))
-				out.releaseBatches()
-				releaseInput()
-				break
-			}
+		// Validate even after Finish: a handler cannot hide a protocol violation
+		// by ignoring the second Emit error and then ending the stream.
+		if err := out.validate(); err != nil {
+			streamErr = err
+			s.logIPCWriteErr("validate-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, err, s.serverID, req.RequestID, s.debugErrors))
+			out.releaseBatches()
+			releaseInput()
+			break
 		}
 
 		// Flush all accumulated batches to output writer

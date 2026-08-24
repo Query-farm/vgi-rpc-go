@@ -382,6 +382,13 @@ func (c *HttpClient) openStream(
 			}
 			return nil, &RpcError{Type: "ProtocolError", Message: "exchange init response must contain cursor and call tokens"}
 		}
+	} else if len(parsed.batches) > 1 {
+		count := len(parsed.batches)
+		parsed.release()
+		if header != nil {
+			header.Release()
+		}
+		return nil, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf("producer init response contained %d data batches", count)}
 	}
 	if response.status < 200 || response.status >= 300 || response.rpcError {
 		parsed.release()
@@ -582,6 +589,11 @@ func (s *HttpClientStream) Next(ctx context.Context) (batch *ClientBatch, ok boo
 		parsed, err := s.client.parseMain(response, s.schemas.Output, false)
 		if err != nil {
 			return nil, false, err
+		}
+		if len(parsed.batches) > 1 {
+			count := len(parsed.batches)
+			parsed.release()
+			return nil, false, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf("producer response contained %d data batches", count)}
 		}
 		s.pending = parsed.batches
 		s.token = parsed.token

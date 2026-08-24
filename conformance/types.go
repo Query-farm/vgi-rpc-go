@@ -198,8 +198,8 @@ type Status string
 
 // Point is a simple 2D point.
 type Point struct {
-	X float64 `arrow:"x"`
-	Y float64 `arrow:"y"`
+	X float64 `arrow:"x" vgirpc:"x"`
+	Y float64 `arrow:"y" vgirpc:"y"`
 }
 
 func (p Point) ArrowSchema() *arrow.Schema {
@@ -207,6 +207,52 @@ func (p Point) ArrowSchema() *arrow.Schema {
 		{Name: "x", Type: arrow.PrimitiveTypes.Float64},
 		{Name: "y", Type: arrow.PrimitiveTypes.Float64},
 	}, nil)
+}
+
+func statusDictionaryType() arrow.DataType {
+	return &arrow.DictionaryType{
+		IndexType: arrow.PrimitiveTypes.Int16,
+		ValueType: arrow.BinaryTypes.String,
+	}
+}
+
+func pointStructType() arrow.DataType {
+	return arrow.StructOf(
+		arrow.Field{Name: "x", Type: arrow.PrimitiveTypes.Float64},
+		arrow.Field{Name: "y", Type: arrow.PrimitiveTypes.Float64},
+	)
+}
+
+// NestedContainers exercises recursive enum and dataclass conversion.
+type NestedContainers struct {
+	Statuses       []Status          `arrow:"statuses"`
+	Points         []Point           `arrow:"points"`
+	StatusByName   map[string]Status `arrow:"status_by_name"`
+	FrozenStatuses []Status          `arrow:"frozen_statuses"`
+	TaggedStatus   *Status           `arrow:"tagged_status"`
+	TaggedPoint    *Point            `arrow:"tagged_point"`
+	TaggedBatch    []byte            `arrow:"tagged_batch"`
+}
+
+func (NestedContainers) ArrowSchema() *arrow.Schema {
+	dict := statusDictionaryType()
+	point := pointStructType()
+	return arrow.NewSchema([]arrow.Field{
+		{Name: "statuses", Type: arrow.ListOf(dict)},
+		{Name: "points", Type: arrow.ListOf(point)},
+		{Name: "status_by_name", Type: arrow.MapOf(arrow.BinaryTypes.String, dict)},
+		{Name: "frozen_statuses", Type: arrow.ListOf(dict)},
+		{Name: "tagged_status", Type: dict, Nullable: true},
+		{Name: "tagged_point", Type: point, Nullable: true},
+		{Name: "tagged_batch", Type: arrow.BinaryTypes.Binary, Nullable: true},
+	}, nil)
+}
+
+// StatusListResult retains dictionary encoding for a top-level list result.
+type StatusListResult []Status
+
+func (StatusListResult) VgirpcArrowResult() arrow.DataType {
+	return arrow.ListOf(statusDictionaryType())
 }
 
 // BoundingBox contains two nested Points and a label.
@@ -403,6 +449,11 @@ func buildDynamicSchema(includeStrings, includeFloats bool) *arrow.Schema {
 var counterSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "index", Type: arrow.PrimitiveTypes.Int64},
 	{Name: "value", Type: arrow.PrimitiveTypes.Int64},
+}, nil)
+
+var tickMetadataSchema = arrow.NewSchema([]arrow.Field{
+	{Name: "index", Type: arrow.PrimitiveTypes.Int64},
+	{Name: "seen", Type: arrow.BinaryTypes.String},
 }, nil)
 
 // sessionCounterOutputSchema is the schema for the sticky-session

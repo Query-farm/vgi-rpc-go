@@ -35,6 +35,7 @@ func init() {
 	vgirpc.RegisterStateType(&cancellableExchangeState{})
 	vgirpc.RegisterStateType(&sessionCounterProducerState{})
 	vgirpc.RegisterStateType(&sessionCounterExchangeState{})
+	vgirpc.RegisterStateType(&tickMetadataProducerState{})
 }
 
 // --- Cancel probe (process-wide counters for cancel conformance tests) ---
@@ -169,6 +170,37 @@ func (s *cancellableExchangeState) OnCancel(_ context.Context, callCtx *vgirpc.C
 type counterProducerState struct {
 	Count   int
 	Current int
+}
+
+type tickMetadataProducerState struct {
+	Count   int
+	Current int
+}
+
+func (s *tickMetadataProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+	if s.Current >= s.Count {
+		return out.Finish()
+	}
+	seen, _ := callCtx.InputMetadata.GetValue("vgi.conformance.tick")
+	mem := memory.NewGoAllocator()
+	idxBuilder := array.NewInt64Builder(mem)
+	seenBuilder := array.NewStringBuilder(mem)
+	defer idxBuilder.Release()
+	defer seenBuilder.Release()
+	idxBuilder.Append(int64(s.Current))
+	seenBuilder.Append(seen)
+	idx := idxBuilder.NewArray()
+	seenArray := seenBuilder.NewArray()
+	defer idx.Release()
+	defer seenArray.Release()
+	if err := out.EmitArrays([]arrow.Array{idx, seenArray}, 1); err != nil {
+		return err
+	}
+	s.Current++
+	if s.Current >= s.Count {
+		return out.Finish()
+	}
+	return nil
 }
 
 func (s *counterProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {

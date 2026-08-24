@@ -4,6 +4,7 @@
 package conformance
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strconv"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/ipc"
+	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
 // --- Parameter structs for each method ---
@@ -60,6 +64,15 @@ type echoOptionalStringParams struct {
 }
 type echoOptionalIntParams struct {
 	Value *int64 `vgirpc:"value"`
+}
+type echoOptionalPointParams struct {
+	Point *Point `vgirpc:"point,binary"`
+}
+type echoAnnotatedOptionalIntParams struct {
+	Value *int32 `vgirpc:"value,int32"`
+}
+type echoOuterOptionalNonNullParams struct {
+	Value *int32 `vgirpc:"value,int32,nonnullable"`
 }
 type echoPointParams struct {
 	Point Point `vgirpc:"point,binary"`
@@ -139,6 +152,14 @@ type echoDeepNestedParams struct {
 type echoEmbeddedArrowParams struct {
 	Data EmbeddedArrow `vgirpc:"data,binary"`
 }
+type packNestedContainersParams struct {
+	Statuses     []Status          `vgirpc:"statuses,elem=enum"`
+	Points       []Point           `vgirpc:"points,elem=struct"`
+	StatusByName map[string]Status `vgirpc:"status_by_name,elem=enum"`
+}
+type echoStatusListParams struct {
+	Statuses []Status `vgirpc:"statuses,elem=enum"`
+}
 type addFloatsParams struct {
 	A float64 `vgirpc:"a"`
 	B float64 `vgirpc:"b"`
@@ -183,6 +204,9 @@ func RegisterMethods(server *vgirpc.Server) {
 	// Optional/nullable
 	vgirpc.Unary(server, "echo_optional_string", echoOptionalString)
 	vgirpc.Unary(server, "echo_optional_int", echoOptionalInt)
+	vgirpc.Unary(server, "echo_optional_point", echoOptionalPoint)
+	vgirpc.Unary(server, "echo_annotated_optional_int", echoAnnotatedOptionalInt)
+	vgirpc.Unary(server, "echo_outer_optional_non_null", echoOuterOptionalNonNull)
 
 	// Dataclass round-trip
 	vgirpc.Unary(server, "echo_point", echoPoint)
@@ -215,6 +239,8 @@ func RegisterMethods(server *vgirpc.Server) {
 	vgirpc.Unary(server, "echo_container_wide_types", echoContainerWideTypes)
 	vgirpc.Unary(server, "echo_deep_nested", echoDeepNested)
 	vgirpc.Unary(server, "echo_embedded_arrow", echoEmbeddedArrow)
+	vgirpc.Unary(server, "pack_nested_containers", packNestedContainers)
+	vgirpc.Unary(server, "echo_status_list", echoStatusList)
 
 	// Multi-param & defaults
 	vgirpc.Unary(server, "add_floats", addFloats)
@@ -241,6 +267,7 @@ func RegisterMethods(server *vgirpc.Server) {
 	vgirpc.Producer(server, "produce_error_mid_stream", counterSchema, produceErrorMidStream)
 	vgirpc.Producer(server, "produce_error_on_init", counterSchema, produceErrorOnInit)
 	vgirpc.Producer(server, "produce_oversized_batch", counterSchema, produceOversizedBatch)
+	vgirpc.Producer(server, "produce_tick_metadata", tickMetadataSchema, produceTickMetadata)
 
 	// Producer streams with headers
 	headerSchema := ConformanceHeader{}.ArrowSchema()
@@ -372,6 +399,9 @@ func exchangeSessionCounter(_ context.Context, _ *vgirpc.CallContext, _ exchange
 type produceNParams struct {
 	Count int64 `vgirpc:"count"`
 }
+type produceTickMetadataParams struct {
+	Count int64 `vgirpc:"count"`
+}
 type produceEmptyParams struct{}
 type produceSingleParams struct{}
 type produceLargeBatchesParams struct {
@@ -501,6 +531,15 @@ func echoOptionalString(_ context.Context, ctx *vgirpc.CallContext, p echoOption
 func echoOptionalInt(_ context.Context, ctx *vgirpc.CallContext, p echoOptionalIntParams) (*int64, error) {
 	return p.Value, nil
 }
+func echoOptionalPoint(_ context.Context, _ *vgirpc.CallContext, p echoOptionalPointParams) (*Point, error) {
+	return p.Point, nil
+}
+func echoAnnotatedOptionalInt(_ context.Context, _ *vgirpc.CallContext, p echoAnnotatedOptionalIntParams) (*int32, error) {
+	return p.Value, nil
+}
+func echoOuterOptionalNonNull(_ context.Context, _ *vgirpc.CallContext, p echoOuterOptionalNonNullParams) (int32, error) {
+	return *p.Value, nil
+}
 
 // --- Dataclass round-trip ---
 
@@ -589,6 +628,53 @@ func echoEmbeddedArrow(_ context.Context, ctx *vgirpc.CallContext, p echoEmbedde
 	return p.Data, nil
 }
 
+func packNestedContainers(_ context.Context, _ *vgirpc.CallContext, p packNestedContainersParams) (NestedContainers, error) {
+	batchBytes, err := taggedBatchBytes()
+	if err != nil {
+		return NestedContainers{}, err
+	}
+	var taggedStatus *Status
+	if len(p.Statuses) > 0 {
+		v := p.Statuses[0]
+		taggedStatus = &v
+	}
+	var taggedPoint *Point
+	if len(p.Points) > 0 {
+		v := p.Points[0]
+		taggedPoint = &v
+	}
+	return NestedContainers{
+		Statuses: p.Statuses, Points: p.Points, StatusByName: p.StatusByName,
+		FrozenStatuses: p.Statuses, TaggedStatus: taggedStatus,
+		TaggedPoint: taggedPoint, TaggedBatch: batchBytes,
+	}, nil
+}
+
+func echoStatusList(_ context.Context, _ *vgirpc.CallContext, p echoStatusListParams) (StatusListResult, error) {
+	return StatusListResult(p.Statuses), nil
+}
+
+func taggedBatchBytes() ([]byte, error) {
+	mem := memory.NewGoAllocator()
+	b := array.NewInt64Builder(mem)
+	b.AppendValues([]int64{1, 2}, nil)
+	values := b.NewArray()
+	b.Release()
+	defer values.Release()
+	schema := arrow.NewSchema([]arrow.Field{{Name: "value", Type: arrow.PrimitiveTypes.Int64, Nullable: true}}, nil)
+	batch := array.NewRecordBatch(schema, []arrow.Array{values}, 2)
+	defer batch.Release()
+	var buf bytes.Buffer
+	w := ipc.NewWriter(&buf, ipc.WithSchema(schema))
+	if err := w.Write(batch); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 // --- Multi-param & defaults ---
 
 func addFloats(_ context.Context, ctx *vgirpc.CallContext, p addFloatsParams) (float64, error) {
@@ -648,6 +734,13 @@ func produceN(_ context.Context, ctx *vgirpc.CallContext, p produceNParams) (*vg
 	return &vgirpc.StreamResult{
 		OutputSchema: counterSchema,
 		State:        &counterProducerState{Count: int(p.Count)},
+	}, nil
+}
+
+func produceTickMetadata(_ context.Context, _ *vgirpc.CallContext, p produceTickMetadataParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: tickMetadataSchema,
+		State:        &tickMetadataProducerState{Count: int(p.Count)},
 	}, nil
 }
 

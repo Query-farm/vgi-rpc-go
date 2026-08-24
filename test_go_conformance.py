@@ -721,6 +721,68 @@ def conformance_conn(
     return factory
 
 
+@pytest.fixture(params=["pipe", "subprocess", "shm", "unix", "tcp"])
+def conformance_raw_conn(
+    request: pytest.FixtureRequest,
+    go_transport: SubprocessTransport,
+    go_unix_path: str,
+    go_tcp_addr: tuple[str, int],
+) -> ConnFactory:
+    """Connect only through transports exposing a persistent byte stream."""
+
+    def factory(
+        on_log: Callable[[Message], None] | None = None,
+    ) -> contextlib.AbstractContextManager[Any]:
+        if request.param == "pipe":
+
+            @contextlib.contextmanager
+            def _pipe_conn() -> Iterator[_RpcProxy]:
+                transport = SubprocessTransport([GO_WORKER])
+                try:
+                    yield _RpcProxy(ConformanceService, transport, on_log)
+                finally:
+                    transport.close()
+
+            return _pipe_conn()
+        if request.param == "subprocess":
+
+            @contextlib.contextmanager
+            def _shared_conn() -> Iterator[_RpcProxy]:
+                yield _RpcProxy(ConformanceService, go_transport, on_log)
+
+            return _shared_conn()
+        if request.param == "shm":
+
+            @contextlib.contextmanager
+            def _shm_conn() -> Iterator[_RpcProxy]:
+                from vgi_rpc.shm import ShmSegment
+
+                segment = ShmSegment.create(8 * 1024 * 1024)
+                transport = SubprocessTransport([GO_WORKER])
+                wrapped = _ShmAdapter(transport, segment)
+                try:
+                    yield _RpcProxy(ConformanceService, wrapped, on_log)
+                finally:
+                    transport.close()
+                    with contextlib.suppress(BufferError):
+                        segment.close()
+                    segment.unlink()
+
+            return _shm_conn()
+        if request.param == "unix":
+            return unix_connect(ConformanceService, go_unix_path, on_log=on_log)
+        if request.param == "tcp":
+            return tcp_connect(
+                ConformanceService,
+                go_tcp_addr[0],
+                go_tcp_addr[1],
+                on_log=on_log,
+            )
+        raise AssertionError(f"non-raw conformance transport: {request.param}")
+
+    return factory
+
+
 @pytest.fixture(params=["pipe", "subprocess", "shm", "http", "http_externalize_always", "unix", "tcp"])
 def conformance_describe(
     request: pytest.FixtureRequest,
@@ -781,29 +843,9 @@ def conformance_describe(
 from vgi_rpc.conformance._pytest_suite import *  # noqa: F401,F403,E402
 
 
-from vgi_rpc.rpc import AnnotatedBatch, RpcError  # noqa: E402
-
-
 # Override: allow TestLargeData on all transports (the upstream suite skips
 # non-pipe transports, but the Go worker handles them fine).
 class TestLargeData(TestLargeData):  # type: ignore[no-redef]  # noqa: F811
     @pytest.fixture(autouse=True)
     def _skip_non_pipe(self) -> None:
         pass
-
-
-# Override: the Go server drains client input after stream init errors, so
-# these tests work on all transports (the upstream suite skips them).
-class TestProducerStream(TestProducerStream):  # type: ignore[no-redef]  # noqa: F811
-    def test_produce_error_on_init(self, conformance_conn: ConnFactory) -> None:
-        with conformance_conn() as proxy, pytest.raises(RpcError, match="intentional init error"):
-            list(proxy.produce_error_on_init())
-
-
-class TestExchangeStream(TestExchangeStream):  # type: ignore[no-redef]  # noqa: F811
-    def test_error_on_init(self, conformance_conn: ConnFactory) -> None:
-        with conformance_conn() as proxy:
-            with pytest.raises(RpcError, match="intentional exchange init error"):
-                session = proxy.exchange_error_on_init()
-                # HTTP raises during init; pipe/subprocess raises on first exchange.
-                session.exchange(AnnotatedBatch.from_pydict({"value": [1.0]}))

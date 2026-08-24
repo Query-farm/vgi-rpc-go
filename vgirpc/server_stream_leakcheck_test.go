@@ -146,7 +146,7 @@ func TestHTTPProducerPanicReleasesCollectedBatch(t *testing.T) {
 	var body bytes.Buffer
 	w := ipc.NewWriter(&body, ipc.WithSchema(regressionSchema))
 	before := leakCheckAllocator().CurrentAlloc()
-	finished, err := h.runProduceLoop(
+	finished, err := h.runProduceTurn(
 		context.Background(), w, regressionSchema, &emitThenPanicProducer{}, info,
 		&CallStatistics{}, Anonymous(), nil, nil, nil, arrow.Metadata{},
 	)
