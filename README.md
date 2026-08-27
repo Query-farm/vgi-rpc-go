@@ -1,8 +1,19 @@
 <p align="center">
-  <img src="docs/assets/logo-shield.png" alt="Vector Gateway Interface" width="400">
+  <img src="docs/assets/logo-shield.png" alt="Vector Gateway Interface logo" width="320">
 </p>
 
-# vgi-rpc-go
+<h1 align="center">vgi-rpc-go</h1>
+
+<p align="center">
+  Transport-agnostic RPC framework built on <a href="https://arrow.apache.org/">Apache Arrow</a> IPC serialization — the Go port of <a href="https://github.com/Query-farm/vgi-rpc-python">vgi-rpc</a>.<br>
+  Built by <a href="https://query.farm">🚜 Query.Farm</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Query-farm/vgi-rpc-go/actions/workflows/ci.yml"><img src="https://github.com/Query-farm/vgi-rpc-go/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pkg.go.dev/github.com/Query-farm/vgi-rpc-go/vgirpc"><img src="https://pkg.go.dev/badge/github.com/Query-farm/vgi-rpc-go/vgirpc.svg" alt="Go Reference"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License"></a>
+</p>
 
 Go implementation of the [vgi_rpc](https://github.com/Query-farm/vgi-rpc) framework -- an Apache Arrow IPC-based RPC protocol for high-performance data services.
 
