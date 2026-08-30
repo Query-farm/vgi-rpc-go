@@ -67,3 +67,50 @@ func TestHeadHealthMatchesGet(t *testing.T) {
 		}
 	}
 }
+
+// TestRpcMethodNamedLikeHealthDoesNotBypassAuth is an adversarial-review
+// regression: the sibling Python implementation's HTTP auth middleware
+// exempted a path via an unanchored `path.startswith(exempt_prefix)` check,
+// so an RPC method merely NAMED with the exempt prefix's tail (e.g.
+// "healthbogus", dispatched through Python's wildcard {prefix}/{method}
+// route) matched the same check and skipped authentication entirely — a
+// full auth bypass reachable just by a method's name.
+//
+// This Go server has no equivalent centralized "is this path exempt from
+// auth" check to get wrong: /health is a fixed, exact net/http.ServeMux
+// pattern (registered independently of the RPC {method} wildcard route,
+// which Go's enhanced ServeMux routing — used here via go.mod's Go 1.26 —
+// anchors to a full path segment rather than a substring), and every RPC
+// handler (handleUnary, handleStreamInit, handleStreamExchange) calls
+// h.authenticate() as its first statement regardless of the method name.
+// This test proves a POST to a path that merely STARTS WITH "/health"
+// (but isn't the health route) is dispatched as an ordinary RPC call and
+// still requires authentication — i.e. the vulnerability class does not
+// exist here.
+func TestRpcMethodNamedLikeHealthDoesNotBypassAuth(t *testing.T) {
+	h := newTestHttpServer(t)
+	h.SetAuthenticate(func(r *http.Request) (*AuthContext, error) {
+		return nil, &RpcError{Type: "ValueError", Message: "unauthorized"}
+	})
+	h.InitPages()
+
+	for _, path := range []string{"/healthbogus", "/health_evil", "/healthy"} {
+		req := httptest.NewRequest("POST", path, nil)
+		req.Header.Set("Content-Type", arrowContentType)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("POST %s: expected 401 (auth must run before dispatch), got %d", path, w.Code)
+		}
+	}
+
+	// The exact health route itself is still the deliberate, documented
+	// exemption (it never calls h.authenticate() at all).
+	req := httptest.NewRequest("GET", "/health", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET /health: expected 200, got %d", w.Code)
+	}
+}
