@@ -31,6 +31,10 @@ type CallContext struct {
 	// Auth is the authentication context for this request. It is never nil;
 	// unauthenticated requests receive [Anonymous].
 	Auth *AuthContext
+	// PeerEvidence is the immutable transport-identity snapshot for this call.
+	// It is empty when no provider ran or the transport does not support peer
+	// identity. It is off-wire and never supplied by the RPC client.
+	PeerEvidence *PeerEvidenceSet
 	// TransportMetadata holds transport-level key/value pairs such as
 	// remote_addr, user_agent, and IPC custom metadata.
 	TransportMetadata map[string]string

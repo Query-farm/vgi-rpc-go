@@ -334,12 +334,21 @@ func (h *HttpServer) handleStickyDelete(w http.ResponseWriter, r *http.Request) 
 // raising — the DELETE endpoint is idempotent and shouldn't surface auth
 // failures as 401.
 func (h *HttpServer) authenticateRequest(r *http.Request) *AuthContext {
-	if h.authenticateFunc == nil {
+	discard := &discardAuthResponseWriter{header: make(http.Header)}
+	identity := h.authenticateIdentity(discard, r)
+	if identity == nil || identity.auth == nil {
 		return Anonymous()
 	}
-	auth, _ := h.authenticateFunc(r)
-	if auth == nil {
-		return Anonymous()
-	}
-	return auth
+	return identity.auth
 }
+
+// discardAuthResponseWriter preserves DELETE's deliberately idempotent public
+// response while still running the same application + peer identity pipeline
+// needed to open a principal-bound session token.
+type discardAuthResponseWriter struct {
+	header http.Header
+}
+
+func (w *discardAuthResponseWriter) Header() http.Header         { return w.header }
+func (w *discardAuthResponseWriter) WriteHeader(_ int)           {}
+func (w *discardAuthResponseWriter) Write(p []byte) (int, error) { return len(p), nil }

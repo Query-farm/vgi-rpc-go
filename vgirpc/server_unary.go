@@ -30,14 +30,17 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 		stats.RecordInput(req.Batch.NumRows(), batchBufferSize(req.Batch))
 	}
 
-	// Build call context
+	// Build call context. Stateful transport adapters install one immutable
+	// connection snapshot with WithConnectionIdentity.
+	auth, peerEvidence := identityFromConnectionContext(ctx)
 	callCtx := &CallContext{
 		Ctx:               ctx,
 		RequestID:         req.RequestID,
 		ServerID:          s.serverID,
 		Method:            req.Method,
 		LogLevel:          LogLevel(req.LogLevel),
-		Auth:              Anonymous(),
+		Auth:              auth,
+		PeerEvidence:      peerEvidence,
 		TransportMetadata: req.Metadata,
 		Kind:              s.TransportKind(),
 		Implementation:    s.implementation,

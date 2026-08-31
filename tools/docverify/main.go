@@ -173,6 +173,12 @@ func checkModules(rep *reporter, file, src string) {
 				continue
 			}
 			sub := strings.TrimPrefix(path, modulePrefix+"/")
+			// GitHub repository UI routes are links, not Go import paths.
+			if strings.HasPrefix(sub, "actions/") {
+				continue
+			}
+			// pkg.go.dev badge URLs append .svg to the real package path.
+			sub = strings.TrimSuffix(sub, ".svg")
 			dir := filepath.Join(rep.root, filepath.FromSlash(sub))
 			if !dirHasGo(dir) {
 				rep.add(file, lineNo+1, "modules", fmt.Sprintf(

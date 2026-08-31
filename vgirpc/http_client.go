@@ -75,6 +75,8 @@ type httpClientConfig struct {
 	maxDecoded       int64
 	onLog            ClientLogHandler
 	closeIdleOnClose bool
+	tcpProxy         string
+	customHTTPClient bool
 }
 
 // HttpClientOption configures [NewHttpClient].
@@ -90,6 +92,22 @@ func WithClientHTTPClient(client *http.Client) HttpClientOption {
 		}
 		cfg.inner = client
 		cfg.closeIdleOnClose = false
+		cfg.customHTTPClient = true
+		return nil
+	}
+}
+
+// WithClientTCPProxy routes every HTTP connection through an explicit
+// SOCKS5h proxy. The target hostname is resolved by the proxy, which is
+// required for Tailscale userspace networking and MagicDNS names. Only NO
+// AUTH is supported. Proxy failure never falls back to a direct connection.
+// This option cannot be combined with [WithClientHTTPClient].
+func WithClientTCPProxy(proxyURL string) HttpClientOption {
+	return func(cfg *httpClientConfig) error {
+		if _, err := newSOCKS5HDialer(proxyURL); err != nil {
+			return err
+		}
+		cfg.tcpProxy = proxyURL
 		return nil
 	}
 }
@@ -236,6 +254,16 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 		if err := option(&cfg); err != nil {
 			return nil, err
 		}
+	}
+	if cfg.tcpProxy != "" {
+		if cfg.customHTTPClient {
+			return nil, errors.New("vgirpc: WithClientTCPProxy cannot be combined with WithClientHTTPClient")
+		}
+		dialer, err := newSOCKS5HDialer(cfg.tcpProxy)
+		if err != nil {
+			return nil, err
+		}
+		cfg.inner.Transport = &http.Transport{Proxy: nil, DialContext: dialer.DialContext}
 	}
 	return &HttpClient{
 		baseURL:          u,

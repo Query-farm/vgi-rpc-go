@@ -81,6 +81,11 @@ Client options configure the underlying `net/http` client, URL prefix, request
 headers, protocol version, request and response size limits, and the
 client-directed log handler.
 
+`WithClientTCPProxy("socks5h://127.0.0.1:1055")` selects an explicit SOCKS5h
+transport for Tailscale userspace networking. It uses proxy-side target-name
+resolution, supports domain/IPv4/IPv6 targets, accepts only `NO AUTH`, and
+never falls back to direct TCP.
+
 ## Stream Interfaces
 
 ### ProducerState

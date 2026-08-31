@@ -20,10 +20,11 @@ import (
 
 // handleStreamInit dispatches stream initialization.
 func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
-	auth := h.authenticate(w, r)
-	if auth == nil {
+	identity := h.authenticateIdentity(w, r)
+	if identity == nil {
 		return
 	}
+	auth, peerEvidence := identity.auth, identity.evidence
 
 	method := r.PathValue("method")
 
@@ -165,6 +166,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		Method:            method,
 		LogLevel:          LogLevel(req.LogLevel),
 		Auth:              auth,
+		PeerEvidence:      peerEvidence,
 		TransportMetadata: transportMeta,
 		Cookies:           buildHTTPCookies(r),
 		Kind:              TransportKindHTTP,
@@ -286,7 +288,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		// The producer's first turn folds into this /init request, so the init
 		// request's custom metadata is what the pipe transports would have
 		// delivered on the first tick batch.
-		finished, err := h.runProduceTurn(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, transportMeta, callCtx.Cookies, callCtx.stickySink, requestMetadata(req))
+		finished, err := h.runProduceTurn(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, peerEvidence, transportMeta, callCtx.Cookies, callCtx.stickySink, requestMetadata(req))
 		handlerErr = err
 		if err == nil && !finished {
 			// The producer remains active — append a continuation token.
@@ -364,10 +366,11 @@ func streamResponseStatus(handlerErr error) int {
 
 // handleStreamExchange dispatches stream exchange or producer continuation.
 func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request) {
-	auth := h.authenticate(w, r)
-	if auth == nil {
+	identity := h.authenticateIdentity(w, r)
+	if identity == nil {
 		return
 	}
+	auth, peerEvidence := identity.auth, identity.evidence
 
 	method := r.PathValue("method")
 
@@ -573,14 +576,14 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	cookies := buildHTTPCookies(r)
 
 	if cancelled {
-		handlerErr = h.handleStreamCancel(ctx, w, outputSchema, tokenData.State, info, auth, transportMeta, cookies, stickySinkForCtx)
+		handlerErr = h.handleStreamCancel(ctx, w, outputSchema, tokenData.State, info, auth, peerEvidence, transportMeta, cookies, stickySinkForCtx)
 		return
 	}
 
 	if isProducer {
-		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx, inputMeta)
+		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, peerEvidence, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx, inputMeta)
 	} else {
-		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, inputMeta, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx)
+		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, inputMeta, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, peerEvidence, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx)
 	}
 }
 
@@ -588,7 +591,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 // the optional StreamCanceller hook on the state and writes an empty IPC
 // stream (no state token) so the client knows the stream is finished.
 func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state interface{}, info *methodInfo, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, sink *stickySink) error {
+	state interface{}, info *methodInfo, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, sink *stickySink) error {
 	if canceller, ok := state.(StreamCanceller); ok {
 		callCtx := &CallContext{
 			Ctx:               ctx,
@@ -596,6 +599,7 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 			Method:            info.Name,
 			LogLevel:          LogTrace,
 			Auth:              auth,
+			PeerEvidence:      peerEvidence,
 			TransportMetadata: transportMeta,
 			Cookies:           cookies,
 			Kind:              TransportKindHTTP,
@@ -623,7 +627,7 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 // handleProducerContinuation runs one producer transition for a continuation request.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, requestMeta arrow.Metadata) error {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, requestMeta arrow.Metadata) error {
 
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
@@ -636,7 +640,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 	// framework's own transport keys are stripped first — the pipe transports
 	// never put them on a tick, and the stream-state value is a sealed cursor
 	// token that must not surface to user code.
-	finished, err := h.runProduceTurn(ctx, writer, schema, state, info, stats, auth, transportMeta, cookies, sink, stripFrameworkTickMetadata(requestMeta))
+	finished, err := h.runProduceTurn(ctx, writer, schema, state, info, stats, auth, peerEvidence, transportMeta, cookies, sink, stripFrameworkTickMetadata(requestMeta))
 	if err == nil && !finished {
 		// The producer remains active — append a continuation token.
 		token, tokenErr := h.packCursorToken(callID, state, auth)
@@ -660,7 +664,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 // handleExchangeCall processes one exchange and returns the result with updated token.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWriter, inputBatch arrow.RecordBatch,
-	inputMeta arrow.Metadata, schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink) error {
+	inputMeta arrow.Metadata, schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink) error {
 
 	// Record input stats
 	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
@@ -673,6 +677,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		Method:            info.Name,
 		LogLevel:          LogTrace,
 		Auth:              auth,
+		PeerEvidence:      peerEvidence,
 		TransportMetadata: transportMeta,
 		Cookies:           cookies,
 		Kind:              TransportKindHTTP,
@@ -969,7 +974,7 @@ func stripFrameworkTickMetadata(meta arrow.Metadata) arrow.Metadata {
 // POSTs, so callers pass the corresponding request's metadata (framework
 // transport keys stripped).
 func (h *HttpServer) runProduceTurn(ctx context.Context, writer *ipc.Writer, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, transportMeta map[string]string, cookies map[string]string, sink *stickySink, firstTickMeta arrow.Metadata) (bool, error) {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, sink *stickySink, firstTickMeta arrow.Metadata) (bool, error) {
 
 	if err := ctx.Err(); err != nil {
 		return true, nil
@@ -983,6 +988,7 @@ func (h *HttpServer) runProduceTurn(ctx context.Context, writer *ipc.Writer, sch
 		Method:            info.Name,
 		LogLevel:          LogTrace,
 		Auth:              auth,
+		PeerEvidence:      peerEvidence,
 		TransportMetadata: transportMeta,
 		Cookies:           cookies,
 		Kind:              TransportKindHTTP,

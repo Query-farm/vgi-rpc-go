@@ -45,6 +45,24 @@ defer stream.Close()
 cancellation. A failed exchange continuation cannot be retried because the
 server may already have advanced its opaque state token.
 
+### Tailscale userspace networking
+
+Route every client connection through a tailscaled SOCKS5 server with
+proxy-side hostname resolution:
+
+```go
+client, err := vgirpc.NewHttpClient(
+    "https://worker.example-tailnet.ts.net:9400",
+    vgirpc.WithClientTCPProxy("socks5h://127.0.0.1:1055"),
+)
+```
+
+Only SOCKS5 `NO AUTH` is supported. The proxy URL cannot contain credentials,
+and this option cannot be combined with `WithClientHTTPClient`. The client does
+not resolve the target hostname locally and never falls back to a direct
+connection if proxy negotiation fails. One request context covers proxy
+connection, negotiation, target connection, and the HTTP request.
+
 ## Request Compression
 
 The server transparently decompresses request bodies sent with `Content-Encoding: zstd` or `gzip`. The Python vgi-rpc client compresses by default (level 3), picking zstd or gzip depending on whether `zstandard` is installed, so this is handled automatically.

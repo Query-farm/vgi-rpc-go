@@ -182,7 +182,14 @@ func (ctx *CallContext) SessionID() string {
 // breaking session resolution. Mirrors Python's _StickyMiddleware._principal_key.
 func principalKeyFromAuth(auth *AuthContext) string {
 	if auth == nil || !auth.Authenticated {
+		if binding := peerEvidenceBinding(auth); binding != "" {
+			return "\x00anonymous\x00" + binding
+		}
 		return "\x00anonymous"
 	}
-	return auth.Domain + "\x00" + auth.Principal
+	key := auth.Domain + "\x00" + auth.Principal
+	if binding := peerEvidenceBinding(auth); binding != "" {
+		key += "\x00" + binding
+	}
+	return key
 }

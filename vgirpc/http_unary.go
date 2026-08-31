@@ -17,10 +17,11 @@ import (
 
 // handleUnary dispatches a unary RPC call.
 func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
-	auth := h.authenticate(w, r)
-	if auth == nil {
+	identity := h.authenticateIdentity(w, r)
+	if identity == nil {
 		return
 	}
+	auth, peerEvidence := identity.auth, identity.evidence
 
 	method := r.PathValue("method")
 
@@ -159,6 +160,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		Method:            method,
 		LogLevel:          LogLevel(req.LogLevel),
 		Auth:              auth,
+		PeerEvidence:      peerEvidence,
 		TransportMetadata: transportMeta,
 		Cookies:           buildHTTPCookies(r),
 		Kind:              TransportKindHTTP,

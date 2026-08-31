@@ -28,14 +28,16 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		return handlerErr, nil
 	}
 
-	// Build call context for init
+	// Build call context for init from the adapter-resolved connection snapshot.
+	auth, peerEvidence := identityFromConnectionContext(ctx)
 	callCtx := &CallContext{
 		Ctx:               ctx,
 		RequestID:         req.RequestID,
 		ServerID:          s.serverID,
 		Method:            req.Method,
 		LogLevel:          LogLevel(req.LogLevel),
-		Auth:              Anonymous(),
+		Auth:              auth,
+		PeerEvidence:      peerEvidence,
 		TransportMetadata: req.Metadata,
 		Kind:              s.TransportKind(),
 		Implementation:    s.implementation,
@@ -227,7 +229,8 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 						ServerID:          s.serverID,
 						Method:            req.Method,
 						LogLevel:          LogLevel(req.LogLevel),
-						Auth:              Anonymous(),
+						Auth:              auth,
+						PeerEvidence:      peerEvidence,
 						TransportMetadata: req.Metadata,
 						Kind:              s.TransportKind(),
 					}
@@ -330,7 +333,8 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			ServerID:          s.serverID,
 			Method:            req.Method,
 			LogLevel:          LogLevel(req.LogLevel),
-			Auth:              Anonymous(),
+			Auth:              auth,
+			PeerEvidence:      peerEvidence,
 			TransportMetadata: req.Metadata,
 			Kind:              s.TransportKind(),
 		}

@@ -111,9 +111,16 @@ func newCallStateCache(max int, ttl time.Duration) *callStateCache {
 // callStateIdentity renders the caller identity half of the cache key.
 func callStateIdentity(auth *AuthContext) string {
 	if auth == nil || !auth.Authenticated {
+		if binding := peerEvidenceBinding(auth); binding != "" {
+			return "\x00anonymous\x00" + binding
+		}
 		return "\x00anonymous"
 	}
-	return auth.Domain + "\x00" + auth.Principal
+	identity := auth.Domain + "\x00" + auth.Principal
+	if binding := peerEvidenceBinding(auth); binding != "" {
+		identity += "\x00" + binding
+	}
+	return identity
 }
 
 func (c *callStateCache) get(callID string, auth *AuthContext) *resolvedCall {
@@ -302,7 +309,11 @@ func unpackTokenPayload(data []byte) ([]byte, error) {
 // produce non-overlapping byte strings so an anonymous token cannot be
 // opened by a named principal and vice versa.
 func stateTokenAad(auth *AuthContext) []byte {
-	return tokenAad([]byte("vgi_rpc.state.v4\x00"), auth)
+	prefix := []byte("vgi_rpc.state.v4\x00")
+	if peerEvidenceBinding(auth) != "" {
+		prefix = []byte("vgi_rpc.state.v5\x00")
+	}
+	return tokenAad(prefix, auth)
 }
 
 // callTokenAad is stateTokenAad's counterpart for call tokens. The prefix
@@ -311,20 +322,42 @@ func stateTokenAad(auth *AuthContext) []byte {
 // other is expected fails the AEAD tag check rather than decoding into a
 // payload the reader would misinterpret.
 func callTokenAad(auth *AuthContext) []byte {
-	return tokenAad([]byte("vgi_rpc.call.v1\x00"), auth)
+	prefix := []byte("vgi_rpc.call.v1\x00")
+	if peerEvidenceBinding(auth) != "" {
+		prefix = []byte("vgi_rpc.call.v2\x00")
+	}
+	return tokenAad(prefix, auth)
 }
 
 func tokenAad(prefix []byte, auth *AuthContext) []byte {
+	binding := peerEvidenceBinding(auth)
 	if auth == nil || !auth.Authenticated {
-		return append(prefix, []byte("\x00anonymous")...)
+		out := append(prefix, []byte("\x00anonymous")...)
+		if binding != "" {
+			out = append(out, 0x00)
+			out = append(out, binding...)
+		}
+		return out
 	}
-	out := make([]byte, 0, len(prefix)+1+len(auth.Domain)+1+len(auth.Principal))
+	out := make([]byte, 0, len(prefix)+1+len(auth.Domain)+1+len(auth.Principal)+1+len(binding))
 	out = append(out, prefix...)
 	out = append(out, 0x01)
 	out = append(out, auth.Domain...)
 	out = append(out, 0x00)
 	out = append(out, auth.Principal...)
+	if binding != "" {
+		out = append(out, 0x00)
+		out = append(out, binding...)
+	}
 	return out
+}
+
+func peerEvidenceBinding(auth *AuthContext) string {
+	if auth == nil || auth.Claims == nil {
+		return ""
+	}
+	binding, _ := auth.Claims["peer_evidence_binding"].(string)
+	return binding
 }
 
 // newCallID mints the random id that binds a call token to its cursors.

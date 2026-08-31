@@ -4,12 +4,14 @@
 package vgirpc
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -155,6 +157,12 @@ type HttpServer struct {
 	// authenticators the framework cannot introspect. See
 	// SetProxyAuthHeaders.
 	extraProxyAuthHeaders []string
+
+	peerIdentityProviders    []PeerIdentityProvider
+	peerAuthenticationPolicy PeerAuthenticationPolicy
+	peerServiceName          string
+	peerResolutionTimeout    time.Duration
+	peerProviderSlots        chan struct{}
 }
 
 // NewHttpServer creates a new HTTP server wrapping an RPC server.
@@ -164,12 +172,14 @@ func NewHttpServer(server *Server) *HttpServer {
 		panic(fmt.Sprintf("vgirpc: failed to generate token key: %v", err))
 	}
 	h := &HttpServer{
-		server:      server,
-		tokenKey:    key,
-		tokenTTL:    defaultTokenTTL,
-		maxBodySize: defaultMaxBodySize,
-		prefix:      "",
-		corsMaxAge:  "7200",
+		server:                server,
+		tokenKey:              key,
+		tokenTTL:              defaultTokenTTL,
+		maxBodySize:           defaultMaxBodySize,
+		peerResolutionTimeout: 5 * time.Second,
+		peerProviderSlots:     make(chan struct{}, 64),
+		prefix:                "",
+		corsMaxAge:            "7200",
 
 		enableLandingPage:  true,
 		enableDescribePage: true,
@@ -192,12 +202,14 @@ func NewHttpServerWithKey(server *Server, tokenKey []byte) (*HttpServer, error) 
 		return nil, fmt.Errorf("vgirpc: token key must be at least 16 bytes")
 	}
 	h := &HttpServer{
-		server:      server,
-		tokenKey:    tokenKey,
-		tokenTTL:    defaultTokenTTL,
-		maxBodySize: defaultMaxBodySize,
-		prefix:      "",
-		corsMaxAge:  "7200",
+		server:                server,
+		tokenKey:              tokenKey,
+		tokenTTL:              defaultTokenTTL,
+		maxBodySize:           defaultMaxBodySize,
+		peerResolutionTimeout: 5 * time.Second,
+		peerProviderSlots:     make(chan struct{}, 64),
+		prefix:                "",
+		corsMaxAge:            "7200",
 
 		enableLandingPage:  true,
 		enableDescribePage: true,
@@ -648,6 +660,46 @@ func (h *HttpServer) SetAuthenticate(fn AuthenticateFunc) {
 	h.authenticateFunc = fn
 }
 
+// SetPeerIdentityProviders installs transport identity evidence adapters.
+// The slice is copied; providers must be safe for concurrent requests.
+func (h *HttpServer) SetPeerIdentityProviders(providers ...PeerIdentityProvider) {
+	if len(providers) > cap(h.peerProviderSlots) {
+		panic("vgirpc: peer provider concurrency must accommodate every configured provider")
+	}
+	h.peerIdentityProviders = append([]PeerIdentityProvider(nil), providers...)
+}
+
+// SetPeerAuthenticationPolicy composes peer evidence with application auth.
+// A nil policy leaves evidence in observation-only mode.
+func (h *HttpServer) SetPeerAuthenticationPolicy(policy PeerAuthenticationPolicy) {
+	h.peerAuthenticationPolicy = policy
+}
+
+// SetPeerServiceName supplies the operator-configured logical destination to providers.
+func (h *HttpServer) SetPeerServiceName(serviceName string) {
+	h.peerServiceName = serviceName
+}
+
+// SetPeerResolutionTimeout bounds the deadline supplied to peer providers.
+func (h *HttpServer) SetPeerResolutionTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		panic("vgirpc: peer identity resolution timeout must be positive")
+	}
+	h.peerResolutionTimeout = timeout
+}
+
+// SetPeerProviderConcurrency caps provider calls that may remain active,
+// including calls that ignore cancellation after their request times out.
+func (h *HttpServer) SetPeerProviderConcurrency(limit int) {
+	if limit <= 0 {
+		panic("vgirpc: peer identity provider concurrency must be positive")
+	}
+	if limit < len(h.peerIdentityProviders) {
+		panic("vgirpc: peer provider concurrency must accommodate every configured provider")
+	}
+	h.peerProviderSlots = make(chan struct{}, limit)
+}
+
 // SetOAuthResourceMetadata configures OAuth Protected Resource Metadata
 // (RFC 9728). When set, the server exposes a well-known endpoint and includes
 // a WWW-Authenticate header on 401 responses.
@@ -764,35 +816,279 @@ func mergeTokenEndpointIntoMetadata(original []byte, tokenEndpoint string) ([]by
 // authenticate runs the registered AuthenticateFunc (if any) and writes
 // an error response on failure. Returns nil when auth fails (caller should
 // return immediately).
-func (h *HttpServer) authenticate(w http.ResponseWriter, r *http.Request) *AuthContext {
-	if h.authenticateFunc == nil {
-		return Anonymous()
+func (h *HttpServer) writeAuthenticationError(w http.ResponseWriter, r *http.Request, err error) {
+	// Not a rejection: the authority could not be reached. A 401 here
+	// tells every caller to re-authenticate against a service that is
+	// merely down, and invites them to negative-cache an outage.
+	var unavailable *AuthUnavailableError
+	if errors.As(err, &unavailable) {
+		slog.Warn("authentication unavailable", "class", "unavailable", "remote_addr", r.RemoteAddr)
+		w.Header().Set("Retry-After", strconv.Itoa(unavailable.retryAfterSeconds()))
+		http.Error(w, "authentication service unavailable", http.StatusServiceUnavailable)
+		return
 	}
-	auth, err := h.authenticateFunc(r)
-	if err != nil {
-		// Not a rejection: the authority could not be reached. A 401 here
-		// tells every caller to re-authenticate against a service that is
-		// merely down, and invites them to negative-cache an outage.
-		var unavailable *AuthUnavailableError
-		if errors.As(err, &unavailable) {
-			slog.Warn("authentication unavailable", "err", err, "remote_addr", r.RemoteAddr)
-			w.Header().Set("Retry-After", strconv.Itoa(unavailable.retryAfterSeconds()))
-			http.Error(w, "authentication service unavailable", http.StatusServiceUnavailable)
+	var failure *AuthFailure
+	rpcErr, isRpc := err.(*RpcError)
+	if asAuthFailure(err, &failure) ||
+		(isRpc && (rpcErr.Type == "ValueError" || rpcErr.Type == "PermissionError")) {
+		reason, detail := classifyAuthError(err)
+		h.writeUnauthorized(w, r, reason, detail)
+	} else {
+		slog.Error("authenticate callback error", "class", "failed", "remote_addr", r.RemoteAddr)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
+type requestIdentity struct {
+	auth     *AuthContext
+	evidence *PeerEvidenceSet
+}
+
+// authenticateIdentity resolves application auth first, then transport
+// evidence, and finally applies the configured composition policy. Invalid
+// presented credentials never downgrade to peer identity.
+func (h *HttpServer) authenticateIdentity(w http.ResponseWriter, r *http.Request) *requestIdentity {
+	auth := Anonymous()
+	var missingCredential error
+	if h.authenticateFunc != nil {
+		resolved, err := h.authenticateFunc(r)
+		if err != nil {
+			var failure *AuthFailure
+			if h.peerAuthenticationPolicy != nil && errors.As(err, &failure) && failure.Reason == AuthReasonMissingCredential {
+				missingCredential = err
+			} else {
+				h.writeAuthenticationError(w, r, err)
+				return nil
+			}
+		} else if resolved != nil {
+			auth = resolved
+		}
+	}
+
+	evidence := EmptyPeerEvidence()
+	if len(h.peerIdentityProviders) > 0 {
+		timeout := h.peerResolutionTimeout
+		if timeout <= 0 {
+			timeout = 5 * time.Second
+		}
+		providerCtx, cancel := context.WithTimeout(r.Context(), timeout)
+		defer cancel()
+		deadline, _ := providerCtx.Deadline()
+		headers := make(map[string][]string, len(r.Header))
+		for name, values := range r.Header {
+			headers[name] = append([]string(nil), values...)
+		}
+		immediatePeer := r.RemoteAddr
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			immediatePeer = host
+		}
+		destination := ""
+		if local, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+			destination = local.String()
+		}
+		resolution, err := NewPeerResolutionContext("http", PeerResolutionOptions{
+			ImmediatePeer: immediatePeer, SourceEndpoint: r.RemoteAddr, DestinationAddress: destination,
+			Authority: r.Host, ServiceName: h.peerServiceName, Headers: headers,
+			Metadata: map[string]any{"remote_addr": r.RemoteAddr, "user_agent": r.UserAgent()},
+			Deadline: deadline,
+		})
+		if err != nil {
+			h.writeAuthenticationError(w, r, err)
 			return nil
 		}
-		var failure *AuthFailure
-		rpcErr, isRpc := err.(*RpcError)
-		if asAuthFailure(err, &failure) ||
-			(isRpc && (rpcErr.Type == "ValueError" || rpcErr.Type == "PermissionError")) {
-			reason, detail := classifyAuthError(err)
-			h.writeUnauthorized(w, r, reason, detail)
-		} else {
-			slog.Error("authenticate callback error", "err", err, "remote_addr", r.RemoteAddr)
-			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		providers := h.peerIdentityProviders
+		providerNames := make(map[string]struct{}, len(providers))
+		for _, provider := range providers {
+			if provider == nil || provider.Provider() == "" {
+				h.writeAuthenticationError(w, r, fmt.Errorf("invalid peer identity provider"))
+				return nil
+			}
+			if _, exists := providerNames[provider.Provider()]; exists {
+				h.writeAuthenticationError(w, r, fmt.Errorf("duplicate peer identity provider: %s", provider.Provider()))
+				return nil
+			}
+			providerNames[provider.Provider()] = struct{}{}
 		}
+
+		type providerOutcome struct {
+			index  int
+			result *PeerIdentityResult
+			err    error
+		}
+		outcomes := make(chan providerOutcome, len(providers))
+		results := make([]*PeerIdentityResult, len(providers))
+		pending := 0
+		slots := h.peerProviderSlots
+		for index, provider := range providers {
+			select {
+			case slots <- struct{}{}:
+				pending++
+				go func(index int, provider PeerIdentityProvider) {
+					defer func() { <-slots }()
+					result, err := invokePeerIdentityProvider(provider, providerCtx, resolution)
+					outcomes <- providerOutcome{index: index, result: result, err: err}
+				}(index, provider)
+			case <-providerCtx.Done():
+				results[index], err = NewPeerIdentityResult(provider.Provider(), PeerIdentityUnavailable)
+				if err != nil {
+					h.writeAuthenticationError(w, r, err)
+					return nil
+				}
+			default:
+				results[index], err = NewPeerIdentityResult(provider.Provider(), PeerIdentityUnavailable)
+				if err != nil {
+					h.writeAuthenticationError(w, r, err)
+					return nil
+				}
+			}
+		}
+
+		for pending > 0 {
+			select {
+			case outcome := <-outcomes:
+				pending--
+				if outcome.err != nil {
+					if peerProviderUnavailable(outcome.err, providerCtx) {
+						results[outcome.index], err = NewPeerIdentityResult(
+							providers[outcome.index].Provider(), PeerIdentityUnavailable,
+						)
+						if err != nil {
+							h.writeAuthenticationError(w, r, err)
+							return nil
+						}
+						continue
+					}
+					h.writeAuthenticationError(w, r, redactedPeerProviderError(outcome.err))
+					return nil
+				}
+				provider := providers[outcome.index]
+				if outcome.result == nil || outcome.result.Provider() != provider.Provider() {
+					h.writeAuthenticationError(w, r, fmt.Errorf("peer identity provider result mismatch"))
+					return nil
+				}
+				results[outcome.index] = outcome.result
+			case <-providerCtx.Done():
+				// A deadline is a provider outcome, not a request-wide auth
+				// decision. Preserve any completed invalid/untrusted evidence,
+				// and mark only providers that did not answer as unavailable so
+				// observation and a valid application any-of factor can proceed.
+				for {
+					select {
+					case outcome := <-outcomes:
+						pending--
+						if outcome.err != nil && !peerProviderUnavailable(outcome.err, providerCtx) {
+							h.writeAuthenticationError(w, r, redactedPeerProviderError(outcome.err))
+							return nil
+						}
+						if outcome.err != nil {
+							results[outcome.index], err = NewPeerIdentityResult(
+								providers[outcome.index].Provider(), PeerIdentityUnavailable,
+							)
+							if err != nil {
+								h.writeAuthenticationError(w, r, err)
+								return nil
+							}
+						} else {
+							provider := providers[outcome.index]
+							if outcome.result == nil || outcome.result.Provider() != provider.Provider() {
+								h.writeAuthenticationError(w, r, fmt.Errorf("peer identity provider result mismatch"))
+								return nil
+							}
+							results[outcome.index] = outcome.result
+						}
+					default:
+						for index, result := range results {
+							if result == nil {
+								results[index], err = NewPeerIdentityResult(
+									providers[index].Provider(), PeerIdentityUnavailable,
+								)
+								if err != nil {
+									h.writeAuthenticationError(w, r, err)
+									return nil
+								}
+							}
+						}
+						pending = 0
+					}
+					if pending == 0 {
+						break
+					}
+				}
+			}
+		}
+		evidence, err = NewPeerEvidenceSet(results...)
+		if err != nil {
+			h.writeAuthenticationError(w, r, err)
+			return nil
+		}
+	}
+
+	if h.peerAuthenticationPolicy != nil {
+		var err error
+		auth, err = invokePeerAuthenticationPolicy(h.peerAuthenticationPolicy, evidence, auth)
+		if err != nil {
+			h.writeAuthenticationError(w, r, redactedPeerPolicyError(err))
+			return nil
+		}
+	}
+	if missingCredential != nil && (auth == nil || !auth.Authenticated) {
+		h.writeAuthenticationError(w, r, missingCredential)
 		return nil
 	}
-	return auth
+	if auth == nil {
+		auth = Anonymous()
+	}
+	return &requestIdentity{auth: auth, evidence: evidence}
+}
+
+func peerProviderUnavailable(err error, providerCtx context.Context) bool {
+	var unavailable *AuthUnavailableError
+	if errors.As(err, &unavailable) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	return errors.Is(err, context.Canceled) && errors.Is(providerCtx.Err(), context.DeadlineExceeded)
+}
+
+func redactedPeerProviderError(err error) error {
+	var failure *AuthFailure
+	var rpcError *RpcError
+	if errors.As(err, &failure) || (errors.As(err, &rpcError) &&
+		(rpcError.Type == "ValueError" || rpcError.Type == "PermissionError")) {
+		return NewAuthFailure(AuthReasonInvalidCredential, "peer identity provider rejected evidence")
+	}
+	return fmt.Errorf("peer identity provider failed")
+}
+
+func redactedPeerPolicyError(err error) error {
+	var unavailable *AuthUnavailableError
+	if errors.As(err, &unavailable) {
+		return &AuthUnavailableError{
+			Detail:     "peer authentication policy unavailable",
+			RetryAfter: unavailable.RetryAfter,
+		}
+	}
+	var failure *AuthFailure
+	if errors.As(err, &failure) {
+		reason := failure.Reason
+		if reason == "" {
+			reason = AuthReasonUnauthorized
+		}
+		return NewAuthFailure(reason, "peer authentication policy rejected evidence")
+	}
+	var rpcError *RpcError
+	if errors.As(err, &rpcError) && (rpcError.Type == "ValueError" || rpcError.Type == "PermissionError") {
+		reason, _ := classifyAuthError(rpcError)
+		return NewAuthFailure(reason, "peer authentication policy rejected evidence")
+	}
+	return fmt.Errorf("peer authentication policy failed")
+}
+
+func (h *HttpServer) authenticate(w http.ResponseWriter, r *http.Request) *AuthContext {
+	identity := h.authenticateIdentity(w, r)
+	if identity == nil {
+		return nil
+	}
+	return identity.auth
 }
 
 // ServeHTTP implements http.Handler.
