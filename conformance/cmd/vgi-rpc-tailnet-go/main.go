@@ -348,7 +348,7 @@ func validateSnapshot(raw []byte, want expectation) error {
 	if want.SpoofLogin != "" && i.SubjectFingerprint != nil {
 		spoofed := fmt.Sprintf("%x", sha256.Sum256([]byte("login:"+want.SpoofLogin)))
 		if *i.SubjectFingerprint == spoofed {
-			return errors.New("Serve trusted a client-supplied identity header")
+			return errors.New("serve trusted a client-supplied identity header")
 		}
 	}
 	return nil
