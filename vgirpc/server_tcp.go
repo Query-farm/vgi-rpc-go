@@ -17,6 +17,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // TcpConnectionIdentityResolver converts one trusted socket snapshot into the
@@ -132,8 +133,13 @@ func (s *Server) RunTcpWithOptions(host string, port int, options TcpServerOptio
 	if options.ProxyProtocolV2Required && len(trustedProxies) == 0 {
 		return fmt.Errorf("vgirpc: PROXY v2 requires at least one exact trusted proxy address")
 	}
-	if options.IrohProxyIssuer != "" && !options.ProxyProtocolV2Required {
-		return fmt.Errorf("vgirpc: Iroh proxy identity requires PROXY v2")
+	if options.IrohProxyIssuer != "" {
+		if !utf8.ValidString(options.IrohProxyIssuer) || containsIrohControl(options.IrohProxyIssuer) {
+			return fmt.Errorf("vgirpc: Iroh proxy issuer must be Unicode text without controls")
+		}
+		if !options.ProxyProtocolV2Required {
+			return fmt.Errorf("vgirpc: Iroh proxy identity requires PROXY v2")
+		}
 	}
 	var identitySlots chan struct{}
 	if options.ResolveIdentity != nil {

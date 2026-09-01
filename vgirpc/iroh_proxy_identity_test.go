@@ -73,3 +73,47 @@ func TestIrohForwardedHeaderIdentityProviderFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestIrohForwardedHeaderIdentityProviderNormalizesAndValidatesTrust(t *testing.T) {
+	provider, err := NewIrohForwardedHeaderIdentityProvider(IrohForwardedHeaderOptions{
+		Issuer: "production-mesh", TrustedProxyAddresses: []string{"::ffff:127.0.0.1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := provider.Resolve(context.Background(), irohHTTPResolution(t, "127.0.0.1", []string{testIrohEndpoint}))
+	if err != nil || result.Status() != PeerIdentityAvailable {
+		t.Fatalf("mapped trust result=%#v err=%v", result, err)
+	}
+	for name, options := range map[string]IrohForwardedHeaderOptions{
+		"control issuer": {Issuer: "production\tmesh", TrustedProxyAddresses: []string{"127.0.0.1"}},
+		"zone":           {Issuer: "production-mesh", TrustedProxyAddresses: []string{"fe80::1%lo0"}},
+		"duplicate":      {Issuer: "production-mesh", TrustedProxyAddresses: []string{"127.0.0.1", "::ffff:127.0.0.1"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, createErr := NewIrohForwardedHeaderIdentityProvider(options); createErr == nil {
+				t.Fatal("unsafe Iroh HTTP trust configuration accepted")
+			}
+		})
+	}
+	if _, contextErr := NewPeerResolutionContext("http", PeerResolutionOptions{
+		ImmediatePeer: "127.0.0.1",
+		Headers: map[string][]string{
+			IrohForwardedEndpointHeader:                  {testIrohEndpoint},
+			strings.ToLower(IrohForwardedEndpointHeader): {testIrohEndpoint},
+		},
+	}); contextErr == nil {
+		t.Fatal("case-varied duplicate Iroh header accepted")
+	}
+	controlContext, contextErr := NewPeerResolutionContext("http", PeerResolutionOptions{
+		ImmediatePeer: "127.0.0.1",
+		Headers:       map[string][]string{IrohForwardedEndpointHeader: {testIrohEndpoint + "\t"}},
+	})
+	if contextErr != nil {
+		t.Fatal(contextErr)
+	}
+	controlResult, resolveErr := provider.Resolve(context.Background(), controlContext)
+	if resolveErr != nil || controlResult.Status() != PeerIdentityInvalid {
+		t.Fatalf("control-bearing Iroh header result=%#v err=%v", controlResult, resolveErr)
+	}
+}

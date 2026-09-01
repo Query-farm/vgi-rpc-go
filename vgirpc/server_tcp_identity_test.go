@@ -127,6 +127,16 @@ func TestPrepareTcpConnectionIdentityPromotesForwardedIrohPeer(t *testing.T) {
 	}
 }
 
+func TestIrohTcpIssuerRejectsControlsAtListenerSetup(t *testing.T) {
+	options := TcpServerOptions{
+		ProxyProtocolV2Required: true, TrustedProxyAddresses: []string{"127.0.0.1"},
+		IrohProxyIssuer: "production\tmesh",
+	}
+	if err := (&Server{}).RunTcpWithOptions("127.0.0.1", 0, options); err == nil {
+		t.Fatal("control-bearing Iroh issuer was accepted")
+	}
+}
+
 func TestPrepareTcpConnectionIdentityRejectsUntrustedPeerBeforeRead(t *testing.T) {
 	server, client := tcpConnectionPair(t)
 	defer func() { _ = server.Close() }()

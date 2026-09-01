@@ -32,7 +32,7 @@ type IrohForwardedHeaderIdentityProvider struct {
 
 // NewIrohForwardedHeaderIdentityProvider creates an opt-in HTTP adapter.
 func NewIrohForwardedHeaderIdentityProvider(options IrohForwardedHeaderOptions) (*IrohForwardedHeaderIdentityProvider, error) {
-	if options.Issuer == "" || !utf8.ValidString(options.Issuer) || containsIdentityControl(options.Issuer) {
+	if options.Issuer == "" || !utf8.ValidString(options.Issuer) || containsIrohControl(options.Issuer) {
 		return nil, fmt.Errorf("vgirpc: Iroh issuer must be a non-empty Unicode string without controls")
 	}
 	if len(options.TrustedProxyAddresses) == 0 {
@@ -41,10 +41,14 @@ func NewIrohForwardedHeaderIdentityProvider(options IrohForwardedHeaderOptions) 
 	trusted := make(map[netip.Addr]struct{}, len(options.TrustedProxyAddresses))
 	for _, value := range options.TrustedProxyAddresses {
 		address, err := netip.ParseAddr(value)
-		if err != nil {
+		if err != nil || address.Zone() != "" {
 			return nil, fmt.Errorf("vgirpc: Iroh bridge %q is not an exact IP address", value)
 		}
-		trusted[address.Unmap()] = struct{}{}
+		address = address.Unmap()
+		if _, duplicate := trusted[address]; duplicate {
+			return nil, fmt.Errorf("vgirpc: duplicate normalized Iroh bridge address %q", value)
+		}
+		trusted[address] = struct{}{}
 	}
 	return &IrohForwardedHeaderIdentityProvider{issuer: options.Issuer, trustedProxies: trusted}, nil
 }
@@ -87,4 +91,13 @@ func (p *IrohForwardedHeaderIdentityProvider) trusts(value string) bool {
 	}
 	_, ok := p.trustedProxies[address.Unmap()]
 	return ok
+}
+
+func containsIrohControl(value string) bool {
+	for _, character := range value {
+		if character <= 0x1f || character == 0x7f {
+			return true
+		}
+	}
+	return false
 }

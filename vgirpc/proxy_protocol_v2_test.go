@@ -110,6 +110,11 @@ func TestProxyProtocolV2IrohIdentityRequiresExplicitUnspecOptIn(t *testing.T) {
 	}) {
 		t.Fatalf("unexpected Iroh EndpointId: %x", parsed.IrohEndpointID)
 	}
+	extended := append(append([]byte(nil), preamble...), 0xee, 0, 1, 7)
+	binary.BigEndian.PutUint16(extended[14:16], uint16(len(extended)-16))
+	if _, err := ParseProxyProtocolV2WithOptions(extended, 536, ProxyProtocolV2Options{AllowIrohIdentity: true}); err != nil {
+		t.Fatalf("bounded unknown Iroh extension rejected: %v", err)
+	}
 }
 
 func TestProxyProtocolV2RejectsInvalidIrohIdentity(t *testing.T) {
