@@ -4,6 +4,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -67,6 +68,56 @@ func TestValidateContextRequiresCanonicalTCPAuthentication(t *testing.T) {
 	wrongTarget.CapabilityTarget = "service"
 	if err := validateContext(ctx, wrongTarget); err == nil {
 		t.Fatal("incorrect capability target was accepted")
+	}
+}
+
+func TestApplyTCPProxyOptionsUsesExactNormalizedTrustAndServiceTarget(t *testing.T) {
+	options := vgirpc.TcpServerOptions{}
+	if err := applyTCPProxyOptions(&options, true, "::ffff:127.0.0.1", "svc:vgi-test"); err != nil {
+		t.Fatalf("apply proxy options: %v", err)
+	}
+	if !options.ProxyProtocolV2Required {
+		t.Fatal("PROXY v2 requirement was not enabled")
+	}
+	if !reflect.DeepEqual(options.TrustedProxyAddresses, []string{"127.0.0.1"}) {
+		t.Fatalf("trusted proxies = %#v", options.TrustedProxyAddresses)
+	}
+	if options.ServiceName != "svc:vgi-test" {
+		t.Fatalf("service name = %q", options.ServiceName)
+	}
+	if !capabilityTargetMatches(
+		map[string]any{"kind": "service", "value": "svc:vgi-test"},
+		"service",
+		"svc:vgi-test",
+	) {
+		t.Fatal("exact service target was rejected")
+	}
+	if capabilityTargetMatches(
+		map[string]any{"kind": "service", "value": "svc:other"},
+		"service",
+		"svc:vgi-test",
+	) {
+		t.Fatal("different service target was accepted")
+	}
+}
+
+func TestApplyTCPProxyOptionsRejectsMissingOrNonExactTrust(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		required bool
+		trusted  string
+	}{
+		"missing":  {required: true},
+		"hostname": {required: true, trusted: "proxy.internal"},
+		"cidr":     {required: true, trusted: "127.0.0.0/8"},
+		"port":     {required: true, trusted: "127.0.0.1:8443"},
+		"zone":     {required: true, trusted: "fe80::1%en0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			options := vgirpc.TcpServerOptions{}
+			if err := applyTCPProxyOptions(&options, testCase.required, testCase.trusted, ""); err == nil {
+				t.Fatal("unsafe trusted proxy configuration was accepted")
+			}
+		})
 	}
 }
 

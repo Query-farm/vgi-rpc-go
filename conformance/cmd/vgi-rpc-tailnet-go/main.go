@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"time"
 
@@ -39,6 +40,7 @@ type expectation struct {
 	SubjectVerified  bool
 	Capability       string
 	CapabilityTarget string
+	TargetValue      string
 	Tag              string
 	Authenticated    bool
 	AuthDomain       string
@@ -109,6 +111,7 @@ func runTCPClient(args []string) error {
 	subjectStability := flags.String("expected-subject-stability", "stable", "expected subject stability")
 	capability := flags.String("expected-capability", "", "expected application capability")
 	targetKind := flags.String("expected-target-kind", "", "expected capability target kind")
+	targetValue := flags.String("expected-target-value", "", "expected capability target value")
 	tag := flags.String("expected-tag", "", "expected Tailnet node tag")
 	authenticated := flags.Bool("expect-authenticated", false, "expect primary authentication")
 	expectProxy := flags.Bool("expect-proxy", false, "expect a proxy address in peer evidence")
@@ -137,7 +140,7 @@ func runTCPClient(args []string) error {
 		Issuer: *issuer, Transport: "tcp",
 		EvidenceSource: *evidenceSource, Assurance: vgirpc.IdentityAssurance(*assurance),
 		SubjectKind: vgirpc.PeerSubjectKind(*subjectKind), SubjectStability: vgirpc.SubjectStability(*subjectStability),
-		SubjectVerified: true, Capability: *capability, CapabilityTarget: *targetKind, Tag: *tag,
+		SubjectVerified: true, Capability: *capability, CapabilityTarget: *targetKind, TargetValue: *targetValue, Tag: *tag,
 		Authenticated: *authenticated, AuthDomain: providerName,
 		PrincipalMatches: *authenticated, BindingPresent: true, ProxyPresent: *expectProxy,
 	}
@@ -170,6 +173,7 @@ func runHTTPClient(args []string) error {
 	subjectStability := flags.String("expected-subject-stability", "none", "expected subject stability")
 	capability := flags.String("expected-capability", "", "expected application capability")
 	targetKind := flags.String("expected-target-kind", "", "expected capability target kind")
+	targetValue := flags.String("expected-target-value", "", "expected capability target value")
 	authenticated := flags.Bool("expect-authenticated", false, "expect primary authentication")
 	expectProxy := flags.Bool("expect-proxy", false, "expect a proxy address in peer evidence")
 	if err := flags.Parse(args); err != nil {
@@ -198,7 +202,7 @@ func runHTTPClient(args []string) error {
 		Issuer: *issuer, Transport: "http",
 		EvidenceSource: *evidenceSource, Assurance: vgirpc.IdentityAssurance(*assurance),
 		SubjectKind: vgirpc.PeerSubjectKind(*subjectKind), SubjectStability: vgirpc.SubjectStability(*subjectStability),
-		SubjectVerified: false, Capability: *capability, CapabilityTarget: *targetKind,
+		SubjectVerified: false, Capability: *capability, CapabilityTarget: *targetKind, TargetValue: *targetValue,
 		Authenticated: *authenticated, BindingPresent: true, ProxyPresent: *expectProxy, SpoofLogin: *spoofLogin,
 	}
 	for range 2 {
@@ -226,6 +230,9 @@ func runTCPServer(args []string) error {
 	socket := flags.String("localapi-socket", "/var/run/tailscale/tailscaled.sock", "tailscaled LocalAPI socket")
 	capability := flags.String("expected-capability", "", "required application capability")
 	tag := flags.String("expected-tag", "", "required client tag")
+	proxyRequired := flags.Bool("proxy-protocol-v2", false, "require a trusted PROXY protocol v2 preamble")
+	trustedProxy := flags.String("trusted-proxy-address", "", "exact trusted PROXY protocol sender IP")
+	serviceName := flags.String("service-name", "", "Tailscale Service capability target")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -238,15 +245,20 @@ func runTCPServer(args []string) error {
 	if err != nil {
 		return err
 	}
+	targetKind := "destination_ip"
+	if *serviceName != "" {
+		targetKind = "service"
+	}
 	want := expectation{
 		Issuer: *issuer, Transport: "tcp",
 		EvidenceSource: "localapi", Assurance: vgirpc.IdentityAssuranceLocalDaemon,
 		SubjectKind: vgirpc.PeerSubjectTaggedNode, SubjectStability: vgirpc.SubjectStabilityStable,
-		SubjectVerified: true, Capability: *capability, CapabilityTarget: "destination_ip", Tag: *tag,
+		SubjectVerified: true, Capability: *capability, CapabilityTarget: targetKind, TargetValue: *serviceName, Tag: *tag,
 		Authenticated: true, AuthDomain: providerName, PrincipalMatches: true, BindingPresent: true,
+		ProxyPresent: *proxyRequired,
 	}
 	server := probeServer(want)
-	return server.RunTcpWithOptions(*host, *port, vgirpc.TcpServerOptions{
+	serverOptions := vgirpc.TcpServerOptions{
 		OnBound: func(host string, port int) { fmt.Printf("TCP:%s:%d\n", host, port) },
 		ResolveIdentity: func(ctx context.Context, resolution *vgirpc.PeerResolutionContext) (*vgirpc.AuthContext, *vgirpc.PeerEvidenceSet, error) {
 			result, err := provider.Resolve(ctx, resolution)
@@ -257,7 +269,34 @@ func runTCPServer(args []string) error {
 			return vgirpc.Anonymous(), evidence, err
 		},
 		PeerAuthenticationPolicy: vgirpc.PeerIdentityPrimary(providerName),
-	})
+	}
+	if err := applyTCPProxyOptions(&serverOptions, *proxyRequired, *trustedProxy, *serviceName); err != nil {
+		return err
+	}
+	return server.RunTcpWithOptions(*host, *port, serverOptions)
+}
+
+func applyTCPProxyOptions(
+	options *vgirpc.TcpServerOptions,
+	required bool,
+	trustedProxy string,
+	serviceName string,
+) error {
+	if required && trustedProxy == "" {
+		return errors.New("--trusted-proxy-address is required with --proxy-protocol-v2")
+	}
+	var trusted []string
+	if trustedProxy != "" {
+		address, err := netip.ParseAddr(trustedProxy)
+		if err != nil || address.Zone() != "" {
+			return errors.New("--trusted-proxy-address must be one exact IPv4 or IPv6 address")
+		}
+		trusted = []string{address.Unmap().String()}
+	}
+	options.ProxyProtocolV2Required = required
+	options.TrustedProxyAddresses = trusted
+	options.ServiceName = serviceName
+	return nil
 }
 
 func runHTTPServer(args []string) error {
@@ -340,8 +379,8 @@ func validateContext(ctx *vgirpc.CallContext, want expectation) error {
 	if want.Tag != "" && !containsString(identity.Attributes()["tags"], want.Tag) {
 		return fmt.Errorf("missing tag %q", want.Tag)
 	}
-	if got := capabilityTargetKind(identity.Attributes()["capability_target"]); got != want.CapabilityTarget {
-		return fmt.Errorf("capability target kind %q, want %q", got, want.CapabilityTarget)
+	if !capabilityTargetMatches(identity.Attributes()["capability_target"], want.CapabilityTarget, want.TargetValue) {
+		return errors.New("capability target did not match expectation")
 	}
 	if (identity.ProxyAddress() != "") != want.ProxyPresent {
 		return errors.New("unexpected proxy-address presence")
@@ -398,7 +437,7 @@ func validateSnapshot(raw []byte, want expectation) error {
 		i.SubjectKind != string(want.SubjectKind) || i.SubjectStability != string(want.SubjectStability) ||
 		i.SubjectVerified != want.SubjectVerified || !i.CapabilitiesVerified ||
 		!contains(i.CapabilityNames, want.Capability) || i.ProxyPresent != want.ProxyPresent ||
-		capabilityTargetKind(i.CapabilityTarget) != want.CapabilityTarget ||
+		!capabilityTargetMatches(i.CapabilityTarget, want.CapabilityTarget, want.TargetValue) ||
 		got.Auth.Authenticated != want.Authenticated || stringValue(got.Auth.Domain) != want.AuthDomain ||
 		got.Auth.PrincipalMatchesIdentity != want.PrincipalMatches ||
 		got.Auth.PeerEvidenceBindingPresent != want.BindingPresent {
@@ -424,6 +463,21 @@ func capabilityTargetKind(value any) string {
 	}
 	kind, _ := target["kind"].(string)
 	return kind
+}
+
+func capabilityTargetMatches(value any, expectedKind, expectedValue string) bool {
+	if capabilityTargetKind(value) != expectedKind {
+		return false
+	}
+	if expectedValue == "" {
+		return true
+	}
+	target, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	actual, _ := target["value"].(string)
+	return actual == expectedValue
 }
 
 func stringClaim(claims map[string]any, name string) (string, bool) {
