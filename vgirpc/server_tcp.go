@@ -6,6 +6,7 @@ package vgirpc
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -36,6 +37,10 @@ type TcpServerOptions struct {
 	ProxyPreambleTimeout      time.Duration
 	MaximumProxyPreambleBytes int
 	ServiceName               string
+	// IrohProxyIssuer enables the fixed VGI Iroh EndpointId TLV on trusted
+	// PROXY/UNSPEC connections. The issuer is operator-controlled and never
+	// accepted from the proxy preamble.
+	IrohProxyIssuer string
 
 	// TLSConfig enables direct mutual TLS. The configuration is cloned before
 	// use and forced to RequireAndVerifyClientCert. SpiffeTrustDomains must also
@@ -126,6 +131,9 @@ func (s *Server) RunTcpWithOptions(host string, port int, options TcpServerOptio
 	}
 	if options.ProxyProtocolV2Required && len(trustedProxies) == 0 {
 		return fmt.Errorf("vgirpc: PROXY v2 requires at least one exact trusted proxy address")
+	}
+	if options.IrohProxyIssuer != "" && !options.ProxyProtocolV2Required {
+		return fmt.Errorf("vgirpc: Iroh proxy identity requires PROXY v2")
 	}
 	var identitySlots chan struct{}
 	if options.ResolveIdentity != nil {
@@ -250,6 +258,7 @@ func prepareTcpConnectionIdentity(
 	immediate := conn.RemoteAddr().String()
 	destination := conn.LocalAddr().String()
 	asserted := ""
+	var forwardedIrohResult *PeerIdentityResult
 	if options.ProxyProtocolV2Required {
 		tcpPeer, ok := conn.RemoteAddr().(*net.TCPAddr)
 		if !ok {
@@ -265,13 +274,34 @@ func prepareTcpConnectionIdentity(
 		if err := conn.SetReadDeadline(tcpStageDeadline(setupCtx, options.ProxyPreambleTimeout)); err != nil {
 			return nil, nil, fmt.Errorf("vgirpc: set PROXY v2 preamble deadline: %w", err)
 		}
-		proxyAddress, err := ReadProxyProtocolV2(conn, options.MaximumProxyPreambleBytes)
+		proxyAddress, err := ReadProxyProtocolV2WithOptions(conn, options.MaximumProxyPreambleBytes, ProxyProtocolV2Options{
+			AllowIrohIdentity: options.IrohProxyIssuer != "",
+		})
 		_ = conn.SetReadDeadline(time.Time{})
 		if err != nil {
 			return nil, nil, err
 		}
-		asserted = proxyAddress.Source.String()
-		destination = proxyAddress.Destination.String()
+		if proxyAddress.HasIrohEndpointID {
+			endpointKey := hex.EncodeToString(proxyAddress.IrohEndpointID[:])
+			identity, identityErr := NewPeerIdentity(PeerIdentityOptions{
+				Provider: "iroh", EvidenceSource: "proxy_protocol_v2",
+				Assurance: IdentityAssuranceConfiguredProxy, Issuer: options.IrohProxyIssuer,
+				Transport: "tcp", SubjectKind: PeerSubjectEndpoint, SubjectKey: endpointKey,
+				SubjectStability: SubjectStabilityStable, SubjectVerified: true,
+				Attributes:    map[string]any{"original_assurance": string(IdentityAssuranceCryptographicPeer)},
+				SourceAddress: endpointKey, ProxyAddress: immediate,
+			})
+			if identityErr != nil {
+				return nil, nil, identityErr
+			}
+			forwardedIrohResult, identityErr = NewAvailablePeerIdentityResult("iroh", identity)
+			if identityErr != nil {
+				return nil, nil, identityErr
+			}
+		} else {
+			asserted = proxyAddress.Source.String()
+			destination = proxyAddress.Destination.String()
+		}
 	}
 	var directSpiffeResult *PeerIdentityResult
 	if options.TLSConfig != nil {
@@ -282,7 +312,7 @@ func prepareTcpConnectionIdentity(
 		conn = prepared
 		directSpiffeResult = result
 	}
-	if options.ResolveIdentity == nil && directSpiffeResult == nil && options.PeerAuthenticationPolicy == nil {
+	if options.ResolveIdentity == nil && directSpiffeResult == nil && forwardedIrohResult == nil && options.PeerAuthenticationPolicy == nil {
 		return ctx, conn, nil
 	}
 
@@ -304,6 +334,13 @@ func prepareTcpConnectionIdentity(
 	if directSpiffeResult != nil {
 		var err error
 		evidence, err = appendPeerIdentityResult(evidence, directSpiffeResult)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	if forwardedIrohResult != nil {
+		var err error
+		evidence, err = appendPeerIdentityResult(evidence, forwardedIrohResult)
 		if err != nil {
 			return nil, nil, err
 		}

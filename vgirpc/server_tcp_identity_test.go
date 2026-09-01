@@ -92,6 +92,41 @@ func TestPrepareTcpConnectionIdentityTrustsProxyBeforeSnapshot(t *testing.T) {
 	}
 }
 
+func TestPrepareTcpConnectionIdentityPromotesForwardedIrohPeer(t *testing.T) {
+	server, client := tcpConnectionPair(t)
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+	if _, err := client.Write(append(proxyV2Iroh(), 0xaa)); err != nil {
+		t.Fatal(err)
+	}
+	options := TcpServerOptions{
+		ProxyProtocolV2Required: true, TrustedProxyAddresses: []string{"127.0.0.1"},
+		ProxyPreambleTimeout: time.Second, MaximumProxyPreambleBytes: 536,
+		IdentityResolutionTimeout: time.Second, IrohProxyIssuer: "production-mesh",
+		PeerAuthenticationPolicy: PeerIdentityPrimary("iroh"),
+	}
+	ctx, _, err := prepareTcpConnectionIdentity(context.Background(), server, options,
+		map[netip.Addr]struct{}{netip.MustParseAddr("127.0.0.1"): {}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, evidence := identityFromConnectionContext(ctx)
+	if !auth.Authenticated || evidence.Status("iroh") != PeerIdentityAvailable {
+		t.Fatalf("Iroh identity not installed: auth=%#v status=%s", auth, evidence.Status("iroh"))
+	}
+	identity := evidence.ForProvider("iroh")[0]
+	if identity.Issuer() != "production-mesh" || identity.SubjectKey() != "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f" {
+		t.Fatalf("unexpected Iroh identity: issuer=%q subject=%q", identity.Issuer(), identity.SubjectKey())
+	}
+	if identity.Assurance() != IdentityAssuranceConfiguredProxy || identity.Attributes()["original_assurance"] != "cryptographic_peer" {
+		t.Fatalf("unexpected Iroh assurance: %s %#v", identity.Assurance(), identity.Attributes())
+	}
+	following := []byte{0}
+	if _, err := io.ReadFull(server, following); err != nil || following[0] != 0xaa {
+		t.Fatalf("VGI byte was not preserved: byte=%x err=%v", following, err)
+	}
+}
+
 func TestPrepareTcpConnectionIdentityRejectsUntrustedPeerBeforeRead(t *testing.T) {
 	server, client := tcpConnectionPair(t)
 	defer func() { _ = server.Close() }()

@@ -21,6 +21,15 @@ func proxyV2IPv4() []byte {
 	return append(value, 192, 0, 2, 7, 198, 51, 100, 9, 0x30, 0x39, 0x24, 0xb8)
 }
 
+func proxyV2Iroh() []byte {
+	endpoint := make([]byte, 32)
+	for index := range endpoint {
+		endpoint[index] = byte(index)
+	}
+	body := append([]byte{VgiIrohEndpointTLV, 0, 33, 1}, endpoint...)
+	return append(proxyV2Prefix(0x01, 0x00, len(body)), body...)
+}
+
 func TestProxyProtocolV2ParsesTCPAndPreservesFollowingBytes(t *testing.T) {
 	preamble := proxyV2IPv4()
 	stream := bytes.NewBuffer(append(append([]byte(nil), preamble...), 0xaa, 0xbb))
@@ -83,5 +92,44 @@ func TestProxyProtocolV2RejectsUnsafeForms(t *testing.T) {
 	}
 	if _, err := ParseProxyProtocolV2(tlv[:len(tlv)-1], 536); err == nil {
 		t.Fatal("truncated TLV accepted")
+	}
+}
+
+func TestProxyProtocolV2IrohIdentityRequiresExplicitUnspecOptIn(t *testing.T) {
+	preamble := proxyV2Iroh()
+	if _, err := ParseProxyProtocolV2(preamble, 536); err == nil {
+		t.Fatal("ordinary listener accepted PROXY/UNSPEC Iroh identity")
+	}
+	parsed, err := ParseProxyProtocolV2WithOptions(preamble, 536, ProxyProtocolV2Options{AllowIrohIdentity: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.HasIrohEndpointID || !bytes.Equal(parsed.IrohEndpointID[:], []byte{
+		0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+		16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+	}) {
+		t.Fatalf("unexpected Iroh EndpointId: %x", parsed.IrohEndpointID)
+	}
+}
+
+func TestProxyProtocolV2RejectsInvalidIrohIdentity(t *testing.T) {
+	valid := proxyV2Iroh()
+	duplicate := append([]byte(nil), valid...)
+	duplicate = append(duplicate, valid[16:]...)
+	binary.BigEndian.PutUint16(duplicate[14:16], uint16(len(duplicate)-16))
+	ipFamily := append([]byte(nil), valid...)
+	ipFamily[13] = 0x11
+	tests := map[string][]byte{
+		"missing":       proxyV2Prefix(0x01, 0x00, 0),
+		"duplicate":     duplicate,
+		"wrong version": append(append([]byte(nil), valid[:19]...), append([]byte{2}, valid[20:]...)...),
+		"IP family":     ipFamily,
+	}
+	for name, preamble := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := ParseProxyProtocolV2WithOptions(preamble, 536, ProxyProtocolV2Options{AllowIrohIdentity: true}); err == nil {
+				t.Fatal("invalid Iroh identity accepted")
+			}
+		})
 	}
 }
