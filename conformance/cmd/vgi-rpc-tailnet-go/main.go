@@ -77,10 +77,12 @@ type snapshot struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatalf("usage: %s client-http|server-tcp|server-http [options]", os.Args[0])
+		fatalf("usage: %s client-tcp|client-http|server-tcp|server-http [options]", os.Args[0])
 	}
 	var err error
 	switch os.Args[1] {
+	case "client-tcp":
+		err = runTCPClient(os.Args[2:])
 	case "client-http":
 		err = runHTTPClient(os.Args[2:])
 	case "server-tcp":
@@ -93,6 +95,67 @@ func main() {
 	if err != nil {
 		fatalf("%v", err)
 	}
+}
+
+func runTCPClient(args []string) error {
+	flags := flag.NewFlagSet("client-tcp", flag.ContinueOnError)
+	host := flags.String("host", "", "Tailnet TCP worker host")
+	port := flags.Int("port", 0, "Tailnet TCP worker port")
+	proxy := flags.String("proxy", "", "optional socks5h proxy URL")
+	issuer := flags.String("expected-issuer", "", "expected Tailnet issuer namespace")
+	evidenceSource := flags.String("expected-evidence-source", "localapi", "expected evidence source")
+	assurance := flags.String("expected-assurance", "local_daemon", "expected assurance")
+	subjectKind := flags.String("expected-subject-kind", "tagged_node", "expected subject kind")
+	subjectStability := flags.String("expected-subject-stability", "stable", "expected subject stability")
+	capability := flags.String("expected-capability", "", "expected application capability")
+	targetKind := flags.String("expected-target-kind", "", "expected capability target kind")
+	tag := flags.String("expected-tag", "", "expected Tailnet node tag")
+	authenticated := flags.Bool("expect-authenticated", false, "expect primary authentication")
+	expectProxy := flags.Bool("expect-proxy", false, "expect a proxy address in peer evidence")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *host == "" || *port == 0 || *issuer == "" || *capability == "" {
+		return errors.New("--host, --port, --expected-issuer, and --expected-capability are required")
+	}
+	options := []vgirpc.TcpClientOption{
+		vgirpc.WithTcpClientConnectTimeout(20 * time.Second),
+		vgirpc.WithTcpClientProtocolVersion("2.0.0"),
+	}
+	if *proxy != "" {
+		options = append(options, vgirpc.WithTcpClientProxy(*proxy))
+	}
+	client, err := vgirpc.NewTcpClient(context.Background(), *host, *port, options...)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+	params := array.NewRecordBatch(arrow.NewSchema(nil, nil), nil, 0)
+	defer params.Release()
+	resultSchema := arrow.NewSchema([]arrow.Field{{Name: "result", Type: arrow.BinaryTypes.String}}, nil)
+	want := expectation{
+		Issuer: *issuer, Transport: "tcp",
+		EvidenceSource: *evidenceSource, Assurance: vgirpc.IdentityAssurance(*assurance),
+		SubjectKind: vgirpc.PeerSubjectKind(*subjectKind), SubjectStability: vgirpc.SubjectStability(*subjectStability),
+		SubjectVerified: true, Capability: *capability, CapabilityTarget: *targetKind, Tag: *tag,
+		Authenticated: *authenticated, AuthDomain: providerName,
+		PrincipalMatches: *authenticated, BindingPresent: true, ProxyPresent: *expectProxy,
+	}
+	for range 2 {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		result, callErr := client.CallUnary(ctx, "snapshot", params, resultSchema)
+		cancel()
+		if callErr != nil {
+			return callErr
+		}
+		raw := result.Batch.Column(0).(*array.String).Value(0)
+		result.Release()
+		if err := validateSnapshot([]byte(raw), want); err != nil {
+			return err
+		}
+	}
+	fmt.Println("Go TCP client Tailnet probe passed")
+	return nil
 }
 
 func runHTTPClient(args []string) error {

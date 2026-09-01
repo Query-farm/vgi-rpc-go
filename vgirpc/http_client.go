@@ -778,7 +778,7 @@ func (p *parsedClientStream) releaseExceptFirst() {
 	}
 }
 
-func (c *HttpClient) parseIPCStream(raw *bytes.Reader, expected *arrow.Schema, tokenIsData bool) (*parsedClientStream, error) {
+func (c *HttpClient) parseIPCStream(raw io.Reader, expected *arrow.Schema, tokenIsData bool) (*parsedClientStream, error) {
 	reader, err := ipc.NewReader(raw)
 	if err != nil {
 		return nil, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf("read Arrow IPC response: %v", err)}
