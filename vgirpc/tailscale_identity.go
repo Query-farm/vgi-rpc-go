@@ -370,6 +370,14 @@ func (p *TailscaleLocalAPIIdentityProvider) Resolve(ctx context.Context, resolut
 	if resolution == nil {
 		return NewPeerIdentityResult(tailscaleProvider, PeerIdentityInvalid)
 	}
+	proxyAddress := ""
+	if resolution.AssertedPeer() != "" {
+		var valid bool
+		proxyAddress, valid = tailscaleNormalizedIP(resolution.ImmediatePeer())
+		if !valid {
+			return NewPeerIdentityResult(tailscaleProvider, PeerIdentityInvalid)
+		}
+	}
 	source := resolution.AssertedPeer()
 	if source == "" {
 		source = resolution.SourceEndpoint()
@@ -453,14 +461,14 @@ func (p *TailscaleLocalAPIIdentityProvider) Resolve(ctx context.Context, resolut
 	if err != nil {
 		return NewPeerIdentityResult(tailscaleProvider, PeerIdentityInvalid)
 	}
-	identity, err := p.identity(value, resolution, source, target)
+	identity, err := p.identity(value, resolution, source, proxyAddress, target)
 	if err != nil {
 		return NewPeerIdentityResult(tailscaleProvider, PeerIdentityInvalid)
 	}
 	return NewAvailablePeerIdentityResult(tailscaleProvider, identity)
 }
 
-func (p *TailscaleLocalAPIIdentityProvider) identity(value any, resolution *PeerResolutionContext, source string, target map[string]any) (*PeerIdentity, error) {
+func (p *TailscaleLocalAPIIdentityProvider) identity(value any, resolution *PeerResolutionContext, source string, proxyAddress string, target map[string]any) (*PeerIdentity, error) {
 	payload, ok := value.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("LocalAPI WhoIs response must be an object")
@@ -539,8 +547,18 @@ func (p *TailscaleLocalAPIIdentityProvider) identity(value any, resolution *Peer
 		Issuer: p.issuer, Transport: resolution.Transport(), SubjectKind: subjectKind,
 		SubjectKey: subjectKey, SubjectStability: SubjectStabilityStable, SubjectVerified: true,
 		Attributes: attributes, Capabilities: capabilities, CapabilitiesVerified: true,
-		SourceAddress: tailscaleSourceIP(source),
+		SourceAddress: tailscaleSourceIP(source), ProxyAddress: proxyAddress,
 	})
+}
+
+func tailscaleNormalizedIP(value string) (string, bool) {
+	if address, err := netip.ParseAddr(value); err == nil && address.Zone() == "" {
+		return address.Unmap().String(), true
+	}
+	if address, err := netip.ParseAddrPort(value); err == nil && address.Addr().Zone() == "" {
+		return address.Addr().Unmap().String(), true
+	}
+	return "", false
 }
 
 func tailscaleSourceIP(source string) string {

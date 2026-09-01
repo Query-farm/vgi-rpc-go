@@ -193,6 +193,9 @@ func TestTailscaleLocalAPIUserServiceScopeAndNoCache(t *testing.T) {
 	if identity.SourceAddress() != "100.64.0.10" {
 		t.Fatalf("identity source address = %q", identity.SourceAddress())
 	}
+	if identity.ProxyAddress() != "" {
+		t.Fatalf("direct identity proxy address = %q", identity.ProxyAddress())
+	}
 	target := identity.Attributes()["capability_target"].(map[string]any)
 	if target["kind"] != "service" || target["value"] != "svc:analytics" {
 		t.Fatalf("capability target = %#v", target)
@@ -222,7 +225,7 @@ func TestTailscaleLocalAPIUnixTaggedNode(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := provider.Resolve(context.Background(), tailscaleTestResolution(t, PeerResolutionOptions{
-		ImmediatePeer: "127.0.0.1", AssertedPeer: "100.64.0.10:4242", DestinationAddress: "[2001:db8::8]:443",
+		ImmediatePeer: "::ffff:127.0.0.1", AssertedPeer: "100.64.0.10:4242", DestinationAddress: "[2001:db8::8]:443",
 	}))
 	if err != nil || result.Status() != PeerIdentityAvailable {
 		t.Fatalf("Resolve() = (%v, %v)", result, err)
@@ -231,8 +234,44 @@ func TestTailscaleLocalAPIUnixTaggedNode(t *testing.T) {
 	if identity.SubjectKind() != PeerSubjectTaggedNode || identity.SubjectKey() != "node:n123CNTRL" {
 		t.Fatalf("tagged identity = %q/%q", identity.SubjectKind(), identity.SubjectKey())
 	}
+	if identity.SourceAddress() != "100.64.0.10" || identity.ProxyAddress() != "127.0.0.1" {
+		t.Fatalf("proxied identity addresses = source %q proxy %q", identity.SourceAddress(), identity.ProxyAddress())
+	}
 	if _, found := identity.Attributes()["user_id"]; found {
 		t.Fatal("tagged node incorrectly retained UserProfile as caller")
+	}
+}
+
+func TestTailscaleLocalAPIRejectsInvalidProxyPeerBeforeLookup(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = response.Write(tailscaleTestWhoIs(true))
+	}))
+	defer server.Close()
+	provider, err := NewTailscaleLocalAPIIdentityProvider(TailscaleLocalAPIOptions{
+		Issuer: "tailnet:example", Endpoint: server.URL,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, immediatePeer := range map[string]string{
+		"missing":   "",
+		"malformed": "proxy.example.com",
+		"zone":      "fe80::1%lo0",
+	} {
+		t.Run(name, func(t *testing.T) {
+			result, err := provider.Resolve(context.Background(), tailscaleTestResolution(t, PeerResolutionOptions{
+				ImmediatePeer: immediatePeer, AssertedPeer: "100.64.0.10:4242",
+			}))
+			if err != nil || result.Status() != PeerIdentityInvalid {
+				t.Fatalf("Resolve() = (%v, %v)", result, err)
+			}
+		})
+	}
+	if requests.Load() != 0 {
+		t.Fatalf("invalid proxy peers triggered %d LocalAPI requests", requests.Load())
 	}
 }
 
