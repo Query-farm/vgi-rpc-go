@@ -19,8 +19,8 @@ const (
 	// experimental range. It is meaningful only on an explicitly enabled,
 	// trusted PROXY/UNSPEC listener.
 	VgiIrohEndpointTLV     byte = 0xe0
-	vgiIrohEndpointVersion      = 1
-	vgiIrohEndpointBytes        = 33
+	vgiIrohEndpointVersion byte = 1
+	vgiIrohEndpointBytes   int  = 33
 )
 
 // ProxyProtocolV2Options controls identity-bearing extensions. The zero value
