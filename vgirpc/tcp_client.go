@@ -21,12 +21,14 @@ import (
 const defaultTCPClientConnectTimeout = 10 * time.Second
 
 type tcpClientConfig struct {
-	connectTimeout  time.Duration
-	proxy           string
-	protocolVersion string
-	maxRequest      int64
-	maxResponse     int64
-	onLog           ClientLogHandler
+	connectTimeout    time.Duration
+	connectConfigured bool
+	proxy             string
+	proxyConfigured   bool
+	protocolVersion   string
+	maxRequest        int64
+	maxResponse       int64
+	onLog             ClientLogHandler
 }
 
 // TcpClientOption configures NewTcpClient.
@@ -41,6 +43,7 @@ func WithTcpClientProxy(proxyURL string) TcpClientOption {
 			return err
 		}
 		config.proxy = proxyURL
+		config.proxyConfigured = true
 		return nil
 	}
 }
@@ -53,6 +56,7 @@ func WithTcpClientConnectTimeout(timeout time.Duration) TcpClientOption {
 			return errors.New("vgirpc: TCP client connect timeout must be positive")
 		}
 		config.connectTimeout = timeout
+		config.connectConfigured = true
 		return nil
 	}
 }
@@ -186,7 +190,7 @@ func (client *TcpClient) CallUnary(ctx context.Context, method string, params ar
 		return nil, errors.New("vgirpc: TCP call context must not be nil")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, contextualIrohError(client.conn, err, IrohStageCancel, IrohNotSent)
 	}
 	body, err := client.codec.initialBody(method, params)
 	if err != nil {
@@ -207,7 +211,7 @@ func (client *TcpClient) CallUnary(ctx context.Context, method string, params ar
 	}()
 	if err := writeAll(client.conn, body); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = ctxErr
+			err = contextualIrohError(client.conn, ctxErr, IrohStageWrite, IrohUnknown)
 		}
 		return nil, client.poison(err)
 	}
@@ -215,7 +219,7 @@ func (client *TcpClient) CallUnary(ctx context.Context, method string, params ar
 		&cappedTCPReader{reader: client.conn, limit: client.codec.maxDecoded}, expected, true)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = ctxErr
+			err = contextualIrohError(client.conn, ctxErr, IrohStageRead, IrohSent)
 		}
 		return nil, client.poison(err)
 	}
@@ -274,7 +278,7 @@ func (client *TcpClient) openStream(ctx context.Context, method string, params a
 		return nil, errors.New("vgirpc: TCP stream context must not be nil")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, contextualIrohError(client.conn, err, IrohStageCancel, IrohNotSent)
 	}
 	body, err := client.codec.initialBody(method, params)
 	if err != nil {
@@ -287,7 +291,7 @@ func (client *TcpClient) openStream(ctx context.Context, method string, params a
 	defer cleanup()
 	if err = writeAll(client.conn, body); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = ctxErr
+			err = contextualIrohError(client.conn, ctxErr, IrohStageWrite, IrohUnknown)
 		}
 		return nil, client.poison(err)
 	}
@@ -424,7 +428,7 @@ func (stream *TcpClientStream) writeTurn(ctx context.Context, batch arrow.Record
 		return errors.New("vgirpc: TCP stream context must not be nil")
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return contextualIrohError(stream.client.conn, err, IrohStageCancel, IrohNotSent)
 	}
 	clean := make(map[string]string, len(metadata))
 	for key, value := range metadata {
@@ -462,7 +466,7 @@ func (stream *TcpClientStream) writeTurn(ctx context.Context, batch arrow.Record
 	}
 	if err := stream.inputWriter.Write(outbound); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = ctxErr
+			err = contextualIrohError(stream.client.conn, ctxErr, IrohStageWrite, IrohUnknown)
 		}
 		return stream.fail(err)
 	}
@@ -522,7 +526,7 @@ func (stream *TcpClientStream) readNextData(ctx context.Context) (*ClientBatch, 
 	}
 	if err := stream.outputReader.Err(); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			err = ctxErr
+			err = contextualIrohError(stream.client.conn, ctxErr, IrohStageRead, IrohSent)
 		}
 		return nil, stream.fail(err)
 	}
