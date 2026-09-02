@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -66,17 +67,20 @@ type ClientStreamSchema struct {
 type ClientLogHandler func(LogMessage)
 
 type httpClientConfig struct {
-	inner            *http.Client
-	prefix           string
-	headers          http.Header
-	protocolVersion  string
-	maxRequest       int64
-	maxEncoded       int64
-	maxDecoded       int64
-	onLog            ClientLogHandler
-	closeIdleOnClose bool
-	tcpProxy         string
-	customHTTPClient bool
+	inner               *http.Client
+	prefix              string
+	headers             http.Header
+	protocolVersion     string
+	maxRequest          int64
+	maxEncoded          int64
+	maxDecoded          int64
+	acceptedMaxResponse int64
+	responseLimitsSet   bool
+	acceptedResponseSet bool
+	onLog               ClientLogHandler
+	closeIdleOnClose    bool
+	tcpProxy            string
+	customHTTPClient    bool
 }
 
 // HttpClientOption configures [NewHttpClient].
@@ -157,7 +161,9 @@ func WithClientProtocolVersion(version string) HttpClientOption {
 }
 
 // WithClientResponseLimits independently caps encoded network bytes and the
-// decoded response body. Both limits must be positive.
+// decoded response body. Both limits must be positive. The smaller limit also
+// bounds the accepted response budget advertised on the wire; it must remain
+// at least 64 KiB after all options are combined.
 func WithClientResponseLimits(maxEncoded, maxDecoded int64) HttpClientOption {
 	return func(cfg *httpClientConfig) error {
 		if maxEncoded <= 0 || maxDecoded <= 0 {
@@ -165,6 +171,23 @@ func WithClientResponseLimits(maxEncoded, maxDecoded int64) HttpClientOption {
 		}
 		cfg.maxEncoded = maxEncoded
 		cfg.maxDecoded = maxDecoded
+		cfg.responseLimitsSet = true
+		return nil
+	}
+}
+
+// WithClientAcceptedMaxResponseBytes sets the decoded response size the
+// client advertises in VGI-Accept-Max-Response-Bytes. The value must be a
+// positive integer representable exactly in every supported SDK. By itself it
+// raises the default encoded and decoded ceilings to the same value; explicit
+// WithClientResponseLimits values instead clamp the effective advertisement.
+func WithClientAcceptedMaxResponseBytes(maxBytes int64) HttpClientOption {
+	return func(cfg *httpClientConfig) error {
+		if maxBytes < minResponseBudgetBytes || maxBytes > maxSafeDecimal {
+			return fmt.Errorf("vgirpc: accepted response limit must be between %d and %d", minResponseBudgetBytes, maxSafeDecimal)
+		}
+		cfg.acceptedMaxResponse = maxBytes
+		cfg.acceptedResponseSet = true
 		return nil
 	}
 }
@@ -194,17 +217,21 @@ func WithClientLogHandler(handler ClientLogHandler) HttpClientOption {
 // multiple independent streams. A single [HttpClientStream] must be driven by
 // only one goroutine at a time.
 type HttpClient struct {
-	baseURL          *url.URL
-	inner            *http.Client
-	prefix           string
-	headers          http.Header
-	protocolVersion  string
-	maxRequest       int64
-	maxEncoded       int64
-	maxDecoded       int64
-	onLog            ClientLogHandler
-	closeIdleOnClose bool
-	closed           atomic.Bool
+	baseURL                *url.URL
+	inner                  *http.Client
+	prefix                 string
+	headers                http.Header
+	protocolVersion        string
+	maxRequest             int64
+	maxEncoded             int64
+	maxDecoded             int64
+	acceptedMaxResponse    int64
+	onLog                  ClientLogHandler
+	closeIdleOnClose       bool
+	closed                 atomic.Bool
+	responseBudgetMu       sync.Mutex
+	responseBudgetVerified bool
+	serverMaxResponse      int64
 }
 
 // HTTPStatusError is a transport-level non-2xx HTTP response. Detail is a
@@ -240,12 +267,13 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 	}
 	u.Path = strings.TrimRight(u.Path, "/")
 	cfg := httpClientConfig{
-		inner:            &http.Client{Timeout: 30 * time.Second},
-		headers:          make(http.Header),
-		maxRequest:       defaultClientMaxRequestBytes,
-		maxEncoded:       defaultClientMaxEncodedResponseBytes,
-		maxDecoded:       defaultClientMaxDecodedResponseBytes,
-		closeIdleOnClose: true,
+		inner:               &http.Client{Timeout: 30 * time.Second},
+		headers:             make(http.Header),
+		maxRequest:          defaultClientMaxRequestBytes,
+		maxEncoded:          defaultClientMaxEncodedResponseBytes,
+		maxDecoded:          defaultClientMaxDecodedResponseBytes,
+		acceptedMaxResponse: defaultClientMaxDecodedResponseBytes,
+		closeIdleOnClose:    true,
 	}
 	for _, option := range options {
 		if option == nil {
@@ -254,6 +282,21 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 		if err := option(&cfg); err != nil {
 			return nil, err
 		}
+	}
+	// The advertised decoded willingness must be a limit this client can
+	// actually enforce. An explicit accepted limit raises the default local
+	// ceilings, while independently configured transport ceilings clamp it.
+	// Resolve this once after all options so option order cannot change it.
+	if cfg.acceptedResponseSet && !cfg.responseLimitsSet {
+		cfg.maxEncoded = cfg.acceptedMaxResponse
+		cfg.maxDecoded = cfg.acceptedMaxResponse
+	}
+	if !cfg.acceptedResponseSet {
+		cfg.acceptedMaxResponse = minPositive(cfg.maxEncoded, cfg.maxDecoded, maxSafeDecimal)
+	}
+	cfg.acceptedMaxResponse = minPositive(cfg.acceptedMaxResponse, cfg.maxEncoded, cfg.maxDecoded, maxSafeDecimal)
+	if cfg.acceptedMaxResponse < minResponseBudgetBytes {
+		return nil, fmt.Errorf("vgirpc: effective accepted response limit must be at least %d", minResponseBudgetBytes)
 	}
 	if cfg.tcpProxy != "" {
 		if cfg.customHTTPClient {
@@ -266,16 +309,17 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 		cfg.inner.Transport = &http.Transport{Proxy: nil, DialContext: dialer.DialContext}
 	}
 	return &HttpClient{
-		baseURL:          u,
-		inner:            cfg.inner,
-		prefix:           cfg.prefix,
-		headers:          cfg.headers.Clone(),
-		protocolVersion:  cfg.protocolVersion,
-		maxRequest:       cfg.maxRequest,
-		maxEncoded:       cfg.maxEncoded,
-		maxDecoded:       cfg.maxDecoded,
-		onLog:            cfg.onLog,
-		closeIdleOnClose: cfg.closeIdleOnClose,
+		baseURL:             u,
+		inner:               cfg.inner,
+		prefix:              cfg.prefix,
+		headers:             cfg.headers.Clone(),
+		protocolVersion:     cfg.protocolVersion,
+		maxRequest:          cfg.maxRequest,
+		maxEncoded:          cfg.maxEncoded,
+		maxDecoded:          cfg.maxDecoded,
+		acceptedMaxResponse: cfg.acceptedMaxResponse,
+		onLog:               cfg.onLog,
+		closeIdleOnClose:    cfg.closeIdleOnClose,
 	}, nil
 }
 
@@ -478,6 +522,9 @@ func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (cl
 	if c == nil || c.closed.Load() {
 		return clientHTTPResponse{}, errors.New("vgirpc: HTTP client is closed")
 	}
+	if err := c.ensureResponseBudgetSupport(ctx); err != nil {
+		return clientHTTPResponse{}, err
+	}
 	if int64(len(body)) > c.maxRequest {
 		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("request body exceeds client limit (%d > %d bytes)", len(body), c.maxRequest)}
 	}
@@ -491,21 +538,26 @@ func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (cl
 	req.Header.Set("Content-Type", arrowContentType)
 	req.Header.Set(customAcceptEncodingHeader, "zstd, gzip, identity")
 	req.Header.Set(acceptEncodingHeader, "zstd, gzip, identity")
+	req.Header.Set(acceptMaxResponseBytesHeader, fmt.Sprintf("%d", c.acceptedMaxResponse))
 	resp, err := c.inner.Do(req)
 	if err != nil {
 		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("HTTP request failed: %v", err)}
 	}
 	defer resp.Body.Close()
-	if resp.ContentLength > c.maxEncoded {
-		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("encoded HTTP response exceeds client limit (%d > %d bytes)", resp.ContentLength, c.maxEncoded)}
-	}
-	encoded, err := io.ReadAll(io.LimitReader(resp.Body, c.maxEncoded+1))
+	caps, err := ParseHTTPServerCapabilities(resp.Header)
 	if err != nil {
-		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("read HTTP response: %v", err)}
+		return clientHTTPResponse{}, &RpcError{Type: "ProtocolError", Message: err.Error()}
 	}
-	if int64(len(encoded)) > c.maxEncoded {
-		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("encoded HTTP response exceeds client limit (%d bytes)", c.maxEncoded)}
+	if !caps.AcceptMaxResponseBytesSupport {
+		return clientHTTPResponse{}, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf(
+			"server must advertise %s: true on every RPC response", acceptMaxResponseBytesSupportHeader)}
 	}
+	c.responseBudgetMu.Lock()
+	if caps.MaxResponseBytes > 0 {
+		c.serverMaxResponse = caps.MaxResponseBytes
+	}
+	serverMaxResponse := c.serverMaxResponse
+	c.responseBudgetMu.Unlock()
 	encoding := strings.TrimSpace(resp.Header.Get(contentEncodingHeader))
 	if encoding == "" {
 		encoding = strings.TrimSpace(resp.Header.Get(customContentEncodingHeader))
@@ -513,15 +565,33 @@ func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (cl
 	if err := validateClientContentEncoding(encoding); err != nil {
 		return clientHTTPResponse{}, err
 	}
+	decodedLimit := minPositive(c.maxDecoded, c.acceptedMaxResponse, serverMaxResponse)
+	encodedReadLimit := c.maxEncoded
+	if encoding == "" || strings.EqualFold(encoding, identityEncoding) {
+		// An identity response is already decoded. Bound the streaming read by
+		// the accepted response budget so an untrusted peer cannot force an
+		// allocation up to the larger encoded transport cap first.
+		encodedReadLimit = minPositive(encodedReadLimit, decodedLimit)
+	}
+	if resp.ContentLength > encodedReadLimit {
+		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("encoded HTTP response exceeds client limit (%d > %d bytes)", resp.ContentLength, encodedReadLimit)}
+	}
+	encoded, err := io.ReadAll(io.LimitReader(resp.Body, encodedReadLimit+1))
+	if err != nil {
+		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("read HTTP response: %v", err)}
+	}
+	if int64(len(encoded)) > encodedReadLimit {
+		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("encoded HTTP response exceeds client limit (%d bytes)", encodedReadLimit)}
+	}
 	decoded := encoded
 	if encoding != "" && !strings.EqualFold(encoding, identityEncoding) {
-		decoded, err = DecodeContentEncoding(encoded, encoding, c.maxDecoded)
+		decoded, err = DecodeContentEncoding(encoded, encoding, decodedLimit)
 		if err != nil {
 			return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("decode HTTP response: %v", err)}
 		}
 	}
-	if int64(len(decoded)) > c.maxDecoded {
-		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("decoded HTTP response exceeds client limit (%d > %d bytes)", len(decoded), c.maxDecoded)}
+	if int64(len(decoded)) > decodedLimit {
+		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("decoded HTTP response exceeds client limit (%d > %d bytes)", len(decoded), decodedLimit)}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return clientHTTPResponse{}, &HTTPStatusError{
@@ -535,6 +605,25 @@ func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (cl
 		body:     decoded,
 		rpcError: strings.EqualFold(resp.Header.Get(rpcErrorHeader), "true"),
 	}, nil
+}
+
+func (c *HttpClient) ensureResponseBudgetSupport(ctx context.Context) error {
+	c.responseBudgetMu.Lock()
+	defer c.responseBudgetMu.Unlock()
+	if c.responseBudgetVerified {
+		return nil
+	}
+	caps, err := c.DiscoverCapabilities(ctx)
+	if err != nil {
+		return err
+	}
+	if !caps.AcceptMaxResponseBytesSupport {
+		return &RpcError{Type: "ProtocolError", Message: fmt.Sprintf(
+			"server does not advertise %s: true", acceptMaxResponseBytesSupportHeader)}
+	}
+	c.serverMaxResponse = caps.MaxResponseBytes
+	c.responseBudgetVerified = true
+	return nil
 }
 
 func (c *HttpClient) parseMain(response clientHTTPResponse, expected *arrow.Schema, tokenIsData bool) (*parsedClientStream, error) {

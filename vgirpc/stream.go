@@ -85,6 +85,7 @@ type OutputCollector struct {
 	// RemainingResponseBytes / RemainingExternalizedResponseBytes /
 	// ExternalizationEnabled for the public accessors.
 	remainingResponseBytes             int64
+	preferredResponseBytes             int64
 	remainingExternalizedResponseBytes int64
 	externalizationEnabled             bool
 }
@@ -109,11 +110,20 @@ func newOutputCollector(schema *arrow.Schema, serverID string, producerMode bool
 // RemainingResponseBytes / RemainingExternalizedResponseBytes /
 // ExternalizationEnabled. Called by HTTP dispatch when the collector is
 // created so workers can size their emitted batch to fit the budget.
-func (o *OutputCollector) setBudgets(remaining, remainingExternal int64, externalizationEnabled bool) {
+func (o *OutputCollector) setBudgets(remaining, preferred, remainingExternal int64, externalizationEnabled bool) {
 	o.remainingResponseBytes = remaining
+	o.preferredResponseBytes = preferred
 	o.remainingExternalizedResponseBytes = remainingExternal
 	o.externalizationEnabled = externalizationEnabled
 }
+
+// ResponseLimitBytes returns the effective hard HTTP response limit for this
+// turn. Zero means unbounded or not applicable.
+func (o *OutputCollector) ResponseLimitBytes() int64 { return o.remainingResponseBytes }
+
+// PreferredResponseBytes returns the application target for this turn,
+// clamped to ResponseLimitBytes. Zero means no preference was configured.
+func (o *OutputCollector) PreferredResponseBytes() int64 { return o.preferredResponseBytes }
 
 // Emit adds a pre-built data batch. Returns an error if a data batch was already emitted.
 // If the batch has a different schema object than the output schema, a new

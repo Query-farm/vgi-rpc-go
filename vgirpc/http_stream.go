@@ -25,6 +25,11 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth, peerEvidence := identity.auth, identity.evidence
+	var budgetOK bool
+	r, budgetOK = h.applyResponseBudget(w, r, nil)
+	if !budgetOK {
+		return
+	}
 
 	method := r.PathValue("method")
 
@@ -160,17 +165,19 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	stats.RecordInput(req.Batch.NumRows(), batchBufferSize(req.Batch))
 
 	callCtx := &CallContext{
-		Ctx:               ctx,
-		RequestID:         req.RequestID,
-		ServerID:          h.server.serverID,
-		Method:            method,
-		LogLevel:          LogLevel(req.LogLevel),
-		Auth:              auth,
-		PeerEvidence:      peerEvidence,
-		TransportMetadata: transportMeta,
-		Cookies:           buildHTTPCookies(r),
-		Kind:              TransportKindHTTP,
-		Implementation:    h.server.implementation,
+		Ctx:                    ctx,
+		RequestID:              req.RequestID,
+		ServerID:               h.server.serverID,
+		Method:                 method,
+		LogLevel:               LogLevel(req.LogLevel),
+		Auth:                   auth,
+		PeerEvidence:           peerEvidence,
+		TransportMetadata:      transportMeta,
+		Cookies:                buildHTTPCookies(r),
+		Kind:                   TransportKindHTTP,
+		Implementation:         h.server.implementation,
+		ResponseLimitBytes:     responseBudgetFromContext(r.Context()).Limit,
+		PreferredResponseBytes: responseBudgetFromContext(r.Context()).Preferred,
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
@@ -293,7 +300,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		if err == nil && !finished {
 			// The producer remains active — append a continuation token.
 			token, tokenErr := h.packCursorToken(callID, state, auth)
-			callToken, callErr := h.packCallToken(callID, outputSchema, auth, streamID)
+			callToken, callErr := h.packCallToken(callID, outputSchema, auth, streamID, responseBudgetFromContext(ctx))
 			if tokenErr != nil {
 				handlerErr = tokenErr
 			} else if callErr != nil {
@@ -309,6 +316,16 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 				handlerErr = cerr
 			}
 		}
+		if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), 0,
+			responseBudgetFromContext(ctx).Limit, 0); capErr != nil {
+			// Discard the entire turn, including the cursor already serialized
+			// above. A strict producer overshoot must never be resumable.
+			buf.Reset()
+			errWriter := ipc.NewWriter(&buf, ipc.WithSchema(outputSchema))
+			h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(errWriter, outputSchema, capErr, h.server.serverID, "", h.server.debugErrors))
+			h.logIPCWriteErr("close", info.Name, errWriter.Close())
+			handlerErr = capErr
+		}
 	} else {
 		// Exchange init — return state token (carry schema for dynamic methods)
 		token, err := h.packCursorToken(callID, state, auth)
@@ -316,7 +333,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			h.writeHttpError(w, http.StatusInternalServerError, err, nil)
 			return
 		}
-		callToken, err := h.packCallToken(callID, outputSchema, auth, streamID)
+		callToken, err := h.packCallToken(callID, outputSchema, auth, streamID, responseBudgetFromContext(ctx))
 		if err != nil {
 			h.writeHttpError(w, http.StatusInternalServerError, err, nil)
 			return
@@ -357,8 +374,9 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 // proxy see the failure without parsing Arrow. Mirrors the Python
 // reference, which flips the response status only on cap overshoot.
 func streamResponseStatus(handlerErr error) int {
-	var capErr *externalCapError
-	if errors.As(handlerErr, &capErr) {
+	var externalErr *externalCapError
+	var responseErr *responseCapError
+	if errors.As(handlerErr, &externalErr) || errors.As(handlerErr, &responseErr) {
 		return http.StatusInternalServerError
 	}
 	return http.StatusOK
@@ -371,6 +389,11 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 	auth, peerEvidence := identity.auth, identity.evidence
+	var budgetOK bool
+	r, budgetOK = h.applyResponseBudget(w, r, nil)
+	if !budgetOK {
+		return
+	}
 
 	method := r.PathValue("method")
 
@@ -494,6 +517,13 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
 	}
+	budget := responseBudgetFromContext(r.Context())
+	budget.Limit = minPositive(budget.Limit, call.ResponseLimit)
+	budget.Preferred = minPositive(budget.Preferred, call.PreferredResponse)
+	if budget.Preferred > 0 && budget.Limit > 0 && budget.Preferred > budget.Limit {
+		budget.Preferred = budget.Limit
+	}
+	r = r.WithContext(withHTTPResponseBudget(r.Context(), budget))
 
 	// Rehydrate non-serializable fields if a callback is registered
 	if h.rehydrateFunc != nil {
@@ -657,6 +687,14 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 			err = cerr
 		}
 	}
+	if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), 0,
+		responseBudgetFromContext(ctx).Limit, 0); capErr != nil {
+		buf.Reset()
+		errWriter := ipc.NewWriter(&buf, ipc.WithSchema(schema))
+		h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(errWriter, schema, capErr, h.server.serverID, "", h.server.debugErrors))
+		h.logIPCWriteErr("close", info.Name, errWriter.Close())
+		err = capErr
+	}
 	h.writeArrow(w, streamResponseStatus(err), buf.Bytes())
 	return err
 }
@@ -670,19 +708,22 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
 
 	out := newOutputCollector(schema, h.server.serverID, false)
-	out.setBudgets(h.maxResponseBytes, h.maxExternalizedResponseBytes, h.server.externalConfig != nil)
+	budget := responseBudgetFromContext(ctx)
+	out.setBudgets(budget.Limit, budget.Preferred, h.maxExternalizedResponseBytes, h.server.externalConfig != nil)
 	callCtx := &CallContext{
-		Ctx:               ctx,
-		ServerID:          h.server.serverID,
-		Method:            info.Name,
-		LogLevel:          LogTrace,
-		Auth:              auth,
-		PeerEvidence:      peerEvidence,
-		TransportMetadata: transportMeta,
-		Cookies:           cookies,
-		Kind:              TransportKindHTTP,
-		Implementation:    h.server.implementation,
-		stickySink:        sink,
+		Ctx:                    ctx,
+		ServerID:               h.server.serverID,
+		Method:                 info.Name,
+		LogLevel:               LogTrace,
+		Auth:                   auth,
+		PeerEvidence:           peerEvidence,
+		TransportMetadata:      transportMeta,
+		Cookies:                cookies,
+		Kind:                   TransportKindHTTP,
+		Implementation:         h.server.implementation,
+		ResponseLimitBytes:     budget.Limit,
+		PreferredResponseBytes: budget.Preferred,
+		stickySink:             sink,
 		// Surface the request batch's custom metadata to the handler, matching
 		// the pipe transports (server_stream.go sets it from the input batch).
 		// The framework's own transport keys are stripped first, exactly as on
@@ -738,7 +779,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	// Refuse an over-budget upload before flushing — exchange is lockstep,
 	// so the whole external budget belongs to this single emit and there is
 	// no prior accumulation to carry.
-	if capErr := h.checkExternalBudget(out, info.Name); capErr != nil {
+	if capErr := h.checkExternalBudget(ctx, out, info.Name); capErr != nil {
 		out.releaseBatches()
 		h.writeExchangeCapError(w, schema, info.Name, capErr)
 		return capErr
@@ -825,7 +866,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	// happens — and catches the case where the predicted size understated
 	// what actually went out.
 	if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), externalBytes,
-		h.maxResponseBytes, h.maxExternalizedResponseBytes); capErr != nil {
+		budget.Limit, h.maxExternalizedResponseBytes); capErr != nil {
 		h.writeExchangeCapError(w, schema, info.Name, capErr)
 		return capErr
 	}
@@ -869,7 +910,18 @@ func (h *HttpServer) externalizeStreamDataBatch(ctx context.Context, batch arrow
 	if h.server.externalConfig == nil || batch.NumRows() == 0 {
 		return batch, 0, false
 	}
-	extBatch, extMeta, rawBytes, err := externalizeBatchCtx(ctx, batch, arrow.Metadata{}, h.server.externalConfig)
+	budget := responseBudgetFromContext(ctx)
+	forceAt := budget.Preferred
+	if forceAt == 0 {
+		forceAt = budget.Limit
+	}
+	force := false
+	if forceAt > 0 {
+		if encoded, err := serializeBatchAsIPC(batch, nil); err == nil {
+			force = int64(len(encoded)) > forceAt
+		}
+	}
+	extBatch, extMeta, rawBytes, err := externalizeBatchCtxMode(ctx, batch, arrow.Metadata{}, h.server.externalConfig, force)
 	if err != nil {
 		slog.Error("failed to externalize stream batch", "err", err)
 		return batch, 0, false
@@ -896,11 +948,23 @@ func (h *HttpServer) externalizeStreamDataBatch(ctx context.Context, batch arrow
 // which get a soft wire cap: by the time a continuation token could carry
 // the overshoot to the next turn, the bytes are already in object storage
 // and the egress is already billed.
-func (h *HttpServer) checkExternalBudget(out *OutputCollector, method string) error {
+func (h *HttpServer) checkExternalBudget(ctx context.Context, out *OutputCollector, method string) error {
 	if h.server.externalConfig == nil || h.maxExternalizedResponseBytes <= 0 || out.dataBatchIdx < 0 {
 		return nil
 	}
 	predicted := predictExternalizeBytes(out.batches[out.dataBatchIdx].batch, h.server.externalConfig)
+	if predicted == 0 {
+		budget := responseBudgetFromContext(ctx)
+		forceAt := budget.Preferred
+		if forceAt == 0 {
+			forceAt = budget.Limit
+		}
+		if forceAt > 0 {
+			if encoded, err := serializeBatchAsIPC(out.batches[out.dataBatchIdx].batch, nil); err == nil && int64(len(encoded)) > forceAt {
+				predicted = int64(len(encoded))
+			}
+		}
+	}
 	if predicted == 0 {
 		return nil
 	}
@@ -981,19 +1045,22 @@ func (h *HttpServer) runProduceTurn(ctx context.Context, writer *ipc.Writer, sch
 	}
 	out := newOutputCollector(schema, h.server.serverID, true)
 	remainingExternal := h.maxExternalizedResponseBytes
-	out.setBudgets(h.maxResponseBytes, remainingExternal, h.server.externalConfig != nil)
+	budget := responseBudgetFromContext(ctx)
+	out.setBudgets(budget.Limit, budget.Preferred, remainingExternal, h.server.externalConfig != nil)
 	callCtx := &CallContext{
-		Ctx:               ctx,
-		ServerID:          h.server.serverID,
-		Method:            info.Name,
-		LogLevel:          LogTrace,
-		Auth:              auth,
-		PeerEvidence:      peerEvidence,
-		TransportMetadata: transportMeta,
-		Cookies:           cookies,
-		Kind:              TransportKindHTTP,
-		Implementation:    h.server.implementation,
-		stickySink:        sink,
+		Ctx:                    ctx,
+		ServerID:               h.server.serverID,
+		Method:                 info.Name,
+		LogLevel:               LogTrace,
+		Auth:                   auth,
+		PeerEvidence:           peerEvidence,
+		TransportMetadata:      transportMeta,
+		Cookies:                cookies,
+		Kind:                   TransportKindHTTP,
+		Implementation:         h.server.implementation,
+		ResponseLimitBytes:     budget.Limit,
+		PreferredResponseBytes: budget.Preferred,
+		stickySink:             sink,
 	}
 	callCtx.InputMetadata = firstTickMeta
 
@@ -1024,7 +1091,7 @@ func (h *HttpServer) runProduceTurn(ctx context.Context, writer *ipc.Writer, sch
 	// Refuse an over-budget upload before flushing anything from this
 	// cycle — see checkExternalBudget for why the external cap gets no
 	// continuation-token escape.
-	if capErr := h.checkExternalBudget(out, info.Name); capErr != nil {
+	if capErr := h.checkExternalBudget(ctx, out, info.Name); capErr != nil {
 		out.releaseBatches()
 		h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(writer, schema, capErr, h.server.serverID, "", h.server.debugErrors))
 		return false, capErr

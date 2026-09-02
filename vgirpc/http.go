@@ -125,12 +125,15 @@ type HttpServer struct {
 
 	// Server-vended client externalization (capability advertisement +
 	// __upload_url__/init route + 413 enforcement on inline POSTs).
-	uploadURLProvider UploadURLProvider
-	maxRequestBytes   int64 // 0 = no limit / not advertised
-	maxUploadBytes    int64 // 0 = not advertised
+	uploadURLProvider      UploadURLProvider
+	maxRequestBytes        int64 // 0 = no limit / not advertised
+	hostingMaxRequestBytes int64 // 0 = no hosting limit
+	maxUploadBytes         int64 // 0 = not advertised
 
 	// Response caps (advertised + enforced). 0 = unbounded.
 	maxResponseBytes             int64
+	hostingMaxResponseBytes      int64
+	preferredResponseBytes       int64
 	maxExternalizedResponseBytes int64
 
 	// Sticky sessions (HTTP-only, opt-in). nil unless EnableSticky was called.
@@ -284,11 +287,13 @@ func (h *HttpServer) SetCorsMaxAge(seconds int) {
 // Capability advertisement header names. Mirror the Python reference
 // (vgi_rpc/http/_common.py) so cross-implementation clients agree.
 const (
-	maxRequestBytesHeader    = "VGI-Max-Request-Bytes"
-	uploadURLHeader          = "VGI-Upload-URL-Support"
-	maxUploadBytesHeader     = "VGI-Max-Upload-Bytes"
-	supportedEncodingsHeader = "VGI-Supported-Encodings"
-	capabilityCacheMaxAge    = 300 // seconds; OPTIONS Cache-Control max-age
+	maxRequestBytesHeader               = "VGI-Max-Request-Bytes"
+	acceptMaxResponseBytesHeader        = "VGI-Accept-Max-Response-Bytes"
+	acceptMaxResponseBytesSupportHeader = "VGI-Accept-Max-Response-Bytes-Support"
+	uploadURLHeader                     = "VGI-Upload-URL-Support"
+	maxUploadBytesHeader                = "VGI-Max-Upload-Bytes"
+	supportedEncodingsHeader            = "VGI-Supported-Encodings"
+	capabilityCacheMaxAge               = 300 // seconds; OPTIONS Cache-Control max-age
 )
 
 // defaultCorsAllowHeaders is the Access-Control-Allow-Headers value used when
@@ -297,7 +302,7 @@ const (
 // server did not list.
 const defaultCorsAllowHeaders = "Content-Type, Authorization, " +
 	customAcceptEncodingHeader + ", " + stickySessionHeader + ", " +
-	stickySessionAcceptHeader + ", " + ProofHeader
+	stickySessionAcceptHeader + ", " + ProofHeader + ", " + acceptMaxResponseBytesHeader
 
 // addCapabilityHeaders writes the advertised capability headers (when
 // configured) on every response. On OPTIONS responses an additional
@@ -317,12 +322,13 @@ func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool)
 	// Absent means a legacy server, which clients read as {zstd} per the
 	// Python reference. A client must be able to tell those apart.
 	w.Header().Set(supportedEncodingsHeader, h.supportedEncodingsValue)
-	if h.maxRequestBytes > 0 {
-		w.Header().Set(maxRequestBytesHeader, strconv.FormatInt(h.maxRequestBytes, 10))
+	if limit := h.effectiveRequestLimit(); limit > 0 {
+		w.Header().Set(maxRequestBytesHeader, strconv.FormatInt(limit, 10))
 	}
-	if h.maxResponseBytes > 0 {
-		w.Header().Set(maxResponseBytesHeader, strconv.FormatInt(h.maxResponseBytes, 10))
+	if limit := minPositive(h.maxResponseBytes, h.hostingMaxResponseBytes); limit > 0 {
+		w.Header().Set(maxResponseBytesHeader, strconv.FormatInt(limit, 10))
 	}
+	w.Header().Set(acceptMaxResponseBytesSupportHeader, "true")
 	if h.maxExternalizedResponseBytes > 0 {
 		w.Header().Set(maxExternalizedResponseBytesHeader, strconv.FormatInt(h.maxExternalizedResponseBytes, 10))
 	}
@@ -397,14 +403,14 @@ func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, r *http.Request, isOp
 		expose := []string{
 			"WWW-Authenticate", requestIDHeader, customContentEncodingHeader, rpcErrorHeader,
 			maxResponseBytesHeader, maxExternalizedResponseBytesHeader, externalizationEnabledHeader,
-			supportedEncodingsHeader,
+			supportedEncodingsHeader, acceptMaxResponseBytesSupportHeader,
 			stickyEnabledHeader, stickyDefaultTTLHeader, stickyEchoHeadersHeader,
 			stickySessionHeader, stickySessionCloseHeader,
 		}
 		// Exposed only when actually emitted, mirroring the header itself.
 		// Each condition is the one addCapabilityHeaders advertises under, so
 		// the two cannot drift into advertising something a browser can't read.
-		if h.maxRequestBytes > 0 {
+		if h.effectiveRequestLimit() > 0 {
 			expose = append(expose, maxRequestBytesHeader)
 		}
 		if h.uploadURLProvider != nil {
@@ -609,6 +615,13 @@ func (h *HttpServer) SetUploadURLProvider(p UploadURLProvider) {
 // enforcement.
 func (h *HttpServer) SetMaxRequestBytes(n int64) {
 	h.maxRequestBytes = n
+}
+
+// SetHostingMaxRequestBytes sets an optional limit imposed by the hosting
+// platform. The enforced and advertised request limit is the smaller positive
+// value of this limit and SetMaxRequestBytes.
+func (h *HttpServer) SetHostingMaxRequestBytes(n int64) {
+	h.hostingMaxRequestBytes = n
 }
 
 // SetMaxUploadBytes sets the maximum upload size advertised via
@@ -1099,6 +1112,19 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	requestID := resolveRequestID(r)
 	w.Header().Set(requestIDHeader, requestID)
 
+	// Parse the client limit in the matched RPC handler, after authentication.
+	// The request-local budget cell starts with configured limits and is updated
+	// by dispatch, allowing the final safety-net writer to enforce the fully
+	// negotiated (and, for continuations, sealed) limit on every response shape.
+	limit := minPositive(h.maxResponseBytes, h.hostingMaxResponseBytes)
+	preferred := h.preferredResponseBytes
+	if preferred > 0 && limit > 0 && preferred > limit {
+		preferred = limit
+	}
+	budget := httpResponseBudget{Limit: limit, Preferred: preferred}
+	r = r.WithContext(withHTTPResponseBudget(r.Context(), budget))
+	budgetState := responseBudgetStateFromContext(r.Context())
+
 	// Egress accounting + deferred access-log emission, installed only when
 	// something is actually consuming the records. The recorder measures the
 	// response after compression, so it has to outlive the compressing
@@ -1146,23 +1172,17 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.addCorsHeaders(w, r, true)
+		if _, err := h.responseBudget(r.Header); err != nil {
+			w.Header().Set(rpcErrorHeader, "true")
+			h.writeHttpError(w, http.StatusBadRequest, &RpcError{Type: "ValueError", Message: err.Error()}, nil)
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 
 	// Add CORS headers to all non-OPTIONS responses.
 	h.addCorsHeaders(w, r, false)
-
-	// Enforce the advertised max_request_bytes cap on RPC routes. The
-	// upload-URL control request is included because its Arrow payload is
-	// client-controlled; only payload-free health routes are exempt.
-	if h.maxRequestBytes > 0 && r.ContentLength > h.maxRequestBytes && !h.isMaxBytesExempt(r.URL.Path) {
-		http.Error(w, fmt.Sprintf(
-			"Request body of %d bytes exceeds max_request_bytes=%d. Use the upload-URL flow (__upload_url__/init) to externalize large inputs.",
-			r.ContentLength, h.maxRequestBytes,
-		), http.StatusRequestEntityTooLarge)
-		return
-	}
 
 	// The producible set is empty when compression is disabled, which makes
 	// negotiation a no-op — the length check is just the fast path, not a
@@ -1181,11 +1201,15 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				useCustomHeader: useCustomHeader,
 			}
 			defer cw.finish()
-			h.mux.ServeHTTP(cw, r)
+			capped := newResponseCapWriter(cw, budgetState, h, r.URL.Path)
+			h.mux.ServeHTTP(capped, r)
+			capped.finish()
 			return
 		}
 	}
-	h.mux.ServeHTTP(w, r)
+	capped := newResponseCapWriter(w, budgetState, h, r.URL.Path)
+	h.mux.ServeHTTP(capped, r)
+	capped.finish()
 }
 
 // compressResponseWriter buffers the response body and compresses it with zstd

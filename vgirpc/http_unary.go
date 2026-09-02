@@ -22,6 +22,11 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth, peerEvidence := identity.auth, identity.evidence
+	var budgetOK bool
+	r, budgetOK = h.applyResponseBudget(w, r, nil)
+	if !budgetOK {
+		return
+	}
 
 	method := r.PathValue("method")
 
@@ -154,17 +159,19 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	stats.RecordInput(req.Batch.NumRows(), batchBufferSize(req.Batch))
 
 	callCtx := &CallContext{
-		Ctx:               ctx,
-		RequestID:         req.RequestID,
-		ServerID:          h.server.serverID,
-		Method:            method,
-		LogLevel:          LogLevel(req.LogLevel),
-		Auth:              auth,
-		PeerEvidence:      peerEvidence,
-		TransportMetadata: transportMeta,
-		Cookies:           buildHTTPCookies(r),
-		Kind:              TransportKindHTTP,
-		Implementation:    h.server.implementation,
+		Ctx:                    ctx,
+		RequestID:              req.RequestID,
+		ServerID:               h.server.serverID,
+		Method:                 method,
+		LogLevel:               LogLevel(req.LogLevel),
+		Auth:                   auth,
+		PeerEvidence:           peerEvidence,
+		TransportMetadata:      transportMeta,
+		Cookies:                buildHTTPCookies(r),
+		Kind:                   TransportKindHTTP,
+		Implementation:         h.server.implementation,
+		ResponseLimitBytes:     responseBudgetFromContext(r.Context()).Limit,
+		PreferredResponseBytes: responseBudgetFromContext(r.Context()).Preferred,
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
@@ -310,10 +317,36 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		handlerErr = err
 	}
 
+	// A client or hosting limit can be lower than the operator's normal
+	// externalization threshold. Give an otherwise-oversized inline result one
+	// forced externalization attempt before enforcing the hard response cap.
+	budget := responseBudgetFromContext(r.Context())
+	if budget.Limit > 0 && int64(buf.Len()) > budget.Limit && externalBytesWritten == 0 &&
+		h.server.externalConfig != nil && resultBatch.NumRows() > 0 {
+		if raw, serErr := serializeBatchAsIPC(resultBatch, nil); serErr == nil &&
+			(h.maxExternalizedResponseBytes <= 0 || int64(len(raw)) <= h.maxExternalizedResponseBytes) {
+			extBatch, extMeta, rawBytes, extErr := externalizeBatchCtxMode(ctx, resultBatch, arrow.Metadata{}, h.server.externalConfig, true)
+			if extErr != nil {
+				slog.Error("failed to rescue oversized unary response via externalization", "method", info.Name, "err", extErr)
+			} else if extBatch != resultBatch {
+				withMeta := array.NewRecordBatchWithMetadata(extBatch.Schema(), extBatch.Columns(), extBatch.NumRows(), extMeta)
+				resultBatch.Release()
+				extBatch.Release()
+				resultBatch = withMeta
+				externalBytesWritten = rawBytes
+				buf.Reset()
+				if writeErr := WriteUnaryResponse(&buf, info.ResultSchema, logs, resultBatch, h.server.serverID, req.RequestID); writeErr != nil {
+					h.logIPCWriteErr("unary-response", info.Name, writeErr)
+					handlerErr = writeErr
+				}
+			}
+		}
+	}
+
 	// Post-flush enforcement of both caps. Wire body cap is hard for unary;
 	// overshoot replaces the response with a fresh EXCEPTION-only stream.
 	if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), externalBytesWritten,
-		h.maxResponseBytes, h.maxExternalizedResponseBytes); capErr != nil {
+		budget.Limit, h.maxExternalizedResponseBytes); capErr != nil {
 		handlerErr = capErr
 		h.writeUnaryCapError(w, info, req.RequestID, nil, capErr)
 		return

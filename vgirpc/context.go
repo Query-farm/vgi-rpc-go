@@ -57,6 +57,14 @@ type CallContext struct {
 	// stream state lifecycle) read it to dispatch through helper methods on
 	// the impl without holding their own captured reference. nil by default.
 	Implementation any
+	// ResponseLimitBytes is the effective hard HTTP response limit after
+	// application, hosting, and client-advertised limits are combined. Zero
+	// means unbounded or not applicable. It is off-wire and immutable.
+	ResponseLimitBytes int64
+	// PreferredResponseBytes is the application's preferred response target,
+	// clamped to ResponseLimitBytes when a hard limit is present. Zero means no
+	// preference was configured.
+	PreferredResponseBytes int64
 	// stickySink is the per-request bridge to the HTTP sticky session
 	// machinery. nil on non-HTTP transports and on HTTP servers without
 	// sticky enabled — CallContext.OpenSession / CloseSession check for

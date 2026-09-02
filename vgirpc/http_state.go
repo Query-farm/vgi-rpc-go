@@ -47,10 +47,12 @@ func RegisterStateType(v interface{}) {
 // [MetaCallState], echoed by the client on every subsequent request, and
 // never re-issued.
 type callTokenData struct {
-	CreatedAt int64
-	CallID    string // 32-char lowercase hex; binds this call to its cursors
-	SchemaIPC []byte // serialized output schema for dynamic methods; nil for static
-	StreamID  string // stable across init/continuations of one stream call
+	CreatedAt         int64
+	CallID            string // 32-char lowercase hex; binds this call to its cursors
+	SchemaIPC         []byte // serialized output schema for dynamic methods; nil for static
+	StreamID          string // stable across init/continuations of one stream call
+	ResponseLimit     int64
+	PreferredResponse int64
 }
 
 // cursorTokenData is the advancing half: re-minted every turn under
@@ -64,8 +66,10 @@ type cursorTokenData struct {
 // resolvedCall is what an authenticated CallID resolves to — either from the
 // cache or by opening the client's call token.
 type resolvedCall struct {
-	SchemaIPC []byte
-	StreamID  string
+	SchemaIPC         []byte
+	StreamID          string
+	ResponseLimit     int64
+	PreferredResponse int64
 }
 
 // defaultCallStateCacheEntries bounds the per-process call cache.
@@ -469,11 +473,13 @@ func normalizeTokenKey(key []byte) []byte {
 
 // packCallToken seals the half of a stream's state that is fixed for the
 // life of the call. Minted once, by /init; never re-issued.
-func (h *HttpServer) packCallToken(callID string, outputSchema *arrow.Schema, auth *AuthContext, streamID string) ([]byte, error) {
+func (h *HttpServer) packCallToken(callID string, outputSchema *arrow.Schema, auth *AuthContext, streamID string, budget httpResponseBudget) ([]byte, error) {
 	data := callTokenData{
-		CreatedAt: time.Now().Unix(),
-		CallID:    callID,
-		StreamID:  streamID,
+		CreatedAt:         time.Now().Unix(),
+		CallID:            callID,
+		StreamID:          streamID,
+		ResponseLimit:     budget.Limit,
+		PreferredResponse: budget.Preferred,
 	}
 	if outputSchema != nil {
 		data.SchemaIPC = serializeSchema(outputSchema)
@@ -484,7 +490,10 @@ func (h *HttpServer) packCallToken(callID string, outputSchema *arrow.Schema, au
 	}
 	// Warm the cache with the values we already hold, so this stream's first
 	// continuation does not have to open the token it was just handed.
-	h.callStates.put(callID, auth, &resolvedCall{SchemaIPC: data.SchemaIPC, StreamID: streamID})
+	h.callStates.put(callID, auth, &resolvedCall{
+		SchemaIPC: data.SchemaIPC, StreamID: streamID,
+		ResponseLimit: data.ResponseLimit, PreferredResponse: data.PreferredResponse,
+	})
 	return token, nil
 }
 
@@ -548,7 +557,10 @@ func (h *HttpServer) resolveCall(cursor *cursorTokenData, callToken []byte, auth
 		return nil, &RpcError{Type: "RuntimeError", Message: "Malformed state token"}
 	}
 
-	got := &resolvedCall{SchemaIPC: data.SchemaIPC, StreamID: data.StreamID}
+	got := &resolvedCall{
+		SchemaIPC: data.SchemaIPC, StreamID: data.StreamID,
+		ResponseLimit: data.ResponseLimit, PreferredResponse: data.PreferredResponse,
+	}
 	h.callStates.put(cursor.CallID, auth, got)
 	return got, nil
 }

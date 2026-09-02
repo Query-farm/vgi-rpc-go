@@ -156,7 +156,7 @@ func TestResolveCallFallsBackToTheClientToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	callToken, err := h.packCallToken(callID, nil, nil, "sid-42")
+	callToken, err := h.packCallToken(callID, nil, nil, "sid-42", httpResponseBudget{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestResolveCallRejectsAMismatchedCallID(t *testing.T) {
 	h := NewHttpServer(NewServer())
 	callA, _ := newCallID()
 	callB, _ := newCallID()
-	tokenB, err := h.packCallToken(callB, nil, nil, "sid-b")
+	tokenB, err := h.packCallToken(callB, nil, nil, "sid-b", httpResponseBudget{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestCallAndCursorTokensAreNotInterchangeable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	callToken, err := h.packCallToken(callID, nil, nil, "sid")
+	callToken, err := h.packCallToken(callID, nil, nil, "sid", httpResponseBudget{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -266,11 +266,14 @@ func main() {
 		var otelExportPath string
 		externalizeThreshold := int64(-1) // -1 == not specified
 		maxRequestBytes := int64(-1)      // -1 == not specified
+		hostingMaxRequestBytes := int64(-1)
 		// Strict-mode response caps (default 1 MiB matches Python's
 		// tests/serve_conformance_http_strict.py — large enough that
 		// incidental tests don't trip while still being small enough that
 		// the http_response_cap.* tests' 4x targets clearly overshoot).
 		maxResponseBytes := int64(1024 * 1024)
+		hostingMaxResponseBytes := int64(-1)
+		preferredResponseBytes := int64(-1)
 		maxExternalizedResponseBytes := int64(1024 * 1024)
 		var strictFakeStorageURL string
 		for i := 2; i < len(os.Args)-1; i++ {
@@ -291,6 +294,13 @@ func main() {
 					os.Exit(1)
 				}
 				maxRequestBytes = v
+			case "--hosting-max-request-bytes":
+				v, err := strconv.ParseInt(os.Args[i+1], 10, 64)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "invalid --hosting-max-request-bytes: %v\n", err)
+					os.Exit(1)
+				}
+				hostingMaxRequestBytes = v
 			case "--max-response-bytes":
 				v, err := strconv.ParseInt(os.Args[i+1], 10, 64)
 				if err != nil {
@@ -298,6 +308,20 @@ func main() {
 					os.Exit(1)
 				}
 				maxResponseBytes = v
+			case "--hosting-max-response-bytes":
+				v, err := strconv.ParseInt(os.Args[i+1], 10, 64)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "invalid --hosting-max-response-bytes: %v\n", err)
+					os.Exit(1)
+				}
+				hostingMaxResponseBytes = v
+			case "--preferred-response-bytes":
+				v, err := strconv.ParseInt(os.Args[i+1], 10, 64)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "invalid --preferred-response-bytes: %v\n", err)
+					os.Exit(1)
+				}
+				preferredResponseBytes = v
 			case "--max-externalized-response-bytes":
 				v, err := strconv.ParseInt(os.Args[i+1], 10, 64)
 				if err != nil {
@@ -428,6 +452,15 @@ func main() {
 			httpServer.SetMaxRequestBytes(maxRequestBytes)
 		} else if fakeStorage != nil {
 			httpServer.SetMaxRequestBytes(4096)
+		}
+		if hostingMaxRequestBytes > 0 {
+			httpServer.SetHostingMaxRequestBytes(hostingMaxRequestBytes)
+		}
+		if hostingMaxResponseBytes > 0 {
+			httpServer.SetHostingMaxResponseBytes(hostingMaxResponseBytes)
+		}
+		if preferredResponseBytes > 0 {
+			httpServer.SetPreferredResponseBytes(preferredResponseBytes)
 		}
 		// Disabling the call-state cache forces every stream continuation down
 		// the cache-miss path, so the client's obligation to echo the call

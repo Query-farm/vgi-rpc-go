@@ -291,6 +291,19 @@ func externalizeBatchCtx(
 	meta arrow.Metadata,
 	config *ExternalLocationConfig,
 ) (arrow.RecordBatch, arrow.Metadata, int64, error) {
+	return externalizeBatchCtxMode(ctx, batch, meta, config, false)
+}
+
+// externalizeBatchCtxMode is the response-budget escape valve. force bypasses
+// only the configured size threshold; zero-row and missing-storage guards,
+// accounting, compression, hashing, and upload behavior remain identical.
+func externalizeBatchCtxMode(
+	ctx context.Context,
+	batch arrow.RecordBatch,
+	meta arrow.Metadata,
+	config *ExternalLocationConfig,
+	force bool,
+) (arrow.RecordBatch, arrow.Metadata, int64, error) {
 	if config == nil || config.Storage == nil {
 		return batch, meta, 0, nil
 	}
@@ -302,7 +315,7 @@ func externalizeBatchCtx(
 
 	// Check threshold
 	size := batchBufferSize(batch)
-	if size < config.threshold() {
+	if !force && size < config.threshold() {
 		return batch, meta, 0, nil
 	}
 

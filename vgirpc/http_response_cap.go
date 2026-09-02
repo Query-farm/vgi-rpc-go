@@ -21,10 +21,34 @@ const (
 // land on the wire). Externalised payloads do not count against this —
 // only their tiny pointer batches reach the wire. The cap is *hard* for
 // unary and stream-exchange (overshoot surfaces as 200 + EXCEPTION batch
-// with X-VGI-RPC-Error) and *soft* for producer streams (continuation
-// tokens cover overshoot). Set to 0 to disable.
+// with X-VGI-RPC-Error). Producer turns are strict as well: an oversized
+// response is discarded in full and never exposes a continuation cursor.
+// Set to 0 to disable.
 func (h *HttpServer) SetMaxResponseBytes(n int64) {
+	validateConfiguredResponseBudget(n, "max response bytes")
 	h.maxResponseBytes = n
+}
+
+// SetHostingMaxResponseBytes sets an optional response limit imposed by the
+// hosting platform. The effective limit is the smallest positive application,
+// hosting, and client-advertised limit.
+func (h *HttpServer) SetHostingMaxResponseBytes(n int64) {
+	validateConfiguredResponseBudget(n, "hosting max response bytes")
+	h.hostingMaxResponseBytes = n
+}
+
+// SetPreferredResponseBytes gives worker code a target below the hard limit.
+// The per-request value is clamped to the effective response limit and exposed
+// only through CallContext and OutputCollector; it is not a wire header.
+func (h *HttpServer) SetPreferredResponseBytes(n int64) {
+	validateConfiguredResponseBudget(n, "preferred response bytes")
+	h.preferredResponseBytes = n
+}
+
+func validateConfiguredResponseBudget(n int64, name string) {
+	if n != 0 && (n < minResponseBudgetBytes || n > maxSafeDecimal) {
+		panic(fmt.Sprintf("vgirpc: %s must be 0 or between %d and %d", name, minResponseBudgetBytes, maxSafeDecimal))
+	}
 }
 
 // SetMaxExternalizedResponseBytes caps the total bytes uploaded to
@@ -64,6 +88,17 @@ func (e *externalCapError) ErrorType() string { return "RuntimeError" }
 func newExternalCapError(method string, projected, capBytes int64) *externalCapError {
 	return &externalCapError{msg: fmt.Sprintf(
 		"Externalised payload exceeds max_externalized_response_bytes (%d > %d) for method %q",
+		projected, capBytes, method)}
+}
+
+type responseCapError struct{ msg string }
+
+func (e *responseCapError) Error() string     { return e.msg }
+func (e *responseCapError) ErrorType() string { return "ResponseTooLargeError" }
+
+func newResponseCapError(method string, projected, capBytes int64) *responseCapError {
+	return &responseCapError{msg: fmt.Sprintf(
+		"HTTP body exceeds max_response_bytes (%d > %d) for method %q",
 		projected, capBytes, method)}
 }
 
@@ -108,7 +143,7 @@ func predictExternalizeBytes(batch arrow.RecordBatch, config *ExternalLocationCo
 // "max_externalized_response_bytes".
 func enforceResponseBudgets(method string, wireBytes, externalBytes, wireCap, externalCap int64) error {
 	if wireCap > 0 && wireBytes > wireCap {
-		return fmt.Errorf("HTTP body exceeds max_response_bytes (%d > %d) for method %q", wireBytes, wireCap, method)
+		return newResponseCapError(method, wireBytes, wireCap)
 	}
 	if externalCap > 0 && externalBytes > externalCap {
 		return newExternalCapError(method, externalBytes, externalCap)

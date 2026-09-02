@@ -8,6 +8,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -23,6 +24,17 @@ import (
 
 type clientLifecycleProducer struct {
 	emitted bool
+}
+
+func newResponseBudgetTestServer(handler http.HandlerFunc) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(acceptMaxResponseBytesSupportHeader, "true")
+		if r.Method == http.MethodOptions && strings.HasSuffix(r.URL.Path, "/health") {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		handler(w, r)
+	}))
 }
 
 func (s *clientLifecycleProducer) Produce(_ context.Context, out *OutputCollector, _ *CallContext) error {
@@ -115,7 +127,7 @@ func TestHttpClientRejectsMultipleProducerBatchesPerTurn(t *testing.T) {
 	first.Release()
 	second.Release()
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", arrowContentType)
 		_, _ = w.Write(body.Bytes())
 	}))
@@ -172,7 +184,7 @@ func TestHttpClientRejectsRPCErrorHeaderWithoutException(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", arrowContentType)
 		w.Header().Set(rpcErrorHeader, "true")
 		_, _ = w.Write(body)
@@ -203,7 +215,7 @@ func TestHttpClientPoisonsAmbiguousExchange(t *testing.T) {
 		t.Fatal(err)
 	}
 	var exchanges atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", arrowContentType)
 		if strings.HasSuffix(r.URL.Path, "/init") {
 			_, _ = w.Write(initBody)
@@ -294,7 +306,7 @@ func TestHttpClientRejectsExchangeInputSchemaMetadataDriftBeforeDispatch(t *test
 		t.Fatal(err)
 	}
 	var exchanges atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", arrowContentType)
 		if strings.HasSuffix(r.URL.Path, "/init") {
 			_, _ = w.Write(initBody)
@@ -342,7 +354,7 @@ func TestHttpClientRejectsResponseSchemaMetadataDrift(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", arrowContentType)
 		_, _ = w.Write(body)
 	}))
@@ -360,7 +372,7 @@ func TestHttpClientRejectsResponseSchemaMetadataDrift(t *testing.T) {
 }
 
 func TestHttpClientRejectsUnknownResponseEncoding(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(contentEncodingHeader, "br")
 		_, _ = w.Write([]byte("encoded"))
 	}))
@@ -380,7 +392,7 @@ func TestHttpClientRejectsUnknownResponseEncoding(t *testing.T) {
 
 func TestHttpClientCapsIPCSerializationBeforeDispatch(t *testing.T) {
 	var requests atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		requests.Add(1)
 	}))
 	defer server.Close()
@@ -402,10 +414,10 @@ func TestHttpClientCapsIPCSerializationBeforeDispatch(t *testing.T) {
 
 func TestHttpClientCapsKnownLengthResponseAndRecovers(t *testing.T) {
 	valid := validEmptyClientResponse(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "oversized") {
-			body := bytes.Repeat([]byte("x"), 1024)
-			w.Header().Set("Content-Length", "1024")
+			body := bytes.Repeat([]byte("x"), 70_000)
+			w.Header().Set("Content-Length", "70000")
 			_, _ = w.Write(body)
 			return
 		}
@@ -413,7 +425,7 @@ func TestHttpClientCapsKnownLengthResponseAndRecovers(t *testing.T) {
 		_, _ = w.Write(valid)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL, WithClientResponseLimits(256, 512))
+	client, err := NewHttpClient(server.URL, WithClientResponseLimits(64<<10, 128<<10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +435,7 @@ func TestHttpClientCapsKnownLengthResponseAndRecovers(t *testing.T) {
 
 func TestHttpClientCapsChunkedResponseAndRecovers(t *testing.T) {
 	valid := validEmptyClientResponse(t)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "oversized") {
 			flusher, ok := w.(http.Flusher)
 			if !ok {
@@ -431,7 +443,7 @@ func TestHttpClientCapsChunkedResponseAndRecovers(t *testing.T) {
 				return
 			}
 			for range 8 {
-				_, _ = w.Write(bytes.Repeat([]byte("x"), 64))
+				_, _ = w.Write(bytes.Repeat([]byte("x"), 16<<10))
 				flusher.Flush()
 			}
 			return
@@ -440,7 +452,7 @@ func TestHttpClientCapsChunkedResponseAndRecovers(t *testing.T) {
 		_, _ = w.Write(valid)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL, WithClientResponseLimits(256, 512))
+	client, err := NewHttpClient(server.URL, WithClientResponseLimits(64<<10, 128<<10))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,13 +464,13 @@ func TestHttpClientCapsDecodedResponseAndRecovers(t *testing.T) {
 	valid := validEmptyClientResponse(t)
 	var compressed bytes.Buffer
 	zw := gzip.NewWriter(&compressed)
-	if _, err := zw.Write(bytes.Repeat([]byte("expanded"), 1024)); err != nil {
+	if _, err := zw.Write(bytes.Repeat([]byte("expanded"), 10_000)); err != nil {
 		t.Fatal(err)
 	}
 	if err := zw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "oversized") {
 			w.Header().Set(contentEncodingHeader, "gzip")
 			_, _ = w.Write(compressed.Bytes())
@@ -468,12 +480,198 @@ func TestHttpClientCapsDecodedResponseAndRecovers(t *testing.T) {
 		_, _ = w.Write(valid)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL, WithClientResponseLimits(1024, 512))
+	client, err := NewHttpClient(server.URL, WithClientResponseLimits(128<<10, 64<<10))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.Close()
 	assertClientResponseCapAndRecovery(t, client, "oversized", "decode HTTP response")
+}
+
+func TestHttpClientAcceptedLimitAndLocalCeilingsAreOrderIndependent(t *testing.T) {
+	const accepted = int64(1 << 30)
+	for _, tc := range []struct {
+		name    string
+		options []HttpClientOption
+	}{
+		{
+			name: "accepted then transport limits",
+			options: []HttpClientOption{
+				WithClientAcceptedMaxResponseBytes(accepted),
+				WithClientResponseLimits(512<<20, 768<<20),
+			},
+		},
+		{
+			name: "transport limits then accepted",
+			options: []HttpClientOption{
+				WithClientResponseLimits(512<<20, 768<<20),
+				WithClientAcceptedMaxResponseBytes(accepted),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := NewHttpClient("http://example.test", tc.options...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			if client.acceptedMaxResponse != 512<<20 || client.maxEncoded != 512<<20 || client.maxDecoded != 768<<20 {
+				t.Fatalf("accepted=%d encoded=%d decoded=%d, want 512MiB/512MiB/768MiB",
+					client.acceptedMaxResponse, client.maxEncoded, client.maxDecoded)
+			}
+		})
+	}
+	if _, err := NewHttpClient("http://example.test", WithClientResponseLimits(1024, 1024)); err == nil {
+		t.Fatal("response limits below the wire minimum produced an untruthful accepted advertisement")
+	}
+}
+
+func TestHttpClientAcceptedOneGiBRaisesDefaultLocalCeilings(t *testing.T) {
+	const accepted = int64(1 << 30)
+	var advertised string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		advertised = r.Header.Get(acceptMaxResponseBytesHeader)
+		w.Header().Set(acceptMaxResponseBytesSupportHeader, "true")
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	client, err := NewHttpClient(server.URL, WithClientAcceptedMaxResponseBytes(accepted))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if client.acceptedMaxResponse != accepted || client.maxEncoded != accepted || client.maxDecoded != accepted {
+		t.Fatalf("accepted=%d encoded=%d decoded=%d, want all %d",
+			client.acceptedMaxResponse, client.maxEncoded, client.maxDecoded, accepted)
+	}
+	if _, err := client.DiscoverCapabilities(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if advertised != "1073741824" {
+		t.Fatalf("advertised accepted response limit = %q, want 1073741824", advertised)
+	}
+}
+
+func TestHttpClientRequiresAndCachesResponseBudgetDiscovery(t *testing.T) {
+	var options atomic.Int64
+	var posts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(acceptMaxResponseBytesSupportHeader, "true")
+		if r.Method == http.MethodOptions {
+			options.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		posts.Add(1)
+		w.Header().Set("Content-Type", arrowContentType)
+		_, _ = w.Write(validEmptyClientResponse(t))
+	}))
+	defer server.Close()
+	client, err := NewHttpClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	params := emptyBatch(arrow.NewSchema(nil, nil))
+	defer params.Release()
+	for range 2 {
+		result, err := client.CallUnary(context.Background(), "method", params, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result.Release()
+	}
+	if got := options.Load(); got != 1 {
+		t.Fatalf("OPTIONS requests = %d, want one cached discovery", got)
+	}
+	if got := posts.Load(); got != 2 {
+		t.Fatalf("POST requests = %d, want two RPC dispatches", got)
+	}
+}
+
+func TestHttpClientRejectsUnsupportedResponseBudgetBeforeDispatch(t *testing.T) {
+	var posts atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		posts.Add(1)
+	}))
+	defer server.Close()
+	client, err := NewHttpClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	params := emptyBatch(arrow.NewSchema(nil, nil))
+	defer params.Release()
+	if _, err := client.CallUnary(context.Background(), "method", params, nil); err == nil ||
+		!strings.Contains(err.Error(), acceptMaxResponseBytesSupportHeader) {
+		t.Fatalf("error = %v, want mandatory discovery failure", err)
+	}
+	if got := posts.Load(); got != 0 {
+		t.Fatalf("server received %d POST requests after failed discovery", got)
+	}
+}
+
+func TestHttpClientEnforcesAdvertisedAcceptedLimitBeforeAllocation(t *testing.T) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "70000")
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 70_000))
+	}))
+	defer server.Close()
+	client, err := NewHttpClient(server.URL,
+		WithClientResponseLimits(128<<10, 128<<10),
+		WithClientAcceptedMaxResponseBytes(64<<10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	params := emptyBatch(arrow.NewSchema(nil, nil))
+	defer params.Release()
+	if _, err := client.CallUnary(context.Background(), "method", params, nil); err == nil ||
+		!strings.Contains(err.Error(), "65536") {
+		t.Fatalf("error = %v, want accepted response cap", err)
+	}
+}
+
+func TestHttpClientRequiresSupportOnEveryResponseAndPreservesAdvertisedLimit(t *testing.T) {
+	for _, omitRPCSupport := range []bool{false, true} {
+		t.Run(fmt.Sprintf("omit_support_%t", omitRPCSupport), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodOptions {
+					w.Header().Set(acceptMaxResponseBytesSupportHeader, "true")
+					w.Header().Set(maxResponseBytesHeader, "65536")
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				if !omitRPCSupport {
+					w.Header().Set(acceptMaxResponseBytesSupportHeader, "true")
+				}
+				w.Header().Set("Content-Length", "70000")
+				_, _ = w.Write(bytes.Repeat([]byte("x"), 70_000))
+			}))
+			defer server.Close()
+			client, err := NewHttpClient(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			params := emptyBatch(arrow.NewSchema(nil, nil))
+			defer params.Release()
+			_, err = client.CallUnary(context.Background(), "method", params, nil)
+			if err == nil {
+				t.Fatal("oversized or unsupported response was accepted")
+			}
+			if omitRPCSupport && !strings.Contains(err.Error(), "every RPC response") {
+				t.Fatalf("error = %v, want per-response support failure", err)
+			}
+			if !omitRPCSupport && !strings.Contains(err.Error(), "65536") {
+				t.Fatalf("error = %v, want advertised response cap", err)
+			}
+		})
+	}
 }
 
 func TestHttpClientStreamCloseIsLocalAndCancelIsExplicit(t *testing.T) {
@@ -494,7 +692,7 @@ func TestHttpClientStreamCloseIsLocalAndCancelIsExplicit(t *testing.T) {
 	}
 	var initRequests atomic.Int64
 	var cancelRequests atomic.Int64
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := newResponseBudgetTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", arrowContentType)
 		if strings.HasSuffix(r.URL.Path, "/init") {
 			initRequests.Add(1)

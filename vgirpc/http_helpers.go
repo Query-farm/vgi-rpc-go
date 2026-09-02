@@ -124,6 +124,14 @@ func (h *HttpServer) handleDescribe(w http.ResponseWriter, r *http.Request) {
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(describeSchema))
 	h.logIPCWriteErr("describe-batch", "describe", writer.Write(batchWithMeta))
 	h.logIPCWriteErr("close", "describe", writer.Close())
+	budget := responseBudgetFromContext(r.Context())
+	if capErr := enforceResponseBudgets("__describe__", int64(buf.Len()), 0, budget.Limit, 0); capErr != nil {
+		buf.Reset()
+		h.logIPCWriteErr("describe-cap-error", "describe",
+			writeErrorResponse(&buf, describeSchema, capErr, h.server.serverID, "", h.server.debugErrors))
+		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
+		return
+	}
 
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
 }
@@ -141,9 +149,10 @@ func (h *HttpServer) handleDescribe(w http.ResponseWriter, r *http.Request) {
 func (h *HttpServer) readHTTPBody(r *http.Request) ([]byte, error) {
 	limit := h.maxBodySize
 	requestCapApplied := false
-	if h.maxRequestBytes > 0 && !h.isMaxBytesExempt(r.URL.Path) &&
-		(limit <= 0 || h.maxRequestBytes <= limit) {
-		limit = h.maxRequestBytes
+	requestLimit := h.effectiveRequestLimit()
+	if requestLimit > 0 && !h.isMaxBytesExempt(r.URL.Path) &&
+		(limit <= 0 || requestLimit <= limit) {
+		limit = requestLimit
 		requestCapApplied = true
 	}
 

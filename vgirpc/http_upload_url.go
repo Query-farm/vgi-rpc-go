@@ -54,6 +54,14 @@ func (h *HttpServer) handleUploadURLInit(w http.ResponseWriter, r *http.Request)
 		http.NotFound(w, r)
 		return
 	}
+	if h.authenticateIdentity(w, r) == nil {
+		return
+	}
+	var budgetOK bool
+	r, budgetOK = h.applyResponseBudget(w, r, UploadURLResponseSchema)
+	if !budgetOK {
+		return
+	}
 	if ct := r.Header.Get("Content-Type"); ct != arrowContentType {
 		h.writeHttpError(w, http.StatusUnsupportedMediaType,
 			fmt.Errorf("unsupported content type: %s", ct), UploadURLResponseSchema)
@@ -131,6 +139,14 @@ func (h *HttpServer) handleUploadURLInit(w http.ResponseWriter, r *http.Request)
 	}
 	if cerr := writer.Close(); cerr != nil {
 		h.logIPCWriteErr("close", UploadURLMethod, cerr)
+	}
+	budget := responseBudgetFromContext(r.Context())
+	if capErr := enforceResponseBudgets(UploadURLMethod, int64(buf.Len()), 0, budget.Limit, 0); capErr != nil {
+		buf.Reset()
+		h.logIPCWriteErr("upload-url-cap-error", UploadURLMethod,
+			writeErrorResponse(&buf, UploadURLResponseSchema, capErr, h.server.serverID, "", h.server.debugErrors))
+		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
+		return
 	}
 	h.writeArrow(w, http.StatusOK, buf.Bytes())
 }
