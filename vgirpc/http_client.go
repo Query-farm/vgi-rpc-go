@@ -81,6 +81,7 @@ type httpClientConfig struct {
 	closeIdleOnClose    bool
 	tcpProxy            string
 	customHTTPClient    bool
+	ownedTransport      io.Closer
 }
 
 // HttpClientOption configures [NewHttpClient].
@@ -228,6 +229,7 @@ type HttpClient struct {
 	acceptedMaxResponse    int64
 	onLog                  ClientLogHandler
 	closeIdleOnClose       bool
+	ownedTransport         io.Closer
 	closed                 atomic.Bool
 	responseBudgetMu       sync.Mutex
 	responseBudgetVerified bool
@@ -320,6 +322,7 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 		acceptedMaxResponse: cfg.acceptedMaxResponse,
 		onLog:               cfg.onLog,
 		closeIdleOnClose:    cfg.closeIdleOnClose,
+		ownedTransport:      cfg.ownedTransport,
 	}, nil
 }
 
@@ -332,6 +335,9 @@ func (c *HttpClient) Close() {
 	}
 	if c.closeIdleOnClose {
 		c.inner.CloseIdleConnections()
+	}
+	if c.ownedTransport != nil {
+		_ = c.ownedTransport.Close()
 	}
 }
 
@@ -541,6 +547,10 @@ func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (cl
 	req.Header.Set(acceptMaxResponseBytesHeader, fmt.Sprintf("%d", c.acceptedMaxResponse))
 	resp, err := c.inner.Do(req)
 	if err != nil {
+		var irohErr *IrohTransportError
+		if errors.As(err, &irohErr) {
+			return clientHTTPResponse{}, irohErr
+		}
 		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("HTTP request failed: %v", err)}
 	}
 	defer resp.Body.Close()

@@ -59,6 +59,9 @@ func main() {
 - **`context.Context` support** for cancellation and deadlines
 - **HTTP transport** with signed state tokens, zstd/gzip request decompression, and negotiated response compression (on by default at zstd level 1; tune or disable via `SetCompressionLevel`)
 - **Native HTTP client** for unary, producer, and exact-schema exchange calls
+- **Iroh clients** for stateful `iroh://` Arrow mux and HTTP-semantics
+  `httpi://` through explicit native/community providers (no helper process or
+  runtime download)
 - **Raw Unix/TCP socket transports** (`Server.RunUnix` / `Server.RunTcp`) speaking the lean Arrow-IPC framing for co-located workers. `RunTcp` defaults to unencrypted loopback for compatibility; `RunTcpWithOptions` can require PROXY v2 and direct mTLS X.509-SVID evidence.
 - **ArrowSerializable** interface for complex nested types
 - **OpenTelemetry support** via optional `vgirpc/otel` module (tracing + metrics)

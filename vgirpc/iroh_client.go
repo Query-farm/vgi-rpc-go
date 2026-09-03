@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -217,11 +219,94 @@ type IrohDialer interface {
 	DialIroh(context.Context, IrohEndpoint, IrohClientOptions) (net.Conn, error)
 }
 
+// IrohHTTPTransport is an iroh-http/2 implementation exposed as a standard
+// HTTP round tripper. Close releases the underlying Iroh endpoint and any
+// pooled connections. Implementations must honor each request's context.
+type IrohHTTPTransport interface {
+	http.RoundTripper
+	io.Closer
+}
+
+// IrohHTTPTransportProvider is the qualification seam for a native/community
+// Iroh binding with an iroh-http/2 codec. The returned transport is owned by
+// the VGI client. OpenIrohHTTP must select endpoint.ALPN exactly.
+type IrohHTTPTransportProvider interface {
+	OpenIrohHTTP(context.Context, IrohEndpoint, IrohClientOptions) (IrohHTTPTransport, error)
+}
+
+// NewIrohHTTPClient opens an HTTP-semantics VGI client over iroh-http/2. The
+// ordinary HttpClient state machine remains responsible for OPTIONS discovery,
+// response budgets, compression, continuations, authentication headers, and
+// Arrow framing. Only HTTP request transport is supplied by provider.
+func NewIrohHTTPClient(ctx context.Context, rawEndpoint string, provider IrohHTTPTransportProvider,
+	irohOptions IrohClientOptions, options ...HttpClientOption) (*HttpClient, error) {
+	if ctx == nil {
+		return nil, invalidIroh("vgirpc: Iroh client context must not be nil")
+	}
+	endpoint, err := ParseIrohEndpoint(rawEndpoint)
+	if err != nil {
+		return nil, err
+	}
+	if endpoint.Scheme != "httpi" {
+		return nil, irohError("vgirpc: HTTP-over-Iroh client requires httpi://",
+			IrohStageBind, IrohCategoryUnsupported, IrohNotSent, nil)
+	}
+	if provider == nil {
+		return nil, irohError("vgirpc: httpi:// requires an explicitly configured native/community Iroh HTTP provider",
+			IrohStageBind, IrohCategoryUnsupported, IrohNotSent, nil)
+	}
+	irohOptions, err = irohOptions.normalized()
+	if err != nil {
+		return nil, err
+	}
+	openCtx := ctx
+	if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > irohOptions.ConnectTimeout {
+		var cancel context.CancelFunc
+		openCtx, cancel = context.WithTimeout(ctx, irohOptions.ConnectTimeout)
+		defer cancel()
+	}
+	transport, err := provider.OpenIrohHTTP(openCtx, endpoint, irohOptions)
+	if err != nil {
+		var structured *IrohTransportError
+		if errors.As(err, &structured) {
+			return nil, err
+		}
+		stage, category := IrohStageConnect, IrohCategoryUnavailable
+		if errors.Is(openCtx.Err(), context.DeadlineExceeded) {
+			category = IrohCategoryTimeout
+		}
+		if errors.Is(openCtx.Err(), context.Canceled) {
+			stage, category = IrohStageCancel, IrohCategoryCancelled
+		}
+		return nil, irohError(fmt.Sprintf("vgirpc: open Iroh HTTP transport: %v", err),
+			stage, category, IrohNotSent, err)
+	}
+	if transport == nil {
+		return nil, irohError("vgirpc: Iroh HTTP provider returned a nil transport",
+			IrohStageOpenStream, IrohCategoryUnavailable, IrohNotSent, nil)
+	}
+	ownedTransport := func(cfg *httpClientConfig) error {
+		if cfg.customHTTPClient || cfg.tcpProxy != "" {
+			return invalidIroh("vgirpc: HTTP client and TCP proxy options do not apply to an Iroh HTTP provider")
+		}
+		cfg.inner = &http.Client{Transport: transport, Timeout: irohOptions.IOTimeout}
+		cfg.closeIdleOnClose = false
+		cfg.customHTTPClient = true
+		cfg.ownedTransport = transport
+		return nil
+	}
+	allOptions := append(append([]HttpClientOption(nil), options...), ownedTransport)
+	client, err := NewHttpClient("http://iroh.invalid"+endpoint.BasePath, allOptions...)
+	if err != nil {
+		_ = transport.Close()
+		return nil, err
+	}
+	return client, nil
+}
+
 // NewIrohClient opens the ordinary stateful raw client through a qualified
 // native/community binding. Core intentionally has no connector process or
-// automatic runtime download. httpi:// is parsed for the shared endpoint
-// contract but is explicitly unsupported until a qualified iroh-http/2 codec
-// is available.
+// automatic runtime download. Use NewIrohHTTPClient for httpi:// endpoints.
 func NewIrohClient(ctx context.Context, rawEndpoint string, dialer IrohDialer,
 	irohOptions IrohClientOptions, options ...TcpClientOption) (*TcpClient, error) {
 	if ctx == nil {

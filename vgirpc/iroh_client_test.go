@@ -8,7 +8,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -193,5 +195,111 @@ func TestNewIrohClientRejectsTcpDialOptions(t *testing.T) {
 		IrohClientOptions{}, WithTcpClientConnectTimeout(time.Second))
 	if !errors.As(err, &failure) || failure.Category != IrohCategoryInvalidInput {
 		t.Fatalf("unexpected connect-option error: %#v", err)
+	}
+}
+
+type testIrohHTTPProvider struct {
+	endpoint  IrohEndpoint
+	options   IrohClientOptions
+	transport *testIrohHTTPTransport
+}
+
+func (provider *testIrohHTTPProvider) OpenIrohHTTP(_ context.Context, endpoint IrohEndpoint,
+	options IrohClientOptions) (IrohHTTPTransport, error) {
+	provider.endpoint = endpoint
+	provider.options = options
+	provider.transport = &testIrohHTTPTransport{}
+	return provider.transport, nil
+}
+
+type testIrohHTTPTransport struct {
+	paths  []string
+	closed bool
+}
+
+func (transport *testIrohHTTPTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport.paths = append(transport.paths, request.URL.Path)
+	headers := make(http.Header)
+	headers.Set(acceptMaxResponseBytesSupportHeader, "true")
+	return &http.Response{
+		StatusCode: http.StatusNoContent,
+		Header:     headers,
+		Body:       io.NopCloser(strings.NewReader("")),
+		Request:    request,
+	}, nil
+}
+
+func (transport *testIrohHTTPTransport) Close() error {
+	transport.closed = true
+	return nil
+}
+
+func TestNewIrohHTTPClientReusesHTTPStateMachineAndOwnsTransport(t *testing.T) {
+	provider := &testIrohHTTPProvider{}
+	client, err := NewIrohHTTPClient(context.Background(), "httpi://"+testIrohID+"/api", provider,
+		IrohClientOptions{RemoteRelayURL: "https://relay.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if provider.endpoint.ALPN != IrohHTTPALPN || provider.endpoint.BasePath != "/api" {
+		t.Fatalf("unexpected endpoint: %#v", provider.endpoint)
+	}
+	if len(provider.options.SecretKey) != 32 || provider.options.RemoteRelayURL != "https://relay.example" {
+		t.Fatalf("unexpected normalized options: %#v", provider.options)
+	}
+	caps, err := client.DiscoverCapabilities(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !caps.AcceptMaxResponseBytesSupport || len(provider.transport.paths) != 1 || provider.transport.paths[0] != "/api/health" {
+		t.Fatalf("HTTP state machine did not use the httpi base path: %#v, %#v", caps, provider.transport.paths)
+	}
+	client.Close()
+	if !provider.transport.closed {
+		t.Fatal("owned Iroh HTTP transport was not closed")
+	}
+}
+
+func TestNewIrohHTTPClientRejectsRawAndConflictingHTTPOptions(t *testing.T) {
+	provider := &testIrohHTTPProvider{}
+	if _, err := NewIrohHTTPClient(context.Background(), "iroh://"+testIrohID, provider, IrohClientOptions{}); err == nil {
+		t.Fatal("raw endpoint unexpectedly accepted by HTTP-over-Iroh client")
+	}
+	_, err := NewIrohHTTPClient(context.Background(), "httpi://"+testIrohID, provider, IrohClientOptions{},
+		WithClientHTTPClient(&http.Client{}))
+	var failure *IrohTransportError
+	if !errors.As(err, &failure) || failure.Category != IrohCategoryInvalidInput {
+		t.Fatalf("unexpected conflicting option error: %#v", err)
+	}
+	if provider.transport == nil || !provider.transport.closed {
+		t.Fatal("transport was not closed after client option validation failed")
+	}
+}
+
+type failingIrohHTTPTransport struct{}
+
+func (failingIrohHTTPTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, irohError("test read failure", IrohStageRead, IrohCategoryConnectionReset, IrohSent, nil)
+}
+
+func (failingIrohHTTPTransport) Close() error { return nil }
+
+type failingIrohHTTPProvider struct{}
+
+func (failingIrohHTTPProvider) OpenIrohHTTP(context.Context, IrohEndpoint, IrohClientOptions) (IrohHTTPTransport, error) {
+	return failingIrohHTTPTransport{}, nil
+}
+
+func TestIrohHTTPClientPreservesStructuredTransportErrors(t *testing.T) {
+	client, err := NewIrohHTTPClient(context.Background(), "httpi://"+testIrohID,
+		failingIrohHTTPProvider{}, IrohClientOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_, err = client.DiscoverCapabilities(context.Background())
+	var failure *IrohTransportError
+	if !errors.As(err, &failure) || failure.Stage != IrohStageRead || failure.DispatchCertainty != IrohSent {
+		t.Fatalf("structured Iroh failure was not preserved: %#v", err)
 	}
 }

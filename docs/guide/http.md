@@ -45,6 +45,28 @@ defer stream.Close()
 cancellation. A failed exchange continuation cannot be retried because the
 server may already have advanced its opaque state token.
 
+### HTTP over Iroh
+
+`NewIrohHTTPClient` runs this same `HttpClient` state machine over the
+`iroh-http/2` ALPN. An application supplies a qualified native/community
+binding as an `IrohHTTPTransportProvider`; core neither starts a connector
+process nor downloads one at runtime.
+
+```go
+client, err := vgirpc.NewIrohHTTPClient(
+    ctx,
+    "httpi://<64-lowercase-hex-endpoint-id>/vgi",
+    provider,
+    vgirpc.IrohClientOptions{},
+)
+```
+
+The provider returns an owned `IrohHTTPTransport`, which implements
+`http.RoundTripper` and `io.Closer`. Requests retain their contexts and normal
+HTTP method, path, headers, and body. `client.Close()` closes the provider
+transport. HTTP client injection and SOCKS proxy options are rejected because
+the Iroh provider is the transport; all other `HttpClientOption` values apply.
+
 ### Tailscale userspace networking
 
 Route every client connection through a tailscaled SOCKS5 server with
