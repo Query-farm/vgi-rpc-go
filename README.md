@@ -61,7 +61,8 @@ func main() {
 - **Native HTTP client** for unary, producer, and exact-schema exchange calls
 - **Iroh clients** for stateful `iroh://` Arrow mux and HTTP-semantics
   `httpi://` through explicit native/community providers (no helper process or
-  runtime download)
+  runtime download); custom local relay sets, remote relay hints, direct
+  addresses, and relay-free operation flow through `IrohClientOptions`
 - **Raw Unix/TCP socket transports** (`Server.RunUnix` / `Server.RunTcp`) speaking the lean Arrow-IPC framing for co-located workers. `RunTcp` defaults to unencrypted loopback for compatibility; `RunTcpWithOptions` can require PROXY v2 and direct mTLS X.509-SVID evidence.
 - **ArrowSerializable** interface for complex nested types
 - **OpenTelemetry support** via optional `vgirpc/otel` module (tracing + metrics)

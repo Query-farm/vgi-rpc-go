@@ -84,6 +84,7 @@ nav:
     - Streaming: guide/streaming.md
     - ArrowSerializable: guide/arrow-serializable.md
     - HTTP Transport: guide/http.md
+    - Iroh Clients: guide/iroh.md
     - Native Client Status: guide/native-client-conformance.md
     - Error Handling: guide/errors.md
     - Observability: guide/observability.md
