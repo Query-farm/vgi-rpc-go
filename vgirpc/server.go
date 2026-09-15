@@ -93,10 +93,15 @@ type Server struct {
 	protocolVersionSet   bool   // true when SetProtocolVersion was called with a non-empty value
 	protocolHash         string
 	protocolHashOnce     sync.Once
-	dispatchHook         DispatchHook
-	debugErrors          bool
-	externalConfig       *ExternalLocationConfig
-	implementation       any
+
+	// extraBindings holds protocols beyond the primary. The primary's methods
+	// stay in `methods` so every existing registration path is untouched; it is
+	// projected into a binding on demand by bindings().
+	extraBindings  map[string]*protocolBinding
+	dispatchHook   DispatchHook
+	debugErrors    bool
+	externalConfig *ExternalLocationConfig
+	implementation any
 
 	// Transport binding state, set lazily by notifyTransport.
 	transportNotifyMu     sync.Mutex
@@ -308,11 +313,30 @@ func (s *Server) ProtocolVersion() string {
 // Mirrors Python's RpcServer._check_protocol_version directional-message
 // format byte-for-byte.
 func (s *Server) checkProtocolVersion(clientVersion string, present bool) *ProtocolVersionError {
+	return gateVersion(s.primaryProtocolName(), s.protocolVersion, s.protocolVersionParts, clientVersion, present)
+}
+
+// gateVersion enforces one binding's declared protocol_version.
+//
+// Takes the binding's name and version rather than reading the server's,
+// because a server hosting several protocols has a version per binding and no
+// single "server version" -- gating a secondary against the primary rejects
+// correct callers and names the wrong protocol when it does. Every message
+// names the protocol for the same reason: with N bindings, "Server: 1.0.0"
+// alone does not say which server.
+//
+// Comparison rule: exact major+minor match; patch ignored.
+func gateVersion(
+	protocolName, serverVersion string,
+	serverParts [3]int,
+	clientVersion string,
+	present bool,
+) *ProtocolVersionError {
 	if !present {
 		return &ProtocolVersionError{
-			Message: "VGI client/worker protocol_version mismatch.\n" +
+			Message: "VGI client/worker protocol_version mismatch for protocol " + protocolName + ".\n" +
 				"  Client: <not declared>\n" +
-				"  Server: " + s.protocolVersion + "\n" +
+				"  Server: " + serverVersion + "\n" +
 				"  Direction: the client did not send a vgi_rpc.protocol_version " +
 				"metadata key. This is either a vgi-rpc framework bug or a " +
 				"non-VGI client connecting to a VGI worker.",
@@ -321,35 +345,35 @@ func (s *Server) checkProtocolVersion(clientVersion string, present bool) *Proto
 	// Exact equality is overwhelmingly the common case and has already been
 	// validated when the server was configured. Avoid running the semver regexp
 	// and allocating its capture slice on every RPC in that case.
-	if clientVersion == s.protocolVersion {
+	if clientVersion == serverVersion {
 		return nil
 	}
 	major, minor, _, err := parseSemver(clientVersion)
 	if err != nil {
 		return &ProtocolVersionError{
-			Message: "VGI client/worker protocol_version mismatch.\n" +
+			Message: "VGI client/worker protocol_version mismatch for protocol " + protocolName + ".\n" +
 				"  Client: " + clientVersion + "\n" +
-				"  Server: " + s.protocolVersion + "\n" +
+				"  Server: " + serverVersion + "\n" +
 				"  Direction: client sent a malformed protocol_version. " +
 				"Expected canonical semver MAJOR.MINOR.PATCH.",
 		}
 	}
-	serverMajor, serverMinor := s.protocolVersionParts[0], s.protocolVersionParts[1]
+	serverMajor, serverMinor := serverParts[0], serverParts[1]
 	if major == serverMajor && minor == serverMinor {
 		return nil
 	}
 	var direction string
 	if major < serverMajor || (major == serverMajor && minor < serverMinor) {
 		direction = "client is too old; upgrade the VGI extension/client to a " +
-			"version supporting protocol_version " + s.protocolVersion + "."
+			"version supporting protocol_version " + serverVersion + "."
 	} else {
 		direction = "server is too old; upgrade the VGI worker to a version " +
 			"supporting protocol_version " + clientVersion + "."
 	}
 	return &ProtocolVersionError{
-		Message: "VGI client/worker protocol_version mismatch.\n" +
+		Message: "VGI client/worker protocol_version mismatch for protocol " + protocolName + ".\n" +
 			"  Client: " + clientVersion + "\n" +
-			"  Server: " + s.protocolVersion + "\n" +
+			"  Server: " + serverVersion + "\n" +
 			"  Direction: " + direction,
 	}
 }

@@ -16,6 +16,19 @@ const (
 	MetaMethod = "vgi_rpc.method"
 	// MetaRequestVersion carries the protocol version in a request batch.
 	MetaRequestVersion = "vgi_rpc.request_version"
+	// MetaProtocol names the protocol a request addresses -- the routing key.
+	//
+	// Dispatch resolves the pair (protocol, method): a server hosts one or more
+	// protocols and method names may collide across them, which is what lets
+	// protocols be authored independently. Required on every request, including
+	// against a server hosting exactly one protocol -- an exemption would let an
+	// intermediary that rebuilds a request and drops the field land silently on
+	// whichever protocol happened to be first, rather than being told.
+	//
+	// The major version is part of the protocol name (vgi_rpc.Reflection.v1), so
+	// an incompatible major is a routing failure rather than a parse failure,
+	// and v1 and v2 can be served side by side while clients migrate.
+	MetaProtocol = "vgi_rpc.protocol"
 	// MetaRequestID carries the client-supplied request identifier, echoed
 	// in all response batches for correlation.
 	MetaRequestID = "vgi_rpc.request_id"

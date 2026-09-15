@@ -87,7 +87,7 @@ func TestHTTPExchangeKeepsTokenWithEmitMetadata(t *testing.T) {
 	paramsBatch := array.NewRecordBatch(paramsSchema, []arrow.Array{paramsArr}, 1)
 
 	var initBody bytes.Buffer
-	if err := WriteRequest(&initBody, "meta_token", paramsBatch, ""); err != nil {
+	if err := WriteRequest(&initBody, "meta_token", paramsBatch, testProtocol, ""); err != nil {
 		t.Fatal(err)
 	}
 	paramsBatch.Release()

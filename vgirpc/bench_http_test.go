@@ -46,7 +46,7 @@ func encodeRequestBody(tb testing.TB, method string, params any) []byte {
 	defer batch.Release()
 
 	var buf bytes.Buffer
-	if err := WriteRequest(&buf, method, batch, ""); err != nil {
+	if err := WriteRequest(&buf, method, batch, testProtocol, ""); err != nil {
 		tb.Fatalf("WriteRequest: %v", err)
 	}
 	return buf.Bytes()

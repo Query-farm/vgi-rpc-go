@@ -32,7 +32,7 @@ func rawBenchRequest(tb testing.TB) []byte {
 	batch := buildParamsBatch(tb, benchAddParams{A: 1.5, B: 2.5})
 	defer batch.Release()
 	var body bytes.Buffer
-	if err := WriteRequest(&body, "add", batch, "2.0.0"); err != nil {
+	if err := WriteRequest(&body, "add", batch, testProtocol, "2.0.0"); err != nil {
 		tb.Fatalf("WriteRequest: %v", err)
 	}
 	return body.Bytes()

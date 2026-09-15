@@ -36,13 +36,24 @@ import (
 // custom metadata already attached to params is NOT carried over (mirroring
 // the Python reference's wire.write_request, which frames from bare values).
 //
+// protocol is the routing key -- which protocol the method belongs to. The
+// wire protocol requires it on every request, including against a server
+// hosting exactly one protocol, so an intermediary that re-frames a request
+// must carry it through rather than drop it. Passing "" emits a request the
+// server will refuse with protocol_not_specified, which is the intended
+// outcome for a caller that genuinely does not know.
+//
 // protocolVersion is the application protocol_version to stamp on the
 // request, so a versioned server's dispatch-boundary check still sees the
 // originating client's version. Pass "" to emit a request that is
 // structurally exempt from that check (the key is omitted).
-func WriteRequest(w io.Writer, method string, params arrow.RecordBatch, protocolVersion string) error {
+func WriteRequest(w io.Writer, method string, params arrow.RecordBatch, protocol, protocolVersion string) error {
 	keys := []string{MetaMethod, MetaRequestVersion}
 	vals := []string{method, ProtocolVersion}
+	if protocol != "" {
+		keys = append(keys, MetaProtocol)
+		vals = append(vals, protocol)
+	}
 	if protocolVersion != "" {
 		keys = append(keys, MetaProtocolVersion)
 		vals = append(vals, protocolVersion)

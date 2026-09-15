@@ -63,7 +63,7 @@ func regressionIPC(t *testing.T, batch arrow.RecordBatch, meta arrow.Metadata) [
 func regressionRequest(t *testing.T, method string, batch arrow.RecordBatch) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := WriteRequest(&buf, method, batch, ""); err != nil {
+	if err := WriteRequest(&buf, method, batch, testProtocol, ""); err != nil {
 		t.Fatal(err)
 	}
 	return buf.Bytes()

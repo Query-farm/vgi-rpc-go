@@ -234,15 +234,13 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 		return s.serveTransportOptions(w)
 	}
 
-	// Look up method
-	info, ok := s.methods[req.Method]
-	if !ok {
-		available := s.availableMethods()
-		errMsg := fmt.Sprintf("Unknown method: '%s'. Available methods: %v", req.Method, available)
+	// Resolve (protocol, method). Method names may collide across protocols, so
+	// the routing key is part of the lookup rather than a label on it.
+	info, binding, rerr := s.resolve(req.Protocol, req.Method)
+	if rerr != nil {
 		emptySchema := arrow.NewSchema(nil, nil)
 		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, emptySchema,
-			&MethodNotImplementedError{Method: req.Method, Message: errMsg},
-			s.serverID, req.RequestID, s.debugErrors))
+			rerr, s.serverID, req.RequestID, s.debugErrors))
 		return nil
 	}
 
@@ -257,15 +255,17 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 		}
 	}
 
-	// Application-protocol-version gate. Fires only when the operator
-	// declared a protocol_version via [Server.SetProtocolVersion].
-	// ``__describe__`` is exempt (it's the diagnostic path a mismatched
-	// client uses to introspect the server's expected version, and that
-	// short-circuit already ran above). Mirrors Python's
-	// ``RpcServer.serve_one`` check at the same point.
-	if s.protocolVersionSet {
+	// Application-protocol-version gate, against the binding that owns the
+	// resolved method. A server hosting several protocols has a version per
+	// binding and no single "server version"; gating against the primary would
+	// reject correct callers of a secondary and name the wrong protocol when it
+	// did. A version-exempt binding (reflection) is skipped: it is what a
+	// mismatched client calls to learn what mismatched.
+	if binding.VersionSet && !binding.VersionExempt {
 		clientVersion, present := req.Metadata[MetaProtocolVersion]
-		if pverr := s.checkProtocolVersion(clientVersion, present); pverr != nil {
+		if pverr := gateVersion(
+			binding.Name, binding.Version, binding.VersionParts, clientVersion, present,
+		); pverr != nil {
 			errSchema := info.ResultSchema
 			if errSchema == nil || methodTypeString(info.Type) != DispatchMethodUnary {
 				errSchema = arrow.NewSchema(nil, nil)

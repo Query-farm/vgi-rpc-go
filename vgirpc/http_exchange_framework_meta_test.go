@@ -100,7 +100,7 @@ func TestHTTPExchangeStripsFrameworkInputMetadata(t *testing.T) {
 	paramsBatch := array.NewRecordBatch(paramsSchema, []arrow.Array{paramsArr}, 1)
 
 	var initBody bytes.Buffer
-	if err := WriteRequest(&initBody, "framework_meta", paramsBatch, ""); err != nil {
+	if err := WriteRequest(&initBody, "framework_meta", paramsBatch, testProtocol, ""); err != nil {
 		t.Fatal(err)
 	}
 	paramsBatch.Release()

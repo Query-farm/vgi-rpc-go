@@ -67,9 +67,11 @@ type ClientStreamSchema struct {
 type ClientLogHandler func(LogMessage)
 
 type httpClientConfig struct {
-	inner               *http.Client
-	prefix              string
-	headers             http.Header
+	inner   *http.Client
+	prefix  string
+	headers http.Header
+	// protocol is the routing key stamped on every request.
+	protocol            string
 	protocolVersion     string
 	maxRequest          int64
 	maxEncoded          int64
@@ -147,6 +149,25 @@ func WithClientHeader(name, value string) HttpClientOption {
 	}
 }
 
+// WithClientProtocol sets the routing key stamped on every request.
+//
+// The wire protocol requires vgi_rpc.protocol on every request, including
+// against a server hosting exactly one protocol, so a client that does not set
+// this is refused with protocol_not_specified. That is deliberate: an exemption
+// would let an intermediary that rebuilds a request and drops the field land
+// silently on whichever protocol the server registered first.
+func WithClientProtocol(protocol string) HttpClientOption {
+	return func(cfg *httpClientConfig) error {
+		if protocol != "" {
+			if err := ValidateProtocolName(protocol, true); err != nil {
+				return err
+			}
+		}
+		cfg.protocol = protocol
+		return nil
+	}
+}
+
 // WithClientProtocolVersion stamps the application's declared protocol
 // version on unary and stream-init requests.
 func WithClientProtocolVersion(version string) HttpClientOption {
@@ -218,10 +239,15 @@ func WithClientLogHandler(handler ClientLogHandler) HttpClientOption {
 // multiple independent streams. A single [HttpClientStream] must be driven by
 // only one goroutine at a time.
 type HttpClient struct {
-	baseURL                *url.URL
-	inner                  *http.Client
-	prefix                 string
-	headers                http.Header
+	baseURL *url.URL
+	inner   *http.Client
+	prefix  string
+	headers http.Header
+	// protocol is the routing key stamped on every request. Required by the
+	// wire protocol even against a single-protocol server, so a client that
+	// leaves it empty is refused rather than silently landing on whichever
+	// protocol the server happened to register first.
+	protocol               string
 	protocolVersion        string
 	maxRequest             int64
 	maxEncoded             int64
@@ -315,6 +341,7 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 		inner:               cfg.inner,
 		prefix:              cfg.prefix,
 		headers:             cfg.headers.Clone(),
+		protocol:            cfg.protocol,
 		protocolVersion:     cfg.protocolVersion,
 		maxRequest:          cfg.maxRequest,
 		maxEncoded:          cfg.maxEncoded,
@@ -502,6 +529,9 @@ func (c *HttpClient) initialBody(method string, params arrow.RecordBatch) ([]byt
 	metadata := recordMetadata(params)
 	stripClientControlMetadata(metadata)
 	metadata[MetaMethod] = method
+	if c.protocol != "" {
+		metadata[MetaProtocol] = c.protocol
+	}
 	metadata[MetaRequestVersion] = ProtocolVersion
 	metadata[MetaRequestID] = requestID
 	if c.protocolVersion != "" {

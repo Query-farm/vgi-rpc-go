@@ -33,6 +33,9 @@ const (
 type Request struct {
 	// Method is the RPC method name extracted from batch custom metadata.
 	Method string
+	// Protocol is the protocol the method belongs to -- the routing key. Empty
+	// only for a request that carried none, which the dispatcher refuses.
+	Protocol string
 	// Version is the protocol version string (must equal [ProtocolVersion]).
 	Version string
 	// RequestID is a client-supplied identifier echoed in all response batches.
@@ -143,8 +146,11 @@ func ReadRequest(r io.Reader) (*Request, error) {
 		metaMap[mKeys[i]] = mVals[i]
 	}
 
+	protocol, _ := meta.GetValue(MetaProtocol)
+
 	return &Request{
 		Method:    method,
+		Protocol:  protocol,
 		Version:   version,
 		RequestID: requestID,
 		LogLevel:  logLevel,

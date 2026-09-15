@@ -46,6 +46,7 @@ func TestTcpClientUnaryConnectionReuse(t *testing.T) {
 	defer serverConn.Close()
 	go server.serveTcpConn(context.Background(), serverConn)
 	client := newTcpClientFromConn(clientConn, tcpClientConfig{
+		protocol:    testProtocol,
 		maxRequest:  defaultClientMaxRequestBytes,
 		maxResponse: defaultClientMaxDecodedResponseBytes,
 	})
@@ -79,6 +80,7 @@ func TestTcpClientSerializesConcurrentCalls(t *testing.T) {
 	defer serverConn.Close()
 	go server.serveTcpConn(context.Background(), serverConn)
 	client := newTcpClientFromConn(clientConn, tcpClientConfig{
+		protocol:    testProtocol,
 		maxRequest:  defaultClientMaxRequestBytes,
 		maxResponse: defaultClientMaxDecodedResponseBytes,
 	})
@@ -137,6 +139,7 @@ func TestTcpClientProducerAndExchangeReuseConnection(t *testing.T) {
 	defer serverConn.Close()
 	go server.serveTcpConn(context.Background(), serverConn)
 	client := newTcpClientFromConn(clientConn, tcpClientConfig{
+		protocol:    testProtocol,
 		maxRequest:  defaultClientMaxRequestBytes,
 		maxResponse: defaultClientMaxDecodedResponseBytes,
 	})
@@ -219,6 +222,7 @@ func TestTcpClientUnaryEnforcesResponseLimit(t *testing.T) {
 	defer serverConn.Close()
 	go server.serveTcpConn(context.Background(), serverConn)
 	client := newTcpClientFromConn(clientConn, tcpClientConfig{
+		protocol:    testProtocol,
 		maxRequest:  defaultClientMaxRequestBytes,
 		maxResponse: 1,
 	})

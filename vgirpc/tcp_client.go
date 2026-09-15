@@ -25,10 +25,13 @@ type tcpClientConfig struct {
 	connectConfigured bool
 	proxy             string
 	proxyConfigured   bool
-	protocolVersion   string
-	maxRequest        int64
-	maxResponse       int64
-	onLog             ClientLogHandler
+	// protocol is the routing key stamped on every request. Required by the
+	// wire protocol even against a single-protocol server.
+	protocol        string
+	protocolVersion string
+	maxRequest      int64
+	maxResponse     int64
+	onLog           ClientLogHandler
 }
 
 // TcpClientOption configures NewTcpClient.
@@ -57,6 +60,23 @@ func WithTcpClientConnectTimeout(timeout time.Duration) TcpClientOption {
 		}
 		config.connectTimeout = timeout
 		config.connectConfigured = true
+		return nil
+	}
+}
+
+// WithTcpClientProtocol sets the routing key stamped on every request.
+//
+// See [WithClientProtocol]; the requirement is the same on every transport,
+// because the metadata field is the canonical carrier and the only one the raw
+// transports have.
+func WithTcpClientProtocol(protocol string) TcpClientOption {
+	return func(config *tcpClientConfig) error {
+		if protocol != "" {
+			if err := ValidateProtocolName(protocol, true); err != nil {
+				return err
+			}
+		}
+		config.protocol = protocol
 		return nil
 	}
 }
@@ -162,6 +182,7 @@ func newTcpClientFromConn(conn net.Conn, config tcpClientConfig) *TcpClient {
 	return &TcpClient{
 		conn: conn,
 		codec: &HttpClient{
+			protocol:        config.protocol,
 			protocolVersion: config.protocolVersion,
 			maxRequest:      config.maxRequest,
 			maxDecoded:      config.maxResponse,

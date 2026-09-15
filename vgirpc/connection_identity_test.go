@@ -56,7 +56,7 @@ func TestRawConnectionIdentityReachesUnaryCallContext(t *testing.T) {
 	batch := array.NewRecordBatch(schema, nil, 0)
 	defer batch.Release()
 	var request bytes.Buffer
-	if err := WriteRequest(&request, "observe", batch, "2.0.0"); err != nil {
+	if err := WriteRequest(&request, "observe", batch, testProtocol, "2.0.0"); err != nil {
 		t.Fatal(err)
 	}
 	if err := server.serveOne(ctx, &request, io.Discard, &shmConnState{}); err != nil {

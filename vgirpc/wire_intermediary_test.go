@@ -60,7 +60,7 @@ func TestWriteReadRequestRoundTrip(t *testing.T) {
 	defer params.Release()
 
 	var buf bytes.Buffer
-	if err := WriteRequest(&buf, "bind", params, ""); err != nil {
+	if err := WriteRequest(&buf, "bind", params, testProtocol, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -84,7 +84,7 @@ func TestWriteRequestPreservesProtocolVersion(t *testing.T) {
 	defer params.Release()
 
 	var buf bytes.Buffer
-	if err := WriteRequest(&buf, "init", params, "2.3"); err != nil {
+	if err := WriteRequest(&buf, "init", params, testProtocol, "2.3"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -104,7 +104,7 @@ func TestWriteRequestOmitsProtocolVersionWhenEmpty(t *testing.T) {
 	defer params.Release()
 
 	var buf bytes.Buffer
-	if err := WriteRequest(&buf, "init", params, ""); err != nil {
+	if err := WriteRequest(&buf, "init", params, testProtocol, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -276,7 +276,7 @@ func TestFindProtocolVersion(t *testing.T) {
 	defer params.Release()
 
 	var stamped bytes.Buffer
-	if err := WriteRequest(&stamped, "bind", params, "3.1"); err != nil {
+	if err := WriteRequest(&stamped, "bind", params, testProtocol, "3.1"); err != nil {
 		t.Fatal(err)
 	}
 	if got := FindProtocolVersion(stamped.Bytes()); got != "3.1" {
@@ -284,7 +284,7 @@ func TestFindProtocolVersion(t *testing.T) {
 	}
 
 	var bare bytes.Buffer
-	if err := WriteRequest(&bare, "bind", params, ""); err != nil {
+	if err := WriteRequest(&bare, "bind", params, testProtocol, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := FindProtocolVersion(bare.Bytes()); got != "" {
