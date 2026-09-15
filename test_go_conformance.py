@@ -537,6 +537,13 @@ def go_tcp_addr() -> Iterator[tuple[str, int]]:
 
 
 class _KindProbe(Protocol):
+    # The routing key is the protocol's *name*, and the Go worker registers
+    # this probe as "TransportKindProbe" (SetServiceName, main.go). Without
+    # the override the key is derived from this class's own name and the
+    # server refuses the call as addressed to a protocol it does not host --
+    # a rejection about naming that reads as one about transport kinds.
+    protocol_name = "TransportKindProbe"
+
     def report_transport_kind(self) -> str: ...
 
 
@@ -836,8 +843,19 @@ def conformance_describe(
         finally:
             transport.close()
     if param == "http_externalize_always":
+        from vgi_rpc.external import ExternalLocationConfig
+
         ext_port: int = request.getfixturevalue("conformance_http_externalize_always_port")
-        return http_introspect(base_url=f"http://127.0.0.1:{ext_port}")
+        # Reflection is an ordinary co-hosted protocol, so its replies are
+        # externalized like any other method's.  Without a resolver the client
+        # reads the pointer batch itself -- an empty ``result`` column, which
+        # surfaces as an IndexError from pyarrow rather than as anything about
+        # describe.  Same url_validator opt-out as ``conformance_conn``: the
+        # download URLs are http://127.0.0.1 from the in-process fake storage.
+        return http_introspect(
+            base_url=f"http://127.0.0.1:{ext_port}",
+            external_location=ExternalLocationConfig(url_validator=None),
+        )
     return http_introspect(base_url=f"http://127.0.0.1:{go_http_port}")
 
 

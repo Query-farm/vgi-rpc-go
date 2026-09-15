@@ -14,28 +14,49 @@ make coverage  # run tests with Go coverage instrumentation
 
 ### Python dependency
 
-The conformance tests are driven by the released `vgi-rpc` package from PyPI.
-`make test` (and `coverage` / `leakcheck` / `race`) bootstraps a repo-local
-`.venv` and installs it automatically, so a fresh clone needs no manual setup:
+The conformance tests ship inside `vgi-rpc` itself, so **which `vgi-rpc` the
+venv holds decides what this port is measured against**. That is not a detail.
+A released wheel is the wrong reference whenever the wire is moving: PyPI's
+v0.25.0 predates the multiservice work entirely, and running this suite against
+it reports several hundred failures that say nothing about this port. Its
+version number is also *higher* than some trees that do have the work, so the
+number is no guide.
+
+The canonical reference is a checkout of `vgi-rpc-python` on the branch carrying
+the work under test. `make test` (and `coverage` / `leakcheck` / `race`)
+bootstraps a repo-local `.venv` from `VGI_RPC_PYTHON_REPO`, installed editable
+so the venv tracks whatever branch that tree is on — the same reference CI uses
+(it clones `vgi-rpc-python` at HEAD).
 
 ```bash
 make test          # creates .venv on first run, then runs the suite
 make venv          # create/refresh .venv without running tests
 ```
 
-To install by hand, or to point at a checkout of `vgi-rpc-python` instead:
+`VGI_RPC_PYTHON_REPO` defaults to `~/Development/vgi-rpc-python` **if that
+directory exists** — a `wildcard`, not a hardcoded path, so a machine without it
+falls back to `VGI_RPC_SPEC` from PyPI and says so rather than failing. Point it
+elsewhere, or empty it, from the environment or the command line:
 
 ```bash
-pip install "vgi-rpc[http,cli,external]>=0.20.0" pytest pytest-timeout
+VGI_RPC_PYTHON_REPO=/path/to/vgi-rpc-python make test   # another checkout
+VGI_RPC_PYTHON_REPO= make test                          # released wheel
 ```
 
-Override `PYTHON` to use an interpreter you manage yourself — an editable install of `vgi-rpc-python`, say. Supplying it on the command line or in the environment skips the `.venv` bootstrap entirely:
+To install by hand, matching what the bootstrap and CI do:
+
+```bash
+pip install -e "/path/to/vgi-rpc-python[http,cli,external,conformance]" \
+    pytest pytest-timeout "httpx2==2.9.1"
+```
+
+Override `PYTHON` to use an interpreter you manage yourself. Supplying it on the command line or in the environment skips the `.venv` bootstrap entirely:
 
 ```bash
 PYTHON=/path/to/python make test
 ```
 
-`VGI_RPC_SPEC` overrides the installed requirement (default `vgi-rpc[http,cli,external]>=0.20.0`); the suite is verified against 0.25.0.
+`VGI_RPC_SPEC` overrides the PyPI fallback requirement (default `vgi-rpc[http,cli,external]>=0.20.0`).
 
 ## Testing Policy
 

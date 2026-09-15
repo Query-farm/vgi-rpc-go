@@ -8,18 +8,41 @@ GOBIN := $(shell go env GOPATH)/bin
 COVDIR := $(CURDIR)/_covdata
 
 # --- Python environment ----------------------------------------------------
-# The conformance suite is driven by the released vgi-rpc package from PyPI.
-# By default the test targets bootstrap a repo-local .venv and install it, so
-# a fresh clone can run `make test` with no manual setup.
+# The conformance suite ships inside vgi-rpc itself, so *which* vgi-rpc the
+# venv holds decides what this port is measured against. That choice is not a
+# detail: a released wheel is the wrong reference whenever the wire is moving,
+# and running this suite against PyPI's v0.25.0 — which predates the
+# multiservice work entirely — reports hundreds of failures that say nothing
+# about this port.
 #
-# To use an interpreter you manage yourself (e.g. a checkout of
-# vgi-rpc-python installed with -e), override PYTHON and the bootstrap is
-# skipped entirely:
+# So the bootstrap prefers a checkout of vgi-rpc-python and installs it
+# editable, which is what CI does (it clones the reference at HEAD). Point
+# VGI_RPC_PYTHON_REPO somewhere else, or at nothing, to change that:
+#
+#	VGI_RPC_PYTHON_REPO=/path/to/vgi-rpc-python make test   # another checkout
+#	VGI_RPC_PYTHON_REPO= make test                          # released wheel
+#
+# With no checkout the bootstrap falls back to VGI_RPC_SPEC from PyPI and says
+# so, so a fresh clone still runs — it just says what it is testing against.
+#
+# To use an interpreter you manage yourself, override PYTHON and the bootstrap
+# is skipped entirely:
 #
 #	PYTHON=/path/to/python make test
 VENV := $(CURDIR)/.venv
 PYTHON ?= $(VENV)/bin/python
 VGI_RPC_SPEC ?= vgi-rpc[http,cli,external]>=0.20.0
+
+# The reference checkout, if one is present. `wildcard` rather than a bare
+# path so that an absent tree is empty rather than a pip error — a default
+# naming one machine's layout must degrade, not break, on every other.
+VGI_RPC_PYTHON_REPO ?= $(wildcard $(HOME)/Development/vgi-rpc-python)
+
+# Extras and pins mirror .github/workflows/ci.yml: the conformance extra
+# carries jsonschema for access-record validation, and httpx2 is pinned to the
+# last release whose zstd decoder actually decodes.
+VGI_RPC_REF_EXTRAS := [http,cli,external,conformance]
+VGI_RPC_TEST_DEPS := pytest pytest-timeout httpx2==2.9.1
 
 # Bootstrap only when PYTHON came from this file — never when the caller
 # supplied their own interpreter.
@@ -73,8 +96,15 @@ venv: $(VENV)/bin/python
 $(VENV)/bin/python:
 	python3 -m venv "$(VENV)"
 	"$(VENV)/bin/python" -m pip install --quiet --upgrade pip
-	"$(VENV)/bin/python" -m pip install --quiet "$(VGI_RPC_SPEC)" pytest pytest-timeout
-	@echo "created $(VENV) with $(VGI_RPC_SPEC)"
+ifeq ($(strip $(VGI_RPC_PYTHON_REPO)),)
+	"$(VENV)/bin/python" -m pip install --quiet "$(VGI_RPC_SPEC)" $(VGI_RPC_TEST_DEPS)
+	@echo "created $(VENV) with $(VGI_RPC_SPEC) (released wheel)"
+	@echo "  note: no vgi-rpc-python checkout found. A released wheel lags the wire;"
+	@echo "  set VGI_RPC_PYTHON_REPO=/path/to/vgi-rpc-python to test against the reference."
+else
+	"$(VENV)/bin/python" -m pip install --quiet -e "$(VGI_RPC_PYTHON_REPO)$(VGI_RPC_REF_EXTRAS)" $(VGI_RPC_TEST_DEPS)
+	@echo "created $(VENV) from $(VGI_RPC_PYTHON_REPO) (editable)"
+endif
 
 # --- Test ------------------------------------------------------------------
 # Two suites, deliberately split (see CLAUDE.md § Testing Policy):

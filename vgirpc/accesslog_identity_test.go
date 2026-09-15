@@ -289,6 +289,13 @@ func TestHTTPStreamTurnsAllNameTheOwningProtocol(t *testing.T) {
 // way all four of these once did, would reintroduce the bug with the suite
 // green -- so the shape is asserted over the source rather than one site at a
 // time.
+//
+// Presence is checked as well as value. An earlier version of this guard only
+// inspected the fields a literal actually set, so a new emit site that left
+// both out entirely -- labelling every one of its records with the zero string
+// rather than with the wrong protocol -- walked straight past it. That is the
+// likelier mistake of the two: forgetting a field is easier than mistyping one,
+// and an empty protocol name is no more readable in a log than a wrong one.
 func TestEveryDispatchInfoLabelsItselfFromTheOwningBinding(t *testing.T) {
 	const wantProtocol, wantHash = "logProtocol", "logHash"
 
@@ -307,7 +314,8 @@ func TestEveryDispatchInfoLabelsItselfFromTheOwningBinding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		file, err := parser.ParseFile(token.NewFileSet(), path, src, 0)
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, src, 0)
 		if err != nil {
 			t.Fatalf("parse %s: %v", path, err)
 		}
@@ -320,6 +328,7 @@ func TestEveryDispatchInfoLabelsItselfFromTheOwningBinding(t *testing.T) {
 				return true
 			}
 			found++
+			seen := map[string]bool{}
 			for _, elt := range lit.Elts {
 				kv, ok := elt.(*ast.KeyValueExpr)
 				if !ok {
@@ -338,12 +347,22 @@ func TestEveryDispatchInfoLabelsItselfFromTheOwningBinding(t *testing.T) {
 				default:
 					continue
 				}
+				seen[key.Name] = true
 				value, ok := kv.Value.(*ast.Ident)
 				if !ok || value.Name != want {
 					t.Errorf("%s: DispatchInfo.%s is not %s from Server.dispatchLabel. "+
 						"An access record must name the protocol that owns the dispatched method "+
 						"and carry that protocol's digest; a server-wide default mislabels every "+
 						"call to a secondary protocol, silently.", path, key.Name, want)
+				}
+			}
+			for field, want := range map[string]string{"Protocol": wantProtocol, "ProtocolHash": wantHash} {
+				if !seen[field] {
+					t.Errorf("%s:%d: DispatchInfo omits %s; set it to %s from Server.dispatchLabel. "+
+						"An omitted field is not a safe default -- it labels every record from this "+
+						"emit site with the empty string, which a log reader can neither join on nor "+
+						"attribute to a protocol.",
+						path, fset.Position(lit.Pos()).Line, field, want)
 				}
 			}
 			return true
