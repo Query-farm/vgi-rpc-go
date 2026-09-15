@@ -80,7 +80,17 @@ type methodInfo struct {
 	OutputSchema  *arrow.Schema     // for streaming methods: output batch schema
 	InputSchema   *arrow.Schema     // for exchange methods: input batch schema (nil for producer)
 	HasHeader     bool              // whether the method returns a stream with header
-	HeaderSchema  *arrow.Schema     // Arrow schema for header type (if HasHeader)
+	// DeclaredStreamKind is "producer" or "exchange" when the registration
+	// stated it, and "" when it did not.
+	//
+	// Separate from Type because the two are independent axes that the
+	// registration helpers used to conflate: a method whose *output schema* is
+	// decided at runtime must register as MethodDynamic, which said nothing
+	// about whether it is a producer or an exchange -- and stream_kind is the
+	// only field in a description that tells a client whether a stream accepts
+	// input. A dynamic schema should not make the kind undiscoverable.
+	DeclaredStreamKind string
+	HeaderSchema       *arrow.Schema // Arrow schema for header type (if HasHeader)
 }
 
 // Server is the RPC server that dispatches incoming requests to registered methods.

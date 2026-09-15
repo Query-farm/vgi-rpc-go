@@ -257,8 +257,12 @@ func streamKindFor(info *methodInfo) string {
 	case MethodExchange:
 		return "exchange"
 	default:
-		// MethodDynamic: the state type is decided at runtime by the handler,
-		// so the protocol genuinely cannot say.
+		// MethodDynamic: the state type is decided at runtime, so the kind is
+		// only knowable if the registration stated it -- which it can, because a
+		// dynamic *schema* is a separate question from producer-vs-exchange.
+		if info.DeclaredStreamKind != "" {
+			return info.DeclaredStreamKind
+		}
 		return "unknown"
 	}
 }

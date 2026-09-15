@@ -234,3 +234,27 @@ func paramsSchemaFor(p any, paramsType reflect.Type) (*arrow.Schema, error) {
 	}
 	return structToSchema(paramsType)
 }
+
+// DynamicProducerWithHeader registers a producer whose output schema is decided
+// at runtime by the handler.
+//
+// Identical to [DynamicStreamWithHeader] except that it states the stream kind,
+// which the description would otherwise report as unknown. The schema being
+// dynamic says nothing about whether the method accepts input, and a client
+// reading a description has no other place to learn that.
+func DynamicProducerWithHeader[P any](s *Server, name string,
+	headerSchema *arrow.Schema,
+	handler func(context.Context, *CallContext, P) (*StreamResult, error),
+) {
+	DynamicStreamWithHeader(s, name, headerSchema, handler)
+	s.methods[name].DeclaredStreamKind = "producer"
+}
+
+// DynamicExchangeWithHeader is [DynamicProducerWithHeader] for an exchange.
+func DynamicExchangeWithHeader[P any](s *Server, name string,
+	headerSchema *arrow.Schema,
+	handler func(context.Context, *CallContext, P) (*StreamResult, error),
+) {
+	DynamicStreamWithHeader(s, name, headerSchema, handler)
+	s.methods[name].DeclaredStreamKind = "exchange"
+}

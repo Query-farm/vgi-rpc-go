@@ -294,7 +294,7 @@ func RegisterMethods(server *vgirpc.Server) {
 	richHeaderSchema := RichHeader{}.ArrowSchema()
 	vgirpc.ProducerWithHeader(server, "produce_with_rich_header", counterSchema, richHeaderSchema, produceWithRichHeader)
 	vgirpc.ExchangeWithHeader(server, "exchange_with_rich_header", scaleOutputSchema, scaleInputSchema, richHeaderSchema, exchangeWithRichHeader)
-	vgirpc.DynamicStreamWithHeader(server, "produce_dynamic_schema", richHeaderSchema, produceDynamicSchema)
+	vgirpc.DynamicProducerWithHeader(server, "produce_dynamic_schema", richHeaderSchema, produceDynamicSchema)
 
 	// Cancellation methods
 	vgirpc.Producer(server, "cancellable_producer", counterSchema, cancellableProducer)
