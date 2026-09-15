@@ -195,7 +195,12 @@ func assertClientEcho(t *testing.T, session *HttpClientStream, expected arrow.Re
 
 func TestPythonNativeClientTypedExchange(t *testing.T) {
 	worker := startPythonClientWorker(t)
-	client, err := NewHttpClient(fmt.Sprintf("http://127.0.0.1:%d", worker.port))
+	// The Python conformance worker names its primary protocol after the
+	// Protocol class it serves; the path segment and vgi_rpc.protocol both
+	// carry it, so this has to be the worker's name and not the in-package
+	// default.
+	client, err := NewHttpClient(fmt.Sprintf("http://127.0.0.1:%d", worker.port),
+		WithClientProtocol("ClientConformanceService"))
 	if err != nil {
 		t.Fatal(err)
 	}

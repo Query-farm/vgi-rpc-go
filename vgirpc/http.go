@@ -61,11 +61,12 @@ func resolveRequestID(r *http.Request) string {
 // HttpServer serves RPC requests over HTTP. It wraps a [Server] and exposes
 // URL routes under a configurable prefix (default ""):
 //
-//	POST /{method}           — unary RPC call
-//	POST /{method}/init      — stream initialization (producer or exchange)
-//	POST /{method}/exchange  — exchange continuation with state token
-//	GET  /                   — landing page (HTML)
-//	GET  /describe           — API reference page (HTML)
+//	POST /{protocol}/{method}           — unary RPC call
+//	POST /{protocol}/{method}/init      — stream initialization (producer or exchange)
+//	POST /{protocol}/{method}/exchange  — exchange continuation with state token
+//	POST /__describe__                  — reserved, server-level, not namespaced
+//	GET  /                              — landing page (HTML)
+//	GET  /describe                      — API reference page (HTML)
 //
 // HttpServer implements [http.Handler] and can be used directly with
 // [http.ListenAndServe] or mounted on an existing [http.ServeMux].
@@ -451,15 +452,28 @@ func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, r *http.Request, isOp
 // from the constructor. HTML GET routes are added lazily by initPages.
 func (h *HttpServer) initRoutes() {
 	h.mux = http.NewServeMux()
-	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/init", h.prefix), h.handleStreamInit)
-	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}/exchange", h.prefix), h.handleStreamExchange)
+	// RPC routes are namespaced by protocol. The path segment is a required
+	// projection of the canonical vgi_rpc.protocol metadata field, so an edge
+	// device can route and apply policy without an Arrow parser; see
+	// http_routing.go. Reflection and Identity are reached the same way as any
+	// application method -- there is no special path for either.
+	h.mux.HandleFunc(fmt.Sprintf("POST %s/{protocol}/{method}/init", h.prefix), h.handleStreamInit)
+	h.mux.HandleFunc(fmt.Sprintf("POST %s/{protocol}/{method}/exchange", h.prefix), h.handleStreamExchange)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/__upload_url__/init", h.prefix), h.handleUploadURLInit)
 	// Always routed, but only ever an oracle once EnableTokenIntrospection has
 	// supplied a resolver. The disabled arm holds nothing and looks nothing
 	// up; it exists so a caller gets a definitive 404 instead of the 415 the
-	// generic {method} route below would answer a JSON body with.
+	// generic reserved route below would answer a JSON body with.
 	h.mux.HandleFunc(fmt.Sprintf("POST %s%s", h.prefix, IntrospectEndpoint), h.handleIntrospectToken)
-	h.mux.HandleFunc(fmt.Sprintf("POST %s/{method}", h.prefix), h.handleUnary)
+	h.mux.HandleFunc(fmt.Sprintf("POST %s/{protocol}/{method}", h.prefix), h.handleUnary)
+	// RPC endpoints are POST-only. Without this, Go's mux answers 405 for any
+	// two-segment GET that matches the wildcard route, including paths that
+	// belong to other features entirely.
+	h.mux.HandleFunc(fmt.Sprintf("GET %s/{protocol}/{method}", h.prefix), h.handleRpcGet)
+	// Reserved framework methods are server-level and owned by no protocol, so
+	// they stay flat. Registered last because it is the least specific pattern;
+	// Go's mux prefers the literal segments above it regardless of order.
+	h.mux.HandleFunc(fmt.Sprintf("POST %s/{reserved}", h.prefix), h.handleReserved)
 	h.mux.HandleFunc(fmt.Sprintf("GET %s", wellKnownURL(h.prefix)), h.handleOAuthWellKnown)
 	// Health is registered at /health (root) regardless of the RPC prefix so
 	// load balancers don't need to know the application path layout. When a

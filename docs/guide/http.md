@@ -13,10 +13,20 @@ Routes use an empty prefix by default:
 
 | Route | Purpose |
 |---|---|
-| `POST /{method}` | Unary RPC call |
-| `POST /{method}/init` | Stream initialization |
-| `POST /{method}/exchange` | Exchange continuation |
-| `POST /__describe__` | Introspection |
+| `POST /{protocol}/{method}` | Unary RPC call |
+| `POST /{protocol}/{method}/init` | Stream initialization |
+| `POST /{protocol}/{method}/exchange` | Exchange continuation |
+| `POST /__describe__` | Introspection (reserved, server-level, not namespaced) |
+
+RPC routes are namespaced by protocol. `vgi_rpc.protocol` in the request
+metadata is canonical -- it is the only carrier on the stdio, unix and
+named-pipe transports -- and the path segment is a required faithful
+projection, present so an edge device can route on the protocol without an
+Arrow parser. A request whose two carriers disagree is refused with 400, a
+percent sign in the protocol segment is refused without decoding, and an
+unhosted protocol is a 404. Co-hosted framework protocols are reached the same
+way as anything else: `POST /vgi_rpc.Reflection.v1/describe`,
+`POST /vgi_rpc.Identity.v1/issue_grant`.
 
 All request and response bodies use `Content-Type: application/vnd.apache.arrow.stream`.
 
@@ -27,7 +37,8 @@ routes. The stream schema is declared when a producer or exchange is opened;
 each exchange input is checked against that schema before dispatch.
 
 ```go
-client, err := vgirpc.NewHttpClient("https://rpc.example.com")
+client, err := vgirpc.NewHttpClient("https://rpc.example.com",
+    vgirpc.WithClientProtocol("my.Service.v1"))
 if err != nil {
     log.Fatal(err)
 }
@@ -75,6 +86,7 @@ proxy-side hostname resolution:
 ```go
 client, err := vgirpc.NewHttpClient(
     "https://worker.example-tailnet.ts.net:9400",
+    vgirpc.WithClientProtocol("my.Service.v1"),
     vgirpc.WithClientTCPProxy("socks5h://127.0.0.1:1055"),
 )
 ```

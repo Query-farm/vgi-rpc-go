@@ -118,7 +118,7 @@ func TestSealedStateTokenShrinksWithACompressibleState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	token, err := h.packCursorToken(callID, state, nil)
+	token, err := h.packCursorToken(callID, state, nil, testProtocol)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestSealedStateTokenShrinksWithACompressibleState(t *testing.T) {
 	}
 
 	// And it still round-trips.
-	back, err := h.openCursorToken(token, nil)
+	back, err := h.openCursorToken(token, nil, testProtocol)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestResolveCallFallsBackToTheClientToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	callToken, err := h.packCallToken(callID, nil, nil, "sid-42", httpResponseBudget{})
+	callToken, err := h.packCallToken(callID, nil, nil, "sid-42", httpResponseBudget{}, testProtocol)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,12 +168,12 @@ func TestResolveCallFallsBackToTheClientToken(t *testing.T) {
 	h.callStates = newCallStateCache(defaultCallStateCacheEntries, h.tokenTTL)
 
 	// Cold cache, no call token -> rejected rather than guessed at.
-	if _, err := h.resolveCall(cursor, nil, nil); err == nil {
+	if _, err := h.resolveCall(cursor, nil, nil, testProtocol); err == nil {
 		t.Fatal("expected a cold-cache resolve with no call token to fail")
 	}
 
 	// Cold cache, with the token -> resolved, and cached for next time.
-	got, err := h.resolveCall(cursor, callToken, nil)
+	got, err := h.resolveCall(cursor, callToken, nil, testProtocol)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestResolveCallFallsBackToTheClientToken(t *testing.T) {
 	}
 
 	// Warm cache -> the presented call token is not consulted at all.
-	got2, err := h.resolveCall(cursor, nil, nil)
+	got2, err := h.resolveCall(cursor, nil, nil, testProtocol)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,12 +200,12 @@ func TestResolveCallRejectsAMismatchedCallID(t *testing.T) {
 	h := NewHttpServer(NewServer())
 	callA, _ := newCallID()
 	callB, _ := newCallID()
-	tokenB, err := h.packCallToken(callB, nil, nil, "sid-b", httpResponseBudget{})
+	tokenB, err := h.packCallToken(callB, nil, nil, "sid-b", httpResponseBudget{}, testProtocol)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cursorA := &cursorTokenData{CreatedAt: time.Now().Unix(), CallID: callA}
-	if _, err := h.resolveCall(cursorA, tokenB, nil); err == nil {
+	if _, err := h.resolveCall(cursorA, tokenB, nil, testProtocol); err == nil {
 		t.Fatal("expected a cursor/call id mismatch to be rejected")
 	}
 }
@@ -217,19 +217,19 @@ func TestCallAndCursorTokensAreNotInterchangeable(t *testing.T) {
 	RegisterStateType(compressibleState{})
 	h := NewHttpServer(NewServer())
 	callID, _ := newCallID()
-	cursor, err := h.packCursorToken(callID, compressibleState{Blob: "x"}, nil)
+	cursor, err := h.packCursorToken(callID, compressibleState{Blob: "x"}, nil, testProtocol)
 	if err != nil {
 		t.Fatal(err)
 	}
-	callToken, err := h.packCallToken(callID, nil, nil, "sid", httpResponseBudget{})
+	callToken, err := h.packCallToken(callID, nil, nil, "sid", httpResponseBudget{}, testProtocol)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.openCursorToken(callToken, nil); err == nil {
+	if _, err := h.openCursorToken(callToken, nil, testProtocol); err == nil {
 		t.Fatal("a call token must not open as a cursor")
 	}
 	var data callTokenData
-	if err := h.openToken(callTokenVersion, cursor, callTokenAad(nil), &data); err == nil {
+	if err := h.openToken(callTokenVersion, cursor, callTokenAad(nil, testProtocol), &data); err == nil {
 		t.Fatal("a cursor must not open as a call token")
 	}
 }

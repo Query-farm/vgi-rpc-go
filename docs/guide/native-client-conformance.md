@@ -6,7 +6,8 @@ declared explicitly, so zero-row and all-null batches keep their exact Arrow
 types, child fields, and nullability.
 
 ```go
-client, err := vgirpc.NewHttpClient("http://127.0.0.1:8080")
+client, err := vgirpc.NewHttpClient("http://127.0.0.1:8080",
+    vgirpc.WithClientProtocol("my.Service.v1"))
 if err != nil {
     log.Fatal(err)
 }

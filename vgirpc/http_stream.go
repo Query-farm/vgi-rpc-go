@@ -31,18 +31,20 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	protocol := r.PathValue("protocol")
 	method := r.PathValue("method")
+
+	// Routing before content type: an unroutable path stays unroutable whatever
+	// the body says. See handleUnary for the full reasoning.
+	info, binding, routeErr := h.resolveHTTPRoute(r, protocol, method)
+	if routeErr != nil {
+		h.writeHttpError(w, http.StatusNotFound, routeErr, nil)
+		return
+	}
 
 	if ct := r.Header.Get("Content-Type"); ct != arrowContentType {
 		h.writeHttpError(w, http.StatusUnsupportedMediaType,
 			fmt.Errorf("unsupported content type: %s", ct), nil)
-		return
-	}
-
-	info, ok := h.server.methods[method]
-	if !ok {
-		h.writeHttpError(w, http.StatusNotFound,
-			&MethodNotImplementedError{Method: method}, nil)
 		return
 	}
 
@@ -69,6 +71,12 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			Type:    "ProtocolError",
 			Message: fmt.Sprintf("Method mismatch: route names %q, request metadata names %q", method, req.Method),
 		}, nil)
+		return
+	}
+	// The path resolved this call; the canonical metadata field must say the
+	// same. See http_routing.go.
+	if carriageErr := h.checkProtocolCarriage(protocol, req.Metadata); carriageErr != nil {
+		h.writeHttpError(w, http.StatusBadRequest, carriageErr, nil)
 		return
 	}
 
@@ -141,13 +149,14 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
 	defer hookCleanup()
 
-	// Application-protocol-version gate. Same as the HTTP unary path —
-	// stream init dispatches directly here without going through
-	// server.serveOne. Stream methods never include ``__describe__``,
-	// but the exemption is kept for symmetry with the unary path.
-	if h.server.protocolVersionSet {
+	// Application-protocol-version gate, against the binding that owns the
+	// resolved method. Same as the HTTP unary path — stream init dispatches
+	// directly here without going through server.serveOne.
+	if binding.VersionSet && !binding.VersionExempt {
 		clientVersion, present := req.Metadata[MetaProtocolVersion]
-		if pverr := h.server.checkProtocolVersion(clientVersion, present); pverr != nil {
+		if pverr := gateVersion(
+			binding.Name, binding.Version, binding.VersionParts, clientVersion, present,
+		); pverr != nil {
 			handlerErr = pverr
 			h.writeHttpError(w, http.StatusBadRequest, pverr, nil)
 			return
@@ -299,8 +308,8 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		handlerErr = err
 		if err == nil && !finished {
 			// The producer remains active — append a continuation token.
-			token, tokenErr := h.packCursorToken(callID, state, auth)
-			callToken, callErr := h.packCallToken(callID, outputSchema, auth, streamID, responseBudgetFromContext(ctx))
+			token, tokenErr := h.packCursorToken(callID, state, auth, protocol)
+			callToken, callErr := h.packCallToken(callID, outputSchema, auth, streamID, responseBudgetFromContext(ctx), protocol)
 			if tokenErr != nil {
 				handlerErr = tokenErr
 			} else if callErr != nil {
@@ -328,12 +337,12 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Exchange init — return state token (carry schema for dynamic methods)
-		token, err := h.packCursorToken(callID, state, auth)
+		token, err := h.packCursorToken(callID, state, auth, protocol)
 		if err != nil {
 			h.writeHttpError(w, http.StatusInternalServerError, err, nil)
 			return
 		}
-		callToken, err := h.packCallToken(callID, outputSchema, auth, streamID, responseBudgetFromContext(ctx))
+		callToken, err := h.packCallToken(callID, outputSchema, auth, streamID, responseBudgetFromContext(ctx), protocol)
 		if err != nil {
 			h.writeHttpError(w, http.StatusInternalServerError, err, nil)
 			return
@@ -395,18 +404,26 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	protocol := r.PathValue("protocol")
 	method := r.PathValue("method")
+
+	// The binding is resolved from this request's own path rather than looked
+	// up by bare method name: a continuation must stay on the protocol its
+	// stream started on, and a bare-name lookup would silently land on whichever
+	// binding declared that name first. The protocol is also bound into the
+	// tokens' AEAD associated data below, so a path that disagrees with the
+	// sealed stream fails the tag check and is refused exactly as an invalid
+	// token -- which is what makes edge visibility hold on continuations, and
+	// for a stream those are most of the requests.
+	info, _, routeErr := h.resolveHTTPRoute(r, protocol, method)
+	if routeErr != nil {
+		h.writeHttpError(w, http.StatusNotFound, routeErr, nil)
+		return
+	}
 
 	if ct := r.Header.Get("Content-Type"); ct != arrowContentType {
 		h.writeHttpError(w, http.StatusUnsupportedMediaType,
 			fmt.Errorf("unsupported content type: %s", ct), nil)
-		return
-	}
-
-	info, ok := h.server.methods[method]
-	if !ok {
-		h.writeHttpError(w, http.StatusNotFound,
-			&MethodNotImplementedError{Method: method}, nil)
 		return
 	}
 
@@ -507,12 +524,12 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	// covers the caller, so the id is authenticated before it is used to
 	// resolve anything. See resolveCall for why that ordering is the whole
 	// security argument for the cache.
-	tokenData, err := h.openCursorToken(tokenBytes, auth)
+	tokenData, err := h.openCursorToken(tokenBytes, auth, protocol)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
 	}
-	call, err := h.resolveCall(tokenData, callTokenBytes, auth)
+	call, err := h.resolveCall(tokenData, callTokenBytes, auth, protocol)
 	if err != nil {
 		h.writeHttpError(w, http.StatusBadRequest, err, nil)
 		return
@@ -611,9 +628,9 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	}
 
 	if isProducer {
-		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, peerEvidence, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx, inputMeta)
+		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, peerEvidence, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx, inputMeta, protocol)
 	} else {
-		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, inputMeta, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, peerEvidence, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx)
+		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, inputMeta, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, peerEvidence, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx, protocol)
 	}
 }
 
@@ -657,7 +674,7 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 // handleProducerContinuation runs one producer transition for a continuation request.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, requestMeta arrow.Metadata) error {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, requestMeta arrow.Metadata, protocol string) error {
 
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
@@ -673,7 +690,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 	finished, err := h.runProduceTurn(ctx, writer, schema, state, info, stats, auth, peerEvidence, transportMeta, cookies, sink, stripFrameworkTickMetadata(requestMeta))
 	if err == nil && !finished {
 		// The producer remains active — append a continuation token.
-		token, tokenErr := h.packCursorToken(callID, state, auth)
+		token, tokenErr := h.packCursorToken(callID, state, auth, protocol)
 		if tokenErr != nil {
 			err = tokenErr
 		} else if werr := writeStateTokenBatch(writer, schema, token, nil); werr != nil {
@@ -702,7 +719,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 // handleExchangeCall processes one exchange and returns the result with updated token.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWriter, inputBatch arrow.RecordBatch,
-	inputMeta arrow.Metadata, schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink) error {
+	inputMeta arrow.Metadata, schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, protocol string) error {
 
 	// Record input stats
 	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
@@ -767,7 +784,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	}
 
 	// Serialize updated state into new token (carry schema for dynamic methods)
-	newToken, err := h.packCursorToken(callID, state, auth)
+	newToken, err := h.packCursorToken(callID, state, auth, protocol)
 	if err != nil {
 		out.releaseBatches()
 		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.debugErrors))

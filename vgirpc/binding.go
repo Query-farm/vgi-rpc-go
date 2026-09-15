@@ -90,9 +90,15 @@ type protocolBinding struct {
 // does not host, and a client acts differently on each.
 type ProtocolNotSpecifiedError struct {
 	Hosted []string
+	// Detail replaces the generic message when the routing key is present but
+	// unusable as a carrier -- a percent sign in the HTTP path segment, say.
+	Detail string
 }
 
 func (e *ProtocolNotSpecifiedError) Error() string {
+	if e.Detail != "" {
+		return e.Detail
+	}
 	return fmt.Sprintf(
 		"request carries no '%s' routing key; every request must name the protocol it addresses. This server hosts: %v",
 		MetaProtocol, e.Hosted,

@@ -237,7 +237,7 @@ func (transport *testIrohHTTPTransport) Close() error {
 func TestNewIrohHTTPClientReusesHTTPStateMachineAndOwnsTransport(t *testing.T) {
 	provider := &testIrohHTTPProvider{}
 	client, err := NewIrohHTTPClient(context.Background(), "httpi://"+testIrohID+"/api", provider,
-		IrohClientOptions{RemoteRelayURL: "https://relay.example"})
+		IrohClientOptions{RemoteRelayURL: "https://relay.example"}, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +292,7 @@ func (failingIrohHTTPProvider) OpenIrohHTTP(context.Context, IrohEndpoint, IrohC
 
 func TestIrohHTTPClientPreservesStructuredTransportErrors(t *testing.T) {
 	client, err := NewIrohHTTPClient(context.Background(), "httpi://"+testIrohID,
-		failingIrohHTTPProvider{}, IrohClientOptions{})
+		failingIrohHTTPProvider{}, IrohClientOptions{}, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}

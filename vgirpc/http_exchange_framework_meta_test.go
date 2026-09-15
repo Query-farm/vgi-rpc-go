@@ -106,7 +106,7 @@ func TestHTTPExchangeStripsFrameworkInputMetadata(t *testing.T) {
 	paramsBatch.Release()
 	paramsArr.Release()
 
-	initResp, err := http.Post(ts.URL+"/framework_meta/init", "application/vnd.apache.arrow.stream", &initBody)
+	initResp, err := http.Post(ts.URL+"/Service/framework_meta/init", "application/vnd.apache.arrow.stream", &initBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestHTTPExchangeStripsFrameworkInputMetadata(t *testing.T) {
 	inputBatch.Release()
 	valueArr.Release()
 
-	exResp, err := http.Post(ts.URL+"/framework_meta/exchange", "application/vnd.apache.arrow.stream", &exBody)
+	exResp, err := http.Post(ts.URL+"/Service/framework_meta/exchange", "application/vnd.apache.arrow.stream", &exBody)
 	if err != nil {
 		t.Fatal(err)
 	}

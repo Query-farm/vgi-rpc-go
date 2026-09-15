@@ -77,8 +77,12 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 `ClientBatch` values and stream headers are caller-owned and must be released.
 `HttpClientStream.Close` only releases local state.
 
-Client options configure the underlying `net/http` client, URL prefix, request
-headers, protocol version, request and response size limits, and the
+`WithClientProtocol("my.Service.v1")` is **required**: the routing key rides
+both as `vgi_rpc.protocol` and as the path's protocol segment, so a client that
+names no protocol is refused at construction rather than on arrival.
+
+Client options otherwise configure the underlying `net/http` client, URL prefix,
+request headers, protocol version, request and response size limits, and the
 client-directed log handler.
 
 `WithClientTCPProxy("socks5h://127.0.0.1:1055")` selects an explicit SOCKS5h

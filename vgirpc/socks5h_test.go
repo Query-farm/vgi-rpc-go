@@ -152,6 +152,7 @@ func TestClientTCPProxyCannotBeCombinedWithInjectedHTTPClient(t *testing.T) {
 		"http://worker.example:9400",
 		WithClientTCPProxy("socks5h://127.0.0.1:1055"),
 		WithClientHTTPClient(&http.Client{}),
+		WithClientProtocol(testProtocol),
 	)
 	if err == nil {
 		t.Fatal("conflicting client transport options succeeded")
@@ -193,6 +194,7 @@ func TestClientTCPProxyCarriesHTTPWithoutLocalTargetResolution(t *testing.T) {
 	client, err := NewHttpClient(
 		"http://worker.vgi-test.invalid:9400",
 		WithClientTCPProxy("socks5h://"+listener.Addr().String()),
+		WithClientProtocol(testProtocol),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -227,7 +229,7 @@ func TestClientTCPProxyFailureNeverFallsBackToDirectTCP(t *testing.T) {
 	}
 	proxyAddress := unusedProxy.Addr().String()
 	unusedProxy.Close()
-	client, err := NewHttpClient(target.URL, WithClientTCPProxy("socks5h://"+proxyAddress))
+	client, err := NewHttpClient(target.URL, WithClientTCPProxy("socks5h://"+proxyAddress), WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}

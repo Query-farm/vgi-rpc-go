@@ -326,6 +326,14 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 	if cfg.acceptedMaxResponse < minResponseBudgetBytes {
 		return nil, fmt.Errorf("vgirpc: effective accepted response limit must be at least %d", minResponseBudgetBytes)
 	}
+	// Required, with no single-protocol exemption: the routing key rides both
+	// as vgi_rpc.protocol and as a path segment, and neither can be synthesized
+	// here. A client that names no protocol has nothing to put in the path and
+	// would be refused with protocol_not_specified on arrival anyway, so it is
+	// refused at construction where the message can name the fix.
+	if cfg.protocol == "" {
+		return nil, errors.New("vgirpc: a client protocol is required; pass WithClientProtocol")
+	}
 	if cfg.tcpProxy != "" {
 		if cfg.customHTTPClient {
 			return nil, errors.New("vgirpc: WithClientTCPProxy cannot be combined with WithClientHTTPClient")
@@ -381,7 +389,7 @@ func (c *HttpClient) CallUnary(
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.post(ctx, method, body)
+	response, err := c.post(ctx, c.rpcPath(method, ""), body)
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +448,7 @@ func (c *HttpClient) openStream(
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.post(ctx, method+"/init", body)
+	response, err := c.post(ctx, c.rpcPath(method, "/init"), body)
 	if err != nil {
 		return nil, err
 	}
@@ -529,9 +537,7 @@ func (c *HttpClient) initialBody(method string, params arrow.RecordBatch) ([]byt
 	metadata := recordMetadata(params)
 	stripClientControlMetadata(metadata)
 	metadata[MetaMethod] = method
-	if c.protocol != "" {
-		metadata[MetaProtocol] = c.protocol
-	}
+	metadata[MetaProtocol] = c.protocol
 	metadata[MetaRequestVersion] = ProtocolVersion
 	metadata[MetaRequestID] = requestID
 	if c.protocolVersion != "" {
@@ -552,6 +558,17 @@ func (r clientHTTPResponse) wrap(err error) error {
 		return err
 	}
 	return err
+}
+
+// rpcPath renders one RPC endpoint below the client's prefix.
+//
+// The protocol is a path segment, not only a metadata field: it is the
+// projection an edge device routes on, and a client that sends only the
+// metadata leaves every intermediary in front of the worker unable to tell one
+// protocol from another. suffix is "" for unary, "/init" or "/exchange" for
+// streams.
+func (c *HttpClient) rpcPath(method, suffix string) string {
+	return c.protocol + "/" + method + suffix
 }
 
 func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (clientHTTPResponse, error) {
@@ -739,7 +756,7 @@ func (s *HttpClientStream) Next(ctx context.Context) (batch *ClientBatch, ok boo
 		if err != nil {
 			return nil, false, err
 		}
-		response, err := s.client.post(ctx, s.method+"/exchange", body)
+		response, err := s.client.post(ctx, s.client.rpcPath(s.method, "/exchange"), body)
 		if err != nil {
 			return nil, false, err
 		}
@@ -787,7 +804,7 @@ func (s *HttpClientStream) Exchange(ctx context.Context, input arrow.RecordBatch
 	// reactivate the session with its newly minted cursor.
 	s.token = ""
 	s.finished = true
-	response, err := s.client.post(ctx, s.method+"/exchange", body)
+	response, err := s.client.post(ctx, s.client.rpcPath(s.method, "/exchange"), body)
 	if err != nil {
 		return nil, err
 	}
@@ -822,7 +839,7 @@ func (s *HttpClientStream) Cancel(ctx context.Context) error {
 	body, err := s.continuationBody(true, nil)
 	if err == nil {
 		var response clientHTTPResponse
-		response, err = s.client.post(ctx, s.method+"/exchange", body)
+		response, err = s.client.post(ctx, s.client.rpcPath(s.method, "/exchange"), body)
 		if err == nil {
 			var parsed *parsedClientStream
 			parsed, err = s.client.parseMain(response, s.schemas.Output, false)

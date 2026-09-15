@@ -257,7 +257,7 @@ func TestChooseResponseEncoding(t *testing.T) {
 func serveUnaryWithHeaders(t *testing.T, h *HttpServer, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 	body := encodeRequestBody(t, "add", benchAddParams{A: 1.5, B: 2.5})
-	req := httptest.NewRequest(http.MethodPost, "/add", bytes.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/Service/add", bytes.NewReader(body))
 	req.Header.Set("Content-Type", arrowContentType)
 	for k, v := range headers {
 		req.Header.Set(k, v)

@@ -23,7 +23,7 @@ func TestHTTPUnaryLiveHeapPlateaus(t *testing.T) {
 
 	call := func() {
 		t.Helper()
-		req := httptest.NewRequest(http.MethodPost, "/add", bytes.NewReader(body))
+		req := httptest.NewRequest(http.MethodPost, "/Service/add", bytes.NewReader(body))
 		req.Header.Set("Content-Type", arrowContentType)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, req)

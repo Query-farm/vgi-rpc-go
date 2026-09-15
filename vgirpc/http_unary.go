@@ -28,23 +28,22 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	protocol := r.PathValue("protocol")
 	method := r.PathValue("method")
+
+	// Routing before content type. A request naming a protocol this server does
+	// not host is unroutable whatever its body is, and 404 is the answer a
+	// caller can act on -- 415 reads as "fix your header and retry", which would
+	// loop forever against a path that will never resolve.
+	info, binding, routeErr := h.resolveHTTPRoute(r, protocol, method)
+	if routeErr != nil {
+		h.writeHttpError(w, http.StatusNotFound, routeErr, nil)
+		return
+	}
 
 	if ct := r.Header.Get("Content-Type"); ct != arrowContentType {
 		h.writeHttpError(w, http.StatusUnsupportedMediaType,
 			fmt.Errorf("unsupported content type: %s", ct), nil)
-		return
-	}
-
-	if method == "__describe__" {
-		h.handleDescribe(w, r)
-		return
-	}
-
-	info, ok := h.server.methods[method]
-	if !ok {
-		h.writeHttpError(w, http.StatusNotFound,
-			&MethodNotImplementedError{Method: method}, nil)
 		return
 	}
 
@@ -71,6 +70,13 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 			Type:    "ProtocolError",
 			Message: fmt.Sprintf("Method mismatch: route names %q, request metadata names %q", method, req.Method),
 		}, nil)
+		return
+	}
+	// The path resolved this call; the canonical metadata field must say the
+	// same. See http_routing.go for why a disagreement is refused rather than
+	// resolved in favour of either carrier.
+	if carriageErr := h.checkProtocolCarriage(protocol, req.Metadata); carriageErr != nil {
+		h.writeHttpError(w, http.StatusBadRequest, carriageErr, nil)
 		return
 	}
 
@@ -132,16 +138,23 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	ctx, hookCleanup := h.startDispatchHook(r.Context(), dispatchInfo, stats, &handlerErr)
 	defer hookCleanup()
 
-	// Application-protocol-version gate. HTTP doesn't route through
-	// server.serveOne — the check has to be wired in independently at
-	// the same point in the dispatch boundary (after method lookup,
-	// before deserialize). ``__describe__`` is exempt (handled above
-	// via h.handleDescribe). Mismatch surfaces as a 400 EXCEPTION batch
-	// carrying vgi_rpc.error_kind = "protocol_version_mismatch" with the
-	// directional message intact.
-	if h.server.protocolVersionSet {
+	// Application-protocol-version gate, against the binding that owns the
+	// resolved method. HTTP doesn't route through server.serveOne — the check
+	// has to be wired in independently at the same point in the dispatch
+	// boundary (after method lookup, before deserialize). A server hosting
+	// several protocols has a version per binding and no single "server
+	// version", so gating a secondary against the primary would reject correct
+	// callers and name the wrong protocol when it did. A version-exempt binding
+	// (reflection) is skipped: it is what a mismatched client calls to learn
+	// what mismatched. ``__describe__`` never reaches here — it is a reserved,
+	// un-namespaced route. Mismatch surfaces as a 400 EXCEPTION batch carrying
+	// vgi_rpc.error_kind = "protocol_version_mismatch" with the directional
+	// message intact.
+	if binding.VersionSet && !binding.VersionExempt {
 		clientVersion, present := req.Metadata[MetaProtocolVersion]
-		if pverr := h.server.checkProtocolVersion(clientVersion, present); pverr != nil {
+		if pverr := gateVersion(
+			binding.Name, binding.Version, binding.VersionParts, clientVersion, present,
+		); pverr != nil {
 			handlerErr = pverr
 			h.writeHttpError(w, http.StatusBadRequest, pverr, info.ResultSchema)
 			return

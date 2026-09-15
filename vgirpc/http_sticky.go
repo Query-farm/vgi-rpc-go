@@ -221,7 +221,7 @@ func (h *HttpServer) installStickyOnRequestNoCtx(r *http.Request, auth *AuthCont
 		return cleanup, nil
 	}
 
-	aad := stateTokenAad(auth)
+	aad := stateTokenAad(auth, serverTokenScope)
 	gotServerID, sid, _expiresAt, err := openSessionToken(tokenHeader, h.tokenKey, aad)
 	if err != nil {
 		return cleanup, err
@@ -302,7 +302,7 @@ func (h *HttpServer) handleStickyDelete(w http.ResponseWriter, r *http.Request) 
 	if auth == nil {
 		auth = Anonymous()
 	}
-	aad := stateTokenAad(auth)
+	aad := stateTokenAad(auth, serverTokenScope)
 	gotServerID, sid, _expiresAt, err := openSessionToken(tokenHeader, h.tokenKey, aad)
 	if err != nil {
 		// Idempotent — don't surface the failure mode.

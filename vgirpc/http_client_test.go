@@ -61,7 +61,7 @@ func TestHttpClientUnaryAndProducerLifecycle(t *testing.T) {
 	})
 	httpServer := httptest.NewServer(NewHttpServer(server))
 	defer httpServer.Close()
-	client, err := NewHttpClient(httpServer.URL)
+	client, err := NewHttpClient(httpServer.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestHttpClientRejectsMultipleProducerBatchesPerTurn(t *testing.T) {
 		_, _ = w.Write(body.Bytes())
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL)
+	client, err := NewHttpClient(server.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +154,7 @@ func TestHttpClientParses200ExceptionEnvelope(t *testing.T) {
 	httpServer := httptest.NewServer(NewHttpServer(server))
 	defer httpServer.Close()
 
-	client, err := NewHttpClient(httpServer.URL)
+	client, err := NewHttpClient(httpServer.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestHttpClientRejectsRPCErrorHeaderWithoutException(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL)
+	client, err := NewHttpClient(server.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +227,7 @@ func TestHttpClientPoisonsAmbiguousExchange(t *testing.T) {
 		_, _ = w.Write([]byte{0xff, 0x00, 0x01})
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL)
+	client, err := NewHttpClient(server.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestHttpClientPoisonsAmbiguousExchange(t *testing.T) {
 }
 
 func TestHttpClientInitialMetadataPreservedAndReservedOverwritten(t *testing.T) {
-	client, err := NewHttpClient("http://127.0.0.1:1")
+	client, err := NewHttpClient("http://127.0.0.1:1", WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestHttpClientRejectsExchangeInputSchemaMetadataDriftBeforeDispatch(t *test
 		exchanges.Add(1)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL)
+	client, err := NewHttpClient(server.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +359,7 @@ func TestHttpClientRejectsResponseSchemaMetadataDrift(t *testing.T) {
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL)
+	client, err := NewHttpClient(server.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,7 +377,7 @@ func TestHttpClientRejectsUnknownResponseEncoding(t *testing.T) {
 		_, _ = w.Write([]byte("encoded"))
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL)
+	client, err := NewHttpClient(server.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestHttpClientCapsIPCSerializationBeforeDispatch(t *testing.T) {
 		requests.Add(1)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL, WithClientRequestLimit(64))
+	client, err := NewHttpClient(server.URL, WithClientRequestLimit(64), WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -425,7 +425,7 @@ func TestHttpClientCapsKnownLengthResponseAndRecovers(t *testing.T) {
 		_, _ = w.Write(valid)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL, WithClientResponseLimits(64<<10, 128<<10))
+	client, err := NewHttpClient(server.URL, WithClientResponseLimits(64<<10, 128<<10), WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -452,7 +452,7 @@ func TestHttpClientCapsChunkedResponseAndRecovers(t *testing.T) {
 		_, _ = w.Write(valid)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL, WithClientResponseLimits(64<<10, 128<<10))
+	client, err := NewHttpClient(server.URL, WithClientResponseLimits(64<<10, 128<<10), WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +480,7 @@ func TestHttpClientCapsDecodedResponseAndRecovers(t *testing.T) {
 		_, _ = w.Write(valid)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL, WithClientResponseLimits(128<<10, 64<<10))
+	client, err := NewHttpClient(server.URL, WithClientResponseLimits(128<<10, 64<<10), WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +510,7 @@ func TestHttpClientAcceptedLimitAndLocalCeilingsAreOrderIndependent(t *testing.T
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client, err := NewHttpClient("http://example.test", tc.options...)
+			client, err := NewHttpClient("http://example.test", append(tc.options, WithClientProtocol(testProtocol))...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -521,7 +521,7 @@ func TestHttpClientAcceptedLimitAndLocalCeilingsAreOrderIndependent(t *testing.T
 			}
 		})
 	}
-	if _, err := NewHttpClient("http://example.test", WithClientResponseLimits(1024, 1024)); err == nil {
+	if _, err := NewHttpClient("http://example.test", WithClientResponseLimits(1024, 1024), WithClientProtocol(testProtocol)); err == nil {
 		t.Fatal("response limits below the wire minimum produced an untruthful accepted advertisement")
 	}
 }
@@ -535,7 +535,7 @@ func TestHttpClientAcceptedOneGiBRaisesDefaultLocalCeilings(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL, WithClientAcceptedMaxResponseBytes(accepted))
+	client, err := NewHttpClient(server.URL, WithClientAcceptedMaxResponseBytes(accepted), WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +567,7 @@ func TestHttpClientRequiresAndCachesResponseBudgetDiscovery(t *testing.T) {
 		_, _ = w.Write(validEmptyClientResponse(t))
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL)
+	client, err := NewHttpClient(server.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +599,7 @@ func TestHttpClientRejectsUnsupportedResponseBudgetBeforeDispatch(t *testing.T) 
 		posts.Add(1)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL)
+	client, err := NewHttpClient(server.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -623,7 +623,7 @@ func TestHttpClientEnforcesAdvertisedAcceptedLimitBeforeAllocation(t *testing.T)
 	defer server.Close()
 	client, err := NewHttpClient(server.URL,
 		WithClientResponseLimits(128<<10, 128<<10),
-		WithClientAcceptedMaxResponseBytes(64<<10))
+		WithClientAcceptedMaxResponseBytes(64<<10), WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -653,7 +653,7 @@ func TestHttpClientRequiresSupportOnEveryResponseAndPreservesAdvertisedLimit(t *
 				_, _ = w.Write(bytes.Repeat([]byte("x"), 70_000))
 			}))
 			defer server.Close()
-			client, err := NewHttpClient(server.URL)
+			client, err := NewHttpClient(server.URL, WithClientProtocol(testProtocol))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -717,7 +717,7 @@ func TestHttpClientStreamCloseIsLocalAndCancelIsExplicit(t *testing.T) {
 		_, _ = w.Write(cancelBody.Bytes())
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL)
+	client, err := NewHttpClient(server.URL, WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}

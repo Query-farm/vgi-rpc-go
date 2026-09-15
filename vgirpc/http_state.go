@@ -300,10 +300,12 @@ func unpackTokenPayload(data []byte) ([]byte, error) {
 }
 
 // stateTokenAad builds the AEAD associated data that binds a state token
-// to the authenticated caller. Mirrors Python's _compute_aad in
+// to the authenticated caller and to the protocol that owns its stream.
+// Mirrors Python's _compute_aad in
 // vgi_rpc/http/server/_state_token.py byte-for-byte: anonymous tokens
 // carry b"\x00anonymous"; authenticated tokens carry
-// b"\x01" + domain + b"\x00" + principal.
+// b"\x01" + domain + b"\x00" + principal; both then carry
+// b"\x00" + protocol.
 //
 // The domain MUST appear between the 0x01 byte and the principal even
 // when empty — Python emits b"\x01\x00" + principal in that case, so
@@ -312,12 +314,24 @@ func unpackTokenPayload(data []byte) ([]byte, error) {
 // another (cross-domain replay). Anonymous and authenticated branches
 // produce non-overlapping byte strings so an anonymous token cannot be
 // opened by a named principal and vice versa.
-func stateTokenAad(auth *AuthContext) []byte {
-	prefix := []byte("vgi_rpc.state.v4\x00")
+//
+// The protocol is part of the AAD rather than of the plaintext so a
+// cross-protocol continuation fails the tag check and is rejected exactly as
+// an invalid token: there is no comparison code to get wrong, and nothing to
+// forget on the call-state cache-hit path, where the call token is never
+// opened at all. The cursor token is always opened first, so binding the
+// protocol here covers both paths.
+//
+// protocol is a protocol's wire name, or [serverTokenScope] for a token that
+// belongs to the server rather than to any one protocol. Passing it is
+// deliberate at every call site: a new one has to name its scope rather than
+// silently inheriting an unbound token.
+func stateTokenAad(auth *AuthContext, protocol string) []byte {
+	prefix := []byte("vgi_rpc.state.v6\x00")
 	if peerEvidenceBinding(auth) != "" {
-		prefix = []byte("vgi_rpc.state.v5\x00")
+		prefix = []byte("vgi_rpc.state.v7\x00")
 	}
-	return tokenAad(prefix, auth)
+	return tokenAad(prefix, auth, protocol)
 }
 
 // callTokenAad is stateTokenAad's counterpart for call tokens. The prefix
@@ -325,15 +339,15 @@ func stateTokenAad(auth *AuthContext) []byte {
 // interchangeable even for the same principal: presenting one where the
 // other is expected fails the AEAD tag check rather than decoding into a
 // payload the reader would misinterpret.
-func callTokenAad(auth *AuthContext) []byte {
-	prefix := []byte("vgi_rpc.call.v1\x00")
+func callTokenAad(auth *AuthContext, protocol string) []byte {
+	prefix := []byte("vgi_rpc.call.v3\x00")
 	if peerEvidenceBinding(auth) != "" {
-		prefix = []byte("vgi_rpc.call.v2\x00")
+		prefix = []byte("vgi_rpc.call.v4\x00")
 	}
-	return tokenAad(prefix, auth)
+	return tokenAad(prefix, auth, protocol)
 }
 
-func tokenAad(prefix []byte, auth *AuthContext) []byte {
+func tokenAad(prefix []byte, auth *AuthContext, protocol string) []byte {
 	binding := peerEvidenceBinding(auth)
 	if auth == nil || !auth.Authenticated {
 		out := append(prefix, []byte("\x00anonymous")...)
@@ -341,9 +355,10 @@ func tokenAad(prefix []byte, auth *AuthContext) []byte {
 			out = append(out, 0x00)
 			out = append(out, binding...)
 		}
-		return out
+		out = append(out, 0x00)
+		return append(out, protocol...)
 	}
-	out := make([]byte, 0, len(prefix)+1+len(auth.Domain)+1+len(auth.Principal)+1+len(binding))
+	out := make([]byte, 0, len(prefix)+1+len(auth.Domain)+1+len(auth.Principal)+1+len(binding)+1+len(protocol))
 	out = append(out, prefix...)
 	out = append(out, 0x01)
 	out = append(out, auth.Domain...)
@@ -353,7 +368,8 @@ func tokenAad(prefix []byte, auth *AuthContext) []byte {
 		out = append(out, 0x00)
 		out = append(out, binding...)
 	}
-	return out
+	out = append(out, 0x00)
+	return append(out, protocol...)
 }
 
 func peerEvidenceBinding(auth *AuthContext) string {
@@ -473,7 +489,7 @@ func normalizeTokenKey(key []byte) []byte {
 
 // packCallToken seals the half of a stream's state that is fixed for the
 // life of the call. Minted once, by /init; never re-issued.
-func (h *HttpServer) packCallToken(callID string, outputSchema *arrow.Schema, auth *AuthContext, streamID string, budget httpResponseBudget) ([]byte, error) {
+func (h *HttpServer) packCallToken(callID string, outputSchema *arrow.Schema, auth *AuthContext, streamID string, budget httpResponseBudget, protocol string) ([]byte, error) {
 	data := callTokenData{
 		CreatedAt:         time.Now().Unix(),
 		CallID:            callID,
@@ -484,7 +500,7 @@ func (h *HttpServer) packCallToken(callID string, outputSchema *arrow.Schema, au
 	if outputSchema != nil {
 		data.SchemaIPC = serializeSchema(outputSchema)
 	}
-	token, err := h.sealToken(callTokenVersion, &data, callTokenAad(auth))
+	token, err := h.sealToken(callTokenVersion, &data, callTokenAad(auth, protocol))
 	if err != nil {
 		return nil, err
 	}
@@ -499,19 +515,19 @@ func (h *HttpServer) packCallToken(callID string, outputSchema *arrow.Schema, au
 
 // packCursorToken seals the advancing half. Re-minted every turn; this is
 // the only token a response returns.
-func (h *HttpServer) packCursorToken(callID string, state interface{}, auth *AuthContext) ([]byte, error) {
+func (h *HttpServer) packCursorToken(callID string, state interface{}, auth *AuthContext, protocol string) ([]byte, error) {
 	data := cursorTokenData{
 		CreatedAt: time.Now().Unix(),
 		CallID:    callID,
 		State:     state,
 	}
-	return h.sealToken(cursorTokenVersion, &data, stateTokenAad(auth))
+	return h.sealToken(cursorTokenVersion, &data, stateTokenAad(auth, protocol))
 }
 
 // openCursorToken authenticates a cursor and returns its contents.
-func (h *HttpServer) openCursorToken(token []byte, auth *AuthContext) (*cursorTokenData, error) {
+func (h *HttpServer) openCursorToken(token []byte, auth *AuthContext, protocol string) (*cursorTokenData, error) {
 	var data cursorTokenData
-	if err := h.openToken(cursorTokenVersion, token, stateTokenAad(auth), &data); err != nil {
+	if err := h.openToken(cursorTokenVersion, token, stateTokenAad(auth, protocol), &data); err != nil {
 		return nil, err
 	}
 	if err := h.checkTokenAge(data.CreatedAt); err != nil {
@@ -535,7 +551,7 @@ func (h *HttpServer) openCursorToken(token []byte, auth *AuthContext) (*cursorTo
 // node that never saw this stream's /init) the client-supplied call token is
 // opened and verified, and its embedded CallID must match the one the cursor
 // named.
-func (h *HttpServer) resolveCall(cursor *cursorTokenData, callToken []byte, auth *AuthContext) (*resolvedCall, error) {
+func (h *HttpServer) resolveCall(cursor *cursorTokenData, callToken []byte, auth *AuthContext, protocol string) (*resolvedCall, error) {
 	if got := h.callStates.get(cursor.CallID, auth); got != nil {
 		return got, nil
 	}
@@ -544,7 +560,7 @@ func (h *HttpServer) resolveCall(cursor *cursorTokenData, callToken []byte, auth
 	}
 
 	var data callTokenData
-	if err := h.openToken(callTokenVersion, callToken, callTokenAad(auth), &data); err != nil {
+	if err := h.openToken(callTokenVersion, callToken, callTokenAad(auth, protocol), &data); err != nil {
 		return nil, err
 	}
 	if err := h.checkTokenAge(data.CreatedAt); err != nil {

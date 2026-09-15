@@ -318,16 +318,6 @@ func (s *Server) ProtocolVersion() string {
 	return s.protocolVersion
 }
 
-// checkProtocolVersion validates a client's declared protocol_version
-// against the server's. Returns a *ProtocolVersionError on mismatch
-// (including missing / malformed / undecodable) or nil on match. Caller
-// is responsible for invoking only when “s.protocolVersionSet“ is true.
-// Mirrors Python's RpcServer._check_protocol_version directional-message
-// format byte-for-byte.
-func (s *Server) checkProtocolVersion(clientVersion string, present bool) *ProtocolVersionError {
-	return gateVersion(s.primaryProtocolName(), s.protocolVersion, s.protocolVersionParts, clientVersion, present)
-}
-
 // gateVersion enforces one binding's declared protocol_version.
 //
 // Takes the binding's name and version rather than reading the server's,

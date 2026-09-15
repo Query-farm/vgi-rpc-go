@@ -110,7 +110,7 @@ func (ctx *CallContext) OpenSession(state any, ttl time.Duration) error {
 	if err != nil {
 		return err
 	}
-	aad := stateTokenAad(sink.auth)
+	aad := stateTokenAad(sink.auth, serverTokenScope)
 	token, sealErr := sealSessionToken(sink.tokenKey, sink.serverID, sid, expiresAt.Unix(), aad, 0)
 	if sealErr != nil {
 		// Roll back the registry entry so a partially-opened session

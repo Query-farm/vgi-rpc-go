@@ -204,7 +204,7 @@ func TestHTTPStreamInitPanicBecomesRuntimeErrorAndEndsHook(t *testing.T) {
 
 	params := regressionBatch(t, 1)
 	defer params.Release()
-	req := httptest.NewRequest(http.MethodPost, "/panic_http_stream/init", bytes.NewReader(regressionRequest(t, "panic_http_stream", params)))
+	req := httptest.NewRequest(http.MethodPost, "/Service/panic_http_stream/init", bytes.NewReader(regressionRequest(t, "panic_http_stream", params)))
 	req.Header.Set("Content-Type", arrowContentType)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -246,10 +246,10 @@ func TestHTTPStreamInitResolvesExternalParams(t *testing.T) {
 	pointer, locationMeta := MakeExternalLocationBatch(regressionSchema, fetch.URL)
 	defer pointer.Release()
 	meta := arrow.NewMetadata(
-		[]string{MetaMethod, MetaRequestVersion, MetaLocation},
-		[]string{"external_init", ProtocolVersion, locationMeta.Values()[0]},
+		[]string{MetaMethod, MetaProtocol, MetaRequestVersion, MetaLocation},
+		[]string{"external_init", testProtocol, ProtocolVersion, locationMeta.Values()[0]},
 	)
-	req := httptest.NewRequest(http.MethodPost, "/external_init/init", bytes.NewReader(regressionIPC(t, pointer, meta)))
+	req := httptest.NewRequest(http.MethodPost, "/Service/external_init/init", bytes.NewReader(regressionIPC(t, pointer, meta)))
 	req.Header.Set("Content-Type", arrowContentType)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -279,7 +279,7 @@ func TestHTTPStreamExchangeResolvesExternalInput(t *testing.T) {
 	h.InitPages()
 
 	params := regressionBatch(t, 1)
-	initReq := httptest.NewRequest(http.MethodPost, "/external_exchange/init", bytes.NewReader(regressionRequest(t, "external_exchange", params)))
+	initReq := httptest.NewRequest(http.MethodPost, "/Service/external_exchange/init", bytes.NewReader(regressionRequest(t, "external_exchange", params)))
 	params.Release()
 	initReq.Header.Set("Content-Type", arrowContentType)
 	initW := httptest.NewRecorder()
@@ -304,7 +304,7 @@ func TestHTTPStreamExchangeResolvesExternalInput(t *testing.T) {
 		[]string{MetaStreamState, MetaCallState, MetaLocation},
 		[]string{string(token), string(callToken), fetch.URL},
 	)
-	exReq := httptest.NewRequest(http.MethodPost, "/external_exchange/exchange", bytes.NewReader(regressionIPC(t, pointer, meta)))
+	exReq := httptest.NewRequest(http.MethodPost, "/Service/external_exchange/exchange", bytes.NewReader(regressionIPC(t, pointer, meta)))
 	exReq.Header.Set("Content-Type", arrowContentType)
 	exW := httptest.NewRecorder()
 	h.ServeHTTP(exW, exReq)
@@ -392,7 +392,7 @@ func TestUnaryExternalizedResultOwnership(t *testing.T) {
 			} else {
 				h := NewHttpServer(s)
 				h.InitPages()
-				req := httptest.NewRequest(http.MethodPost, "/external_result", bytes.NewReader(body))
+				req := httptest.NewRequest(http.MethodPost, "/Service/external_result", bytes.NewReader(body))
 				req.Header.Set("Content-Type", arrowContentType)
 				w := httptest.NewRecorder()
 				h.ServeHTTP(w, req)

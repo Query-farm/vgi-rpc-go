@@ -159,10 +159,10 @@ func TestPeerEvidenceBindingChangesAllStatefulIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(stateTokenAad(bound)) == string(stateTokenAad(Anonymous())) {
+	if string(stateTokenAad(bound, testProtocol)) == string(stateTokenAad(Anonymous(), testProtocol)) {
 		t.Fatal("cursor AAD did not bind peer evidence")
 	}
-	if string(callTokenAad(bound)) == string(callTokenAad(Anonymous())) {
+	if string(callTokenAad(bound, testProtocol)) == string(callTokenAad(Anonymous(), testProtocol)) {
 		t.Fatal("call AAD did not bind peer evidence")
 	}
 	if principalKeyFromAuth(bound) == principalKeyFromAuth(Anonymous()) {

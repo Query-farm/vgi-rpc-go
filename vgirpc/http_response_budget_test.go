@@ -167,13 +167,13 @@ func TestFinalResponseCapUsesNegotiatedClientLimitForEveryResponseShape(t *testi
 		path   string
 		params func(*testing.T) arrow.RecordBatch
 	}{
-		{name: "void", path: "/large_void", params: func(*testing.T) arrow.RecordBatch { return emptyBatch(arrowEmptySchema) }},
-		{name: "error", path: "/large_error", params: func(*testing.T) arrow.RecordBatch { return emptyBatch(arrowEmptySchema) }},
-		{name: "exchange init", path: "/large_exchange_init/init", params: func(t *testing.T) arrow.RecordBatch { return regressionBatch(t, 1) }},
+		{name: "void", path: "/Service/large_void", params: func(*testing.T) arrow.RecordBatch { return emptyBatch(arrowEmptySchema) }},
+		{name: "error", path: "/Service/large_error", params: func(*testing.T) arrow.RecordBatch { return emptyBatch(arrowEmptySchema) }},
+		{name: "exchange init", path: "/Service/large_exchange_init/init", params: func(t *testing.T) arrow.RecordBatch { return regressionBatch(t, 1) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			params := tc.params(t)
-			body := regressionRequest(t, strings.TrimSuffix(strings.TrimPrefix(tc.path, "/"), "/init"), params)
+			body := regressionRequest(t, strings.TrimSuffix(strings.TrimPrefix(tc.path, "/Service/"), "/init"), params)
 			params.Release()
 			req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(body))
 			req.Header.Set("Content-Type", arrowContentType)
@@ -200,7 +200,7 @@ func TestResponseCapWriterRetainsOnlyLimitPlusOne(t *testing.T) {
 	server := NewHttpServer(NewServer())
 	recorder := httptest.NewRecorder()
 	budget := &httpResponseBudget{Limit: 65_536}
-	writer := newResponseCapWriter(recorder, budget, server, "/large")
+	writer := newResponseCapWriter(recorder, budget, server, "/Service/large")
 	payload := bytes.Repeat([]byte("x"), 8<<20)
 	n, err := writer.Write(payload)
 	if err != nil || n != len(payload) {
@@ -231,7 +231,7 @@ func TestMalformedAcceptedResponseLimitRejectedBeforeDispatch(t *testing.T) {
 	h := NewHttpServer(s)
 	params := emptyBatch(arrowEmptySchema)
 	defer params.Release()
-	req := httptest.NewRequest(http.MethodPost, "/noop", bytes.NewReader(regressionRequest(t, "noop", params)))
+	req := httptest.NewRequest(http.MethodPost, "/Service/noop", bytes.NewReader(regressionRequest(t, "noop", params)))
 	req.Header.Set("Content-Type", arrowContentType)
 	req.Header.Set(acceptMaxResponseBytesHeader, "01")
 	w := httptest.NewRecorder()
@@ -249,7 +249,7 @@ func TestAuthenticationPrecedesResponseBudgetAndBodyRejection(t *testing.T) {
 	h.SetAuthenticate(func(*http.Request) (*AuthContext, error) {
 		return nil, NewAuthFailure(AuthReasonMissingCredential, "credential required")
 	})
-	req := httptest.NewRequest(http.MethodPost, "/noop", strings.NewReader(strings.Repeat("x", 70<<10)))
+	req := httptest.NewRequest(http.MethodPost, "/Service/noop", strings.NewReader(strings.Repeat("x", 70<<10)))
 	req.Header.Set("Content-Type", arrowContentType)
 	req.Header.Set(acceptMaxResponseBytesHeader, "1")
 	w := httptest.NewRecorder()
@@ -304,7 +304,7 @@ func TestProducerContinuationCannotRaiseInitialResponseLimit(t *testing.T) {
 	h := NewHttpServer(s)
 	h.SetCallStateCacheEntries(0)
 	params := regressionBatch(t, 1)
-	initReq := httptest.NewRequest(http.MethodPost, "/sealed_budget/init",
+	initReq := httptest.NewRequest(http.MethodPost, "/Service/sealed_budget/init",
 		bytes.NewReader(regressionRequest(t, "sealed_budget", params)))
 	params.Release()
 	initReq.Header.Set("Content-Type", arrowContentType)
@@ -323,7 +323,7 @@ func TestProducerContinuationCannotRaiseInitialResponseLimit(t *testing.T) {
 	)
 	body := regressionIPC(t, tick, meta)
 	tick.Release()
-	contReq := httptest.NewRequest(http.MethodPost, "/sealed_budget/exchange", bytes.NewReader(body))
+	contReq := httptest.NewRequest(http.MethodPost, "/Service/sealed_budget/exchange", bytes.NewReader(body))
 	contReq.Header.Set("Content-Type", arrowContentType)
 	contReq.Header.Set(acceptMaxResponseBytesHeader, "131072")
 	contW := httptest.NewRecorder()
@@ -347,7 +347,7 @@ func TestProducerOversizePublishesNoCursor(t *testing.T) {
 	h.SetPreferredResponseBytes(65_536)
 	params := regressionBatch(t, 1)
 	defer params.Release()
-	req := httptest.NewRequest(http.MethodPost, "/strict_producer/init", bytes.NewReader(regressionRequest(t, "strict_producer", params)))
+	req := httptest.NewRequest(http.MethodPost, "/Service/strict_producer/init", bytes.NewReader(regressionRequest(t, "strict_producer", params)))
 	req.Header.Set("Content-Type", arrowContentType)
 	req.Header.Set(acceptMaxResponseBytesHeader, "65536")
 	w := httptest.NewRecorder()
@@ -373,7 +373,7 @@ func TestProducerExternalizationRescuesStrictTurn(t *testing.T) {
 	h.SetPreferredResponseBytes(65_536)
 	params := regressionBatch(t, 1)
 	defer params.Release()
-	req := httptest.NewRequest(http.MethodPost, "/rescued_producer/init", bytes.NewReader(regressionRequest(t, "rescued_producer", params)))
+	req := httptest.NewRequest(http.MethodPost, "/Service/rescued_producer/init", bytes.NewReader(regressionRequest(t, "rescued_producer", params)))
 	req.Header.Set("Content-Type", arrowContentType)
 	req.Header.Set(acceptMaxResponseBytesHeader, "65536")
 	w := httptest.NewRecorder()
@@ -398,7 +398,7 @@ func TestNativeClientAdvertisesAcceptedResponseLimit(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
-	client, err := NewHttpClient(server.URL, WithClientAcceptedMaxResponseBytes(65_536))
+	client, err := NewHttpClient(server.URL, WithClientAcceptedMaxResponseBytes(65_536), WithClientProtocol(testProtocol))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -462,7 +462,7 @@ func TestUnaryExternalizationRescuesClientResponseLimit(t *testing.T) {
 	h.SetPreferredResponseBytes(80 << 10)
 	params := emptyBatch(arrowEmptySchema)
 	defer params.Release()
-	req := httptest.NewRequest(http.MethodPost, "/large_result", bytes.NewReader(regressionRequest(t, "large_result", params)))
+	req := httptest.NewRequest(http.MethodPost, "/Service/large_result", bytes.NewReader(regressionRequest(t, "large_result", params)))
 	req.Header.Set("Content-Type", arrowContentType)
 	req.Header.Set(acceptMaxResponseBytesHeader, "65536")
 	w := httptest.NewRecorder()

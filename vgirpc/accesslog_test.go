@@ -514,8 +514,8 @@ func TestAccessLogResponseBytesIsPostCompression(t *testing.T) {
 	hook := NewAccessLogHook(&buf, "")
 	h := newEgressTestServer(t, hook)
 
-	body := encodeRequestBody(t, "big", bigParams{N: 200000})
-	req := httptest.NewRequest(http.MethodPost, "/big", bytes.NewReader(body))
+	body := encodeRequestBodyFor(t, "EgressService", "big", bigParams{N: 200000})
+	req := httptest.NewRequest(http.MethodPost, "/EgressService/big", bytes.NewReader(body))
 	req.Header.Set("Content-Type", arrowContentType)
 	req.Header.Set("Accept-Encoding", "zstd")
 	rec := httptest.NewRecorder()
@@ -555,8 +555,8 @@ func TestAccessLogRequestBytesIsOnWireSize(t *testing.T) {
 	hook := NewAccessLogHook(&buf, "")
 	h := newEgressTestServer(t, hook)
 
-	body := encodeRequestBody(t, "big", bigParams{N: 8})
-	req := httptest.NewRequest(http.MethodPost, "/big", bytes.NewReader(body))
+	body := encodeRequestBodyFor(t, "EgressService", "big", bigParams{N: 8})
+	req := httptest.NewRequest(http.MethodPost, "/EgressService/big", bytes.NewReader(body))
 	req.Header.Set("Content-Type", arrowContentType)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -621,7 +621,7 @@ func TestHTTPRequestIDRidesErrorResponses(t *testing.T) {
 	h := newTestHttpServer(t)
 	h.InitPages()
 
-	req := httptest.NewRequest(http.MethodPost, "/no_such_method", nil)
+	req := httptest.NewRequest(http.MethodPost, "/Service/no_such_method", nil)
 	req.Header.Set("Content-Type", arrowContentType)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -638,8 +638,8 @@ func TestAccessLogFallsBackToTransportRequestID(t *testing.T) {
 	hook := NewAccessLogHook(&buf, "")
 	h := newEgressTestServer(t, hook)
 
-	body := encodeRequestBody(t, "big", bigParams{N: 4})
-	req := httptest.NewRequest(http.MethodPost, "/big", bytes.NewReader(body))
+	body := encodeRequestBodyFor(t, "EgressService", "big", bigParams{N: 4})
+	req := httptest.NewRequest(http.MethodPost, "/EgressService/big", bytes.NewReader(body))
 	req.Header.Set("Content-Type", arrowContentType)
 	req.Header.Set(requestIDHeader, "trace-me")
 	rec := httptest.NewRecorder()

@@ -93,7 +93,7 @@ func TestHTTPExchangeKeepsTokenWithEmitMetadata(t *testing.T) {
 	paramsBatch.Release()
 	paramsArr.Release()
 
-	initResp, err := http.Post(ts.URL+"/meta_token/init", "application/vnd.apache.arrow.stream", &initBody)
+	initResp, err := http.Post(ts.URL+"/Service/meta_token/init", "application/vnd.apache.arrow.stream", &initBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestHTTPExchangeKeepsTokenWithEmitMetadata(t *testing.T) {
 	inputBatch.Release()
 	valueArr.Release()
 
-	exResp, err := http.Post(ts.URL+"/meta_token/exchange", "application/vnd.apache.arrow.stream", &exBody)
+	exResp, err := http.Post(ts.URL+"/Service/meta_token/exchange", "application/vnd.apache.arrow.stream", &exBody)
 	if err != nil {
 		t.Fatal(err)
 	}

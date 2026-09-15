@@ -182,7 +182,11 @@ func runHTTPClient(args []string) error {
 	if *url == "" || *issuer == "" || *capability == "" || *spoofLogin == "" {
 		return errors.New("--url, --expected-issuer, --expected-capability, and --spoof-login are required")
 	}
-	options := []vgirpc.HttpClientOption{}
+	options := []vgirpc.HttpClientOption{
+		// The routing key rides both as vgi_rpc.protocol and as the path's
+		// protocol segment; the server under probe names itself the same.
+		vgirpc.WithClientProtocol("ConformanceService"),
+	}
 	if *proxy != "" {
 		options = append(options, vgirpc.WithClientTCPProxy(*proxy))
 	}

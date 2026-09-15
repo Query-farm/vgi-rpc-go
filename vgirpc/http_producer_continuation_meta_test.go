@@ -80,7 +80,7 @@ func TestHTTPProducerContinuationCarriesRequestMetadata(t *testing.T) {
 	h.InitPages()
 
 	params := regressionBatch(t, 1)
-	initReq := httptest.NewRequest(http.MethodPost, "/tick_meta/init",
+	initReq := httptest.NewRequest(http.MethodPost, "/Service/tick_meta/init",
 		bytes.NewReader(regressionRequest(t, "tick_meta", params)))
 	params.Release()
 	initReq.Header.Set("Content-Type", arrowContentType)
@@ -105,7 +105,7 @@ func TestHTTPProducerContinuationCarriesRequestMetadata(t *testing.T) {
 	body := regressionIPC(t, tick, meta)
 	tick.Release()
 
-	contReq := httptest.NewRequest(http.MethodPost, "/tick_meta/exchange", bytes.NewReader(body))
+	contReq := httptest.NewRequest(http.MethodPost, "/Service/tick_meta/exchange", bytes.NewReader(body))
 	contReq.Header.Set("Content-Type", arrowContentType)
 	contW := httptest.NewRecorder()
 	h.ServeHTTP(contW, contReq)

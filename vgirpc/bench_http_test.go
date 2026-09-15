@@ -39,14 +39,23 @@ func newBenchHTTPServer(tb testing.TB) *HttpServer {
 	return NewHttpServer(s)
 }
 
-// encodeRequestBody renders the wire bytes a client would POST.
+// encodeRequestBody renders the wire bytes a client would POST, addressed to
+// the default protocol name.
 func encodeRequestBody(tb testing.TB, method string, params any) []byte {
+	return encodeRequestBodyFor(tb, testProtocol, method, params)
+}
+
+// encodeRequestBodyFor is encodeRequestBody against a named protocol. The
+// routing key is canonical and the path is its projection, so a test whose
+// server declares its own service name has to stamp that name here or the two
+// carriers disagree and the request is refused -- which is the point.
+func encodeRequestBodyFor(tb testing.TB, protocol, method string, params any) []byte {
 	tb.Helper()
 	batch := buildParamsBatch(tb, params)
 	defer batch.Release()
 
 	var buf bytes.Buffer
-	if err := WriteRequest(&buf, method, batch, testProtocol, ""); err != nil {
+	if err := WriteRequest(&buf, method, batch, protocol, ""); err != nil {
 		tb.Fatalf("WriteRequest: %v", err)
 	}
 	return buf.Bytes()
@@ -74,7 +83,7 @@ func BenchmarkHTTPUnaryAdd(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		runUnary(b, h, "/add", body, "")
+		runUnary(b, h, "/Service/add", body, "")
 	}
 }
 
@@ -85,7 +94,7 @@ func BenchmarkHTTPUnaryGreet(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		runUnary(b, h, "/greet", body, "")
+		runUnary(b, h, "/Service/greet", body, "")
 	}
 }
 
@@ -101,7 +110,7 @@ func BenchmarkHTTPUnaryZstd(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		runUnary(b, h, "/greet", body, "zstd")
+		runUnary(b, h, "/Service/greet", body, "zstd")
 	}
 }
 
@@ -115,7 +124,7 @@ func BenchmarkHTTPUnaryGzip(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for b.Loop() {
-		runUnary(b, h, "/greet", body, "gzip")
+		runUnary(b, h, "/Service/greet", body, "gzip")
 	}
 }
 
@@ -129,7 +138,7 @@ func BenchmarkHTTPUnaryAddParallel(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			req := httptest.NewRequest(http.MethodPost, "/add", bytes.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, "/Service/add", bytes.NewReader(body))
 			req.Header.Set("Content-Type", arrowContentType)
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
@@ -152,7 +161,7 @@ func BenchmarkHTTPUnaryZstdParallel(b *testing.B) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			req := httptest.NewRequest(http.MethodPost, "/greet", bytes.NewReader(body))
+			req := httptest.NewRequest(http.MethodPost, "/Service/greet", bytes.NewReader(body))
 			req.Header.Set("Content-Type", arrowContentType)
 			req.Header.Set("Accept-Encoding", "zstd")
 			rec := httptest.NewRecorder()
