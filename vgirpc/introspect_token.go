@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
-	"sync"
 	"time"
 )
 
@@ -74,10 +73,10 @@ const (
 	// Cap on a credential we will even attempt to resolve. Anything longer is
 	// not a bearer token; refusing early keeps a resolver from being handed
 	// megabytes.
-	introspectMaxTokenChars = 4096
+	introspectMaxTokenChars = MaxTokenChars
 
-	introspectDefaultTTLSeconds = 300
-	introspectDefaultRateLimit  = 20
+	introspectDefaultTTLSeconds = DefaultTokenTTLSeconds
+	introspectDefaultRateLimit  = DefaultIntrospectRateLimit
 )
 
 // introspectJWSShaped matches three dot-separated base64url segments — a JWS.
@@ -99,20 +98,61 @@ func TokenDigest(credential string) string {
 }
 
 // TokenIdentity is the identity an opaque credential authenticates as.
+//
+// It is the result payload of vgi_rpc.Identity.v1's introspect_token as well as
+// the body of the legacy HTTP route below, and the vgirpc tags are what pin its
+// wire shape for the protocol: principal utf8 nn, token_name utf8 nn defaulting
+// to "", ttl_seconds int64 nn defaulting to 300. Field DECLARATION ORDER is
+// part of the schema and therefore of the protocol hash.
+//
+// It NEVER carries claims, and the omission is the design rather than an
+// oversight: a pass-through claims field would let a worker choose its caller's
+// tenant routing, its row scope and its policy branch, and the asker derives
+// everything it needs from the principal alone. Adding one has to be a
+// deliberate change to this type, which is the point.
 type TokenIdentity struct {
 	// Principal is the canonical principal. Return it in the exact form this
 	// worker would itself derive, so an asker that normalises differently does
 	// not authorize as one identity while the worker serves another.
-	Principal string
+	Principal string `vgirpc:"principal"`
 	// TokenName is a human-readable name for the credential, for audit trails.
 	// Never the credential.
-	TokenName string
+	TokenName string `vgirpc:"token_name,default="`
 	// TTLSeconds is how long the answer may be cached. The caller does the
 	// caching; this endpoint holds none of its own. Treat it as an
 	// authorization window, because for any path the asker serves without
-	// re-presenting the credential it is exactly that. Zero or negative falls
-	// back to the configured default.
-	TTLSeconds int
+	// re-presenting the credential it is exactly that -- and therefore also the
+	// revocation lag.
+	//
+	// Zero means "do not cache". vgi_rpc.Identity.v1 honours that verbatim; the
+	// legacy HTTP route below substitutes its configured default, which is the
+	// behaviour its existing callers already depend on. Build one with
+	// [NewTokenIdentity] to get the documented default rather than the zero
+	// value.
+	TTLSeconds int `vgirpc:"ttl_seconds,default=300"`
+}
+
+// NewTokenIdentity builds a [TokenIdentity] carrying the documented default
+// cache lifetime, [DefaultTokenTTLSeconds].
+//
+// It exists because Go has a zero value where the reference implementation has
+// an absent field, and the two must not be conflated. `ttl_seconds` is how long
+// the asker may cache the answer, which for any path it serves without
+// re-presenting the credential is an authorization window -- and therefore the
+// revocation lag. So a resolver that returns 0 is saying "do not cache this",
+// and the framework honours it: nothing normalises a supplied 0 up to 300,
+// because doing so would silently convert "do not cache" into five minutes of
+// continued access after revocation.
+//
+// That leaves the other gap -- a resolver that simply forgot to name a lifetime
+// -- and this constructor is the place to close it, at construction, where the
+// caller's intent is still known. A struct literal bypasses it and gets 0,
+// which fails in the mild direction: more introspection traffic, never a longer
+// window.
+//
+// Set TokenName (and a different TTLSeconds) on the result as needed.
+func NewTokenIdentity(principal string) TokenIdentity {
+	return TokenIdentity{Principal: principal, TTLSeconds: DefaultTokenTTLSeconds}
 }
 
 // TokenResolver resolves an opaque credential to the identity it authenticates
@@ -157,7 +197,7 @@ type tokenIntrospection struct {
 	resolver   TokenResolver
 	principals map[string]bool
 	defaultTTL int
-	limiter    *introspectRateLimiter
+	limiter    *RateLimiter
 }
 
 // EnableTokenIntrospection turns on POST {prefix}/__introspect_token__.
@@ -193,48 +233,9 @@ func (h *HttpServer) EnableTokenIntrospection(cfg TokenIntrospectionConfig) erro
 		resolver:   cfg.Resolver,
 		principals: principals,
 		defaultTTL: ttl,
-		limiter:    newIntrospectRateLimiter(rate, time.Second),
+		limiter:    NewRateLimiter(rate, time.Second),
 	}
 	return nil
-}
-
-// introspectRateLimiter is a fixed-window request limiter keyed by caller.
-//
-// Fixed-window rather than a token bucket: a window admits at most twice the
-// rate across a boundary, which is a rounding error at this scale, and the
-// state is one integer per caller rather than a float that has to be aged.
-type introspectRateLimiter struct {
-	mu          sync.Mutex
-	perWindow   int
-	window      time.Duration
-	windowStart time.Time
-	counts      map[string]int
-}
-
-func newIntrospectRateLimiter(perWindow int, window time.Duration) *introspectRateLimiter {
-	return &introspectRateLimiter{
-		perWindow: perWindow,
-		window:    window,
-		counts:    make(map[string]int),
-	}
-}
-
-// allow reports whether key may make a request in the current window.
-func (l *introspectRateLimiter) allow(key string) bool {
-	now := time.Now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if now.Sub(l.windowStart) >= l.window {
-		// Whole-map reset rather than per-key ageing: a caller cycling keys
-		// cannot grow the map beyond one window's worth.
-		clear(l.counts)
-		l.windowStart = now
-	}
-	if l.counts[key] >= l.perWindow {
-		return false
-	}
-	l.counts[key]++
-	return true
 }
 
 // introspectResponse is the closed response set. Three keys, and a claims field
@@ -289,7 +290,7 @@ func (h *HttpServer) handleIntrospectToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if !cfg.limiter.allow(caller) {
+	if !cfg.limiter.Allow(caller) {
 		slog.Warn("introspection rate limit exceeded", "remote_addr", r.RemoteAddr, "principal", caller)
 		w.Header().Set("Retry-After", "1")
 		writeIntrospectRefusal(w, http.StatusTooManyRequests, "rate_limited")

@@ -267,8 +267,12 @@ func streamKindFor(info *methodInfo) string {
 	}
 }
 
-// bindingHash computes one binding's canonical fingerprint.
-func bindingHash(name string, methods map[string]*methodInfo) (string, error) {
+// hashMethodsOf projects a binding's method table into the hash inputs.
+//
+// Split out of [bindingHash] so a test can hand the same projection to
+// [CanonicalDescription] and diff the preimage: a hash mismatch between ports is
+// otherwise one bit of information.
+func hashMethodsOf(methods map[string]*methodInfo) []HashMethod {
 	hm := make([]HashMethod, 0, len(methods))
 	for _, info := range methods {
 		hm = append(hm, HashMethod{
@@ -281,7 +285,12 @@ func bindingHash(name string, methods map[string]*methodInfo) (string, error) {
 			HeaderSchema: info.HeaderSchema,
 		})
 	}
-	h, err := ComputeProtocolHash(name, hm)
+	return hm
+}
+
+// bindingHash computes one binding's canonical fingerprint.
+func bindingHash(name string, methods map[string]*methodInfo) (string, error) {
+	h, err := ComputeProtocolHash(name, hashMethodsOf(methods))
 	if err != nil {
 		return "", fmt.Errorf("computing protocol hash for %q: %w", name, err)
 	}

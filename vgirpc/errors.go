@@ -60,6 +60,13 @@ type errorKindCarrier interface {
 	ErrorKind() string
 }
 
+// errorTypeCarrier is satisfied by errors that name the wire-stable exception
+// class they should surface as, so a Go type name never reaches a client in a
+// field every other port fills with a shared class name.
+type errorTypeCarrier interface {
+	ErrorType() string
+}
+
 // MethodNotImplementedError marks a request for a method the service
 // does not expose. The framework writes vgi_rpc.error_kind =
 // "MethodNotImplementedError" so callers can distinguish "method gone"
@@ -173,22 +180,15 @@ type errorExtra struct {
 func buildErrorExtra(err error, debug bool) string {
 	errType := fmt.Sprintf("%T", err)
 
-	// Prefer the wire-stable class name for typed errors.
-	switch e := err.(type) {
-	case *RpcError:
-		errType = e.Type
-	case *MethodNotImplementedError:
-		errType = e.ErrorType()
-	case *SessionLostError:
-		errType = e.ErrorType()
-	case *ServerDrainingError:
-		errType = e.ErrorType()
-	case *ProtocolVersionError:
-		errType = e.ErrorType()
-	case *externalCapError:
-		errType = e.ErrorType()
-	case *responseCapError:
-		errType = e.ErrorType()
+	// Prefer the wire-stable class name for typed errors. Asked of the error
+	// itself rather than enumerated in a switch: a switch has to be edited
+	// every time a typed error is added, the edit is easy to forget, and
+	// forgetting it is silent -- the class name reaching the client is then a
+	// Go type name no other port has ever spelled.
+	if rpcErr, ok := err.(*RpcError); ok {
+		errType = rpcErr.Type
+	} else if carrier, ok := err.(errorTypeCarrier); ok {
+		errType = carrier.ErrorType()
 	}
 
 	extra := errorExtra{
