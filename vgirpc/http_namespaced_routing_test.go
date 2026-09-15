@@ -122,6 +122,31 @@ func nsErrorKind(t *testing.T, body []byte) string {
 	return ""
 }
 
+// nsEchoedValue returns the string demo.App.v1's echo answered with, or "" if
+// the response carries no such result.
+func nsEchoedValue(t *testing.T, body []byte) string {
+	t.Helper()
+	r, err := ipc.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return ""
+	}
+	defer r.Release()
+	for r.Next() {
+		batch := r.RecordBatch()
+		if batch.NumRows() == 0 {
+			continue
+		}
+		indices := batch.Schema().FieldIndices("result")
+		if len(indices) == 0 {
+			continue
+		}
+		if col, ok := batch.Column(indices[0]).(*array.String); ok && col.Len() > 0 {
+			return col.Value(0)
+		}
+	}
+	return ""
+}
+
 // Every co-hosted protocol is reachable over HTTP at its own namespaced path.
 // Before this, only the primary application protocol had a route at all, which
 // left reflection and identity raw-transport-only -- and identity's
@@ -168,10 +193,22 @@ func TestPathAndMetadataProtocolMustAgree(t *testing.T) {
 	}
 }
 
-// Required, with no single-protocol exemption. An intermediary that rebuilds a
-// request and drops the field must be told, not landed silently on whichever
-// protocol the server registered first.
-func TestAbsentProtocolMetadataIsRefused(t *testing.T) {
+// Accepted on HTTP, where the path segment already resolved the binding.
+//
+// This test asserted the opposite until IDENTITY_V1_SPEC.md §5c settled it, and
+// the reversal is worth recording rather than quietly editing: "vgi_rpc.protocol
+// is required on every request" was the original brief, two ports implemented it
+// strictly, and one became unshippable -- the shared conformance harness's
+// recovery probe (_adversarial_http.py) requires a 200 here, because a client
+// that omits the field on HTTP is conformant and a worker that refuses it is
+// not. The rule now splits by carrier: required where the metadata field is the
+// only one (see Server.resolve), optional where the path is a second.
+//
+// The cost is stated in checkProtocolCarriage: a path rewrite by an intermediary
+// is no longer detectable for a request that omits the key, because an
+// intermediary that rewrites the path cannot reach into the Arrow body to match
+// it. Deliberate, and the narrower gap of the two.
+func TestAbsentProtocolMetadataIsAcceptedOverHTTP(t *testing.T) {
 	h := NewHttpServer(newNamespacedServer(t))
 	batch := buildParamsBatch(t, nsEchoParams{Value: "hi"})
 	defer batch.Release()
@@ -183,11 +220,43 @@ func TestAbsentProtocolMetadataIsRefused(t *testing.T) {
 	req.Header.Set("Content-Type", arrowContentType)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 when the routing key is absent", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d (error_kind %q), want 200: the path segment is the only "+
+			"carrier this request used, and it is the one that resolved the binding",
+			rec.Code, nsErrorKind(t, rec.Body.Bytes()))
 	}
-	if kind := nsErrorKind(t, rec.Body.Bytes()); kind != "protocol_not_specified" {
-		t.Fatalf("error_kind = %q, want protocol_not_specified", kind)
+	// Dispatched, not merely admitted, and dispatched to the protocol the PATH
+	// named. A status-only check passes against a 200 carrying an EXCEPTION
+	// batch, and an echo that answers is the only thing that shows the request
+	// reached demo.App.v1's handler rather than being admitted and dropped.
+	if got := nsEchoedValue(t, rec.Body.Bytes()); got != "hi" {
+		t.Fatalf("echoed %q, want \"hi\" (error_kind %q): admitted but never dispatched",
+			got, nsErrorKind(t, rec.Body.Bytes()))
+	}
+}
+
+// The raw transports keep the strict rule, because there the metadata field is
+// the only carrier and absent really is unroutable.
+//
+// Stated as its own case rather than left to the HTTP one's absence: the two
+// halves of §5c are a split, and a port that relaxed both would pass every HTTP
+// assertion above while landing a fieldless stdio request on whichever protocol
+// happened to be registered first.
+func TestAbsentProtocolMetadataIsRefusedOnRawTransports(t *testing.T) {
+	s := newNamespacedServer(t)
+	batch := buildParamsBatch(t, nsEchoParams{Value: "hi"})
+	defer batch.Release()
+	var request bytes.Buffer
+	if err := WriteRequest(&request, "echo", batch, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	var response bytes.Buffer
+	if err := s.serveOne(context.Background(), bytes.NewReader(request.Bytes()), &response, &shmConnState{}); err != nil {
+		t.Fatal(err)
+	}
+	if kind := nsErrorKind(t, response.Bytes()); kind != "protocol_not_specified" {
+		t.Fatalf("error_kind = %q, want protocol_not_specified -- on a raw transport "+
+			"vgi_rpc.protocol is the only carrier there is", kind)
 	}
 }
 

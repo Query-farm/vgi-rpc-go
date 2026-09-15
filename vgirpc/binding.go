@@ -221,10 +221,19 @@ func (s *Server) AddProtocol(b *protocolBinding, allowReserved bool) error {
 
 // resolve maps one request's (protocol, method) pair to a method.
 //
-// The routing key is required, including against a server hosting exactly one
-// protocol: an exemption would let an intermediary that rebuilds a request and
-// drops the field land silently on whichever protocol happened to be first,
+// The routing key is required here, including against a server hosting exactly
+// one protocol: an exemption would let an intermediary that rebuilds a request
+// and drops the field land silently on whichever protocol happened to be first,
 // rather than being told.
+//
+// "Here" is load-bearing. On the raw transports -- stdio, unix, named pipes,
+// TCP -- vgi_rpc.protocol is the ONLY carrier, so absent really is unroutable
+// and this refusal is the whole of the rule. HTTP reaches this function with
+// the protocol read off the PATH, which is never empty once the route matched,
+// and the metadata field there is a second carrier whose absence is accepted:
+// see HttpServer.checkProtocolCarriage and IDENTITY_V1_SPEC.md §5c. Both halves
+// are pinned by the shared conformance suite, so neither can drift into the
+// other.
 //
 // The three failures are deliberately distinct, and a client depends on the
 // difference -- particularly the last, which is the documented capability-probe

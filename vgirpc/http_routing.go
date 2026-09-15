@@ -70,20 +70,41 @@ func (h *HttpServer) resolveHTTPRoute(r *http.Request, protocol, method string) 
 	return h.server.resolve(protocol, method)
 }
 
-// checkProtocolCarriage requires the two carriers of the routing key to agree.
+// checkProtocolCarriage requires the two carriers of the routing key to agree
+// WHEN BOTH ARE PRESENT. On HTTP an absent metadata field is accepted.
 //
-// The metadata field is canonical and the path segment is its projection, so a
-// disagreement means edge policy and worker dispatch saw different protocols.
-// An absent metadata field is refused too, including against a server hosting
-// exactly one protocol: an exemption would let an intermediary that rebuilds a
-// request and drops the field land silently on whichever protocol happened to
-// be registered first, rather than being told.
+// The rule splits by transport because the carriers do. On the raw transports
+// vgi_rpc.protocol is the only carrier, so absent is unroutable and is refused
+// in Server.resolve. On HTTP the path segment already resolved the binding
+// before this runs, so absent is the single-carrier case rather than an error.
+// A worker that refuses it is not conformant however defensible the reasoning:
+// two ports reached the strict reading independently and one became unshippable
+// implementing it. IDENTITY_V1_SPEC.md §5c. The shared suite now pins both
+// halves -- _adversarial_http.py's recovery probe requires a 200 here, and its
+// raw-transport counterpart requires the refusal there -- so neither can drift
+// into the other.
+//
+// What the relaxation costs, taken deliberately: requiring the key on HTTP is
+// what would make a PATH REWRITE by an intermediary detectable, because an
+// intermediary that rewrites the path cannot reach inside the Arrow body to
+// match it. Accepting absent means that in that one case the request routes on
+// the projection alone. A real gap, and the narrower one -- refusing absent
+// breaks every conformant client that omits the field, while the rewrite it
+// would catch is still caught whenever a client does send the key.
+//
+// Disagreement stays refused: that is the case where edge policy is applied to
+// one protocol while the worker dispatches another -- the
+// Content-Length/Transfer-Encoding shape, one request read two ways. And
+// clients MUST still send the key; this accepts its absence, it does not bless
+// omitting it.
 //
 // Mirrors the vgi_rpc.method check the HTTP dispatchers already make.
 func (h *HttpServer) checkProtocolCarriage(pathProtocol string, meta map[string]string) error {
 	declared := meta[MetaProtocol]
 	if declared == "" {
-		return &ProtocolNotSpecifiedError{Hosted: sortedKeys(h.server.bindings())}
+		// The path segment is the only carrier this request used, and it is the
+		// one that resolved the binding. Nothing to disagree with.
+		return nil
 	}
 	if declared != pathProtocol {
 		return &ProtocolNotSupportedError{
