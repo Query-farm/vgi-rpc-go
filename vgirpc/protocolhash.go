@@ -33,8 +33,13 @@ import (
 // -- never applies. Keep it that way.
 //
 // Not in the preimage: server identity, docstrings, parameter defaults,
-// language-specific type names, and the framework's own request/describe
-// versions. Those vary across processes, builds and ports without changing what
+// language-specific type names, the framework's own request/describe versions,
+// and whether a stream is an exchange. That last is an *implementation*
+// property, not visible on the protocol definition, so one port can determine
+// it and another cannot -- and a field one port knows and another does not
+// cannot be part of a cross-language contract. It still reaches clients as
+// stream_kind on the description, where "unknown" is a sayable answer; a hash
+// has no such option. Those vary across processes, builds and ports without changing what
 // is on the wire. The "v1" domain tag is the only version the hash carries, and
 // it moves only when the hash *definition* moves.
 
@@ -48,12 +53,11 @@ const hashDomain = "vgi_rpc.protocol_hash.v1|"
 // Field order in this struct is irrelevant: canonical JSON sorts object keys,
 // which is exactly why the preimage is JSON rather than a hand-rolled framing.
 type hashMethodEntry struct {
-	Name       string       `json:"name"`
-	Type       string       `json:"type"`
-	HasReturn  bool         `json:"has_return"`
-	HasHeader  bool         `json:"has_header"`
-	IsExchange bool         `json:"is_exchange"`
-	Params     []FieldToken `json:"params"`
+	Name      string       `json:"name"`
+	Type      string       `json:"type"`
+	HasReturn bool         `json:"has_return"`
+	HasHeader bool         `json:"has_header"`
+	Params    []FieldToken `json:"params"`
 	// Absent and empty are different: a method returning nothing is not a
 	// method returning an empty struct, and they must not hash alike. omitempty
 	// on a nil slice is what expresses that.
@@ -77,7 +81,6 @@ type HashMethod struct {
 	MethodType   string // "unary" or "stream"
 	HasReturn    bool
 	HasHeader    bool
-	IsExchange   bool
 	ParamsSchema *arrow.Schema
 	ResultSchema *arrow.Schema // nil when HasReturn is false
 	HeaderSchema *arrow.Schema // nil when HasHeader is false
@@ -101,12 +104,11 @@ func ComputeProtocolHash(protocolName string, methods []HashMethod) (string, err
 			return "", err
 		}
 		entry := hashMethodEntry{
-			Name:       m.Name,
-			Type:       m.MethodType,
-			HasReturn:  m.HasReturn,
-			HasHeader:  m.HasHeader,
-			IsExchange: m.IsExchange,
-			Params:     params,
+			Name:      m.Name,
+			Type:      m.MethodType,
+			HasReturn: m.HasReturn,
+			HasHeader: m.HasHeader,
+			Params:    params,
 		}
 		if m.HasReturn && m.ResultSchema != nil {
 			if entry.Result, err = SchemaTokens(m.ResultSchema); err != nil {
@@ -151,12 +153,11 @@ func CanonicalDescription(protocolName string, methods []HashMethod) ([]byte, er
 			return nil, err
 		}
 		entry := hashMethodEntry{
-			Name:       m.Name,
-			Type:       m.MethodType,
-			HasReturn:  m.HasReturn,
-			HasHeader:  m.HasHeader,
-			IsExchange: m.IsExchange,
-			Params:     params,
+			Name:      m.Name,
+			Type:      m.MethodType,
+			HasReturn: m.HasReturn,
+			HasHeader: m.HasHeader,
+			Params:    params,
 		}
 		if m.HasReturn && m.ResultSchema != nil {
 			if entry.Result, err = SchemaTokens(m.ResultSchema); err != nil {

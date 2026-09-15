@@ -196,6 +196,17 @@ func (EmbeddedArrow) ArrowSchema() *arrow.Schema {
 // Status is a string-backed enum matching the Python Status enum.
 type Status string
 
+// VgirpcArrowResult declares the Arrow column type Status serializes to.
+//
+// Dictionary-encoded rather than plain utf8, matching the Python reference: an
+// enum is a small closed set, and a port answering plain strings where another
+// answers a dictionary describes a different wire surface for the same
+// protocol. Without an annotation Go would infer utf8 from the underlying
+// string kind, which is how the two drifted.
+func (Status) VgirpcArrowResult() arrow.DataType {
+	return &arrow.DictionaryType{IndexType: arrow.PrimitiveTypes.Int16, ValueType: arrow.BinaryTypes.String}
+}
+
 // Point is a simple 2D point.
 type Point struct {
 	X float64 `arrow:"x" vgirpc:"x"`

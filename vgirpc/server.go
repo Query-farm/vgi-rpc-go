@@ -93,6 +93,8 @@ type Server struct {
 	protocolVersionSet   bool   // true when SetProtocolVersion was called with a non-empty value
 	protocolHash         string
 	protocolHashOnce     sync.Once
+	canonicalHashValue   string
+	canonicalHashOnce    sync.Once
 
 	// extraBindings holds protocols beyond the primary. The primary's methods
 	// stay in `methods` so every existing registration path is untouched; it is

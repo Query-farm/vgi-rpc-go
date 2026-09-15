@@ -560,27 +560,34 @@ func inspectPoint(_ context.Context, ctx *vgirpc.CallContext, p inspectPointPara
 }
 
 // --- Annotated types ---
+//
+// These return the *narrow* Go type rather than a widened one. The parameter
+// side already carries an `int8`/`float32` tag override, so a widened return
+// made the method asymmetric: it accepted int8 and answered int64. Nothing
+// caught it until protocol_hash became comparable across ports, because the
+// conformance assertions only check the value, and the describe comparison
+// only ever compared method names.
 
-func echoInt32(_ context.Context, ctx *vgirpc.CallContext, p echoInt32Params) (int64, error) {
-	return p.Value, nil
+func echoInt32(_ context.Context, ctx *vgirpc.CallContext, p echoInt32Params) (int32, error) {
+	return int32(p.Value), nil
 }
-func echoFloat32(_ context.Context, ctx *vgirpc.CallContext, p echoFloat32Params) (float64, error) {
-	return p.Value, nil
+func echoFloat32(_ context.Context, ctx *vgirpc.CallContext, p echoFloat32Params) (float32, error) {
+	return float32(p.Value), nil
 }
-func echoInt8(_ context.Context, ctx *vgirpc.CallContext, p echoInt8Params) (int64, error) {
-	return p.Value, nil
+func echoInt8(_ context.Context, ctx *vgirpc.CallContext, p echoInt8Params) (int8, error) {
+	return int8(p.Value), nil
 }
-func echoInt16(_ context.Context, ctx *vgirpc.CallContext, p echoInt16Params) (int64, error) {
-	return p.Value, nil
+func echoInt16(_ context.Context, ctx *vgirpc.CallContext, p echoInt16Params) (int16, error) {
+	return int16(p.Value), nil
 }
-func echoUint8(_ context.Context, ctx *vgirpc.CallContext, p echoUint8Params) (uint64, error) {
-	return p.Value, nil
+func echoUint8(_ context.Context, ctx *vgirpc.CallContext, p echoUint8Params) (uint8, error) {
+	return uint8(p.Value), nil
 }
-func echoUint16(_ context.Context, ctx *vgirpc.CallContext, p echoUint16Params) (uint64, error) {
-	return p.Value, nil
+func echoUint16(_ context.Context, ctx *vgirpc.CallContext, p echoUint16Params) (uint16, error) {
+	return uint16(p.Value), nil
 }
-func echoUint32(_ context.Context, ctx *vgirpc.CallContext, p echoUint32Params) (uint64, error) {
-	return p.Value, nil
+func echoUint32(_ context.Context, ctx *vgirpc.CallContext, p echoUint32Params) (uint32, error) {
+	return uint32(p.Value), nil
 }
 func echoUint64(_ context.Context, ctx *vgirpc.CallContext, p echoUint64Params) (uint64, error) {
 	return p.Value, nil

@@ -171,6 +171,15 @@ func main() {
 		conformance.RegisterMethods(server)
 	}
 
+	// Introspection is vgi_rpc.Reflection.v1, an ordinary co-hosted protocol,
+	// rather than a __describe__ method name. Registered after the application
+	// protocol so it appears in its own output without being special-cased and
+	// so the primary stays the application protocol.
+	if err := vgirpc.RegisterReflection(server); err != nil {
+		fmt.Fprintf(os.Stderr, "registering reflection: %v\n", err)
+		os.Exit(1)
+	}
+
 	if hasFlag(os.Args, "--fail-serve-start-once") {
 		var serveStartCalls atomic.Int64
 		server.SetServeStartHook(func(vgirpc.TransportKind, map[string]bool) error {

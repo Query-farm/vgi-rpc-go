@@ -31,7 +31,7 @@ func TestProtocolHashMatchesPythonReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "e337ddbbd5758bbc042ce85df28786dfca482b655adfcad28c9cb11f7b9c8f45"
+	const want = "a4b8ae57bf777c906081ff3610d435836b77dbc1f17a381c6a2febf1a2adb115"
 	if got != want {
 		preimage, _ := CanonicalDescription("demo.Hash.v1", methods)
 		t.Errorf("hash = %s, want %s\npreimage: %s", got, want, preimage)
@@ -51,7 +51,7 @@ func TestCanonicalPreimageShape(t *testing.T) {
 	}
 	// A method returning nothing must omit "result" entirely: absent and empty
 	// are different, and must not hash alike.
-	want := `{"methods":[{"has_header":false,"has_return":false,"is_exchange":false,"name":"fire","params":[{"name":"v","nullable":false,"type":"utf8"}],"type":"unary"}],"protocol":"demo.Void.v1"}`
+	want := `{"methods":[{"has_header":false,"has_return":false,"name":"fire","params":[{"name":"v","nullable":false,"type":"utf8"}],"type":"unary"}],"protocol":"demo.Void.v1"}`
 	if string(got) != want {
 		t.Errorf("preimage =\n  %s\nwant\n  %s", got, want)
 	}

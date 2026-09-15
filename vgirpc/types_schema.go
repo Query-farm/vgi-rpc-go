@@ -228,6 +228,23 @@ func goTypeToArrowTypeAt(t reflect.Type, tag tagInfo, depth int) (arrow.DataType
 			return nil, false, fmt.Errorf("map value: %w", err)
 		}
 		return arrow.MapOf(keyType, valType), nullable, nil
+	case reflect.Struct:
+		// A nested struct becomes an Arrow struct of its tagged fields.
+		//
+		// Not a serialized IPC blob: that is what a struct at the *top* level
+		// of a result becomes, because the result column is one column. Nested,
+		// it is an ordinary struct column -- which is what the Python reference
+		// produces, and the two must agree or the same protocol decodes in one
+		// port and not the other.
+		//
+		// The depth counter already in play guards against a self-referential
+		// type recursing forever.
+		fields, _, err := structFieldsOf(t, depth+1)
+		if err != nil {
+			return nil, false, fmt.Errorf("struct %v: %w", t, err)
+		}
+		return arrow.StructOf(fields...), nullable, nil
+
 	default:
 		return nil, false, fmt.Errorf("unsupported Go type: %v (kind: %v)", t, t.Kind())
 	}

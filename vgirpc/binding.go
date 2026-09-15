@@ -136,8 +136,11 @@ func (s *Server) bindings() map[string]*protocolBinding {
 		Version:      s.protocolVersion,
 		VersionParts: s.protocolVersionParts,
 		VersionSet:   s.protocolVersionSet,
-		Hash:         s.ProtocolHash(),
-		Impl:         s.implementation,
+		// The canonical hash, not the legacy byte-based one: ProtocolHash()
+		// still digests serialized IPC, which is not stable across Arrow
+		// implementations and so cannot be compared with another port.
+		Hash: s.canonicalHash(),
+		Impl: s.implementation,
 	}
 	for name, b := range s.extraBindings {
 		out[name] = b
@@ -228,4 +231,23 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// canonicalHash returns the primary protocol's canonical fingerprint.
+//
+// Computed once and cached: it is read on every reflection call, and the
+// method table does not change after registration.
+func (s *Server) canonicalHash() string {
+	s.canonicalHashOnce.Do(func() {
+		h, err := bindingHash(s.primaryProtocolName(), s.methods)
+		if err != nil {
+			// A type with no canonical token. Leaving the hash empty is the
+			// honest answer -- a wrong digest would have two ports silently
+			// disagree about agreeing.
+			s.canonicalHashValue = ""
+			return
+		}
+		s.canonicalHashValue = h
+	})
+	return s.canonicalHashValue
 }
