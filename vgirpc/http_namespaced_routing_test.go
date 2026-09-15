@@ -304,20 +304,27 @@ func TestUngrammaticalProtocolSegmentIsRefusedBeforeLookup(t *testing.T) {
 	}
 }
 
-// The reserved, server-level routes belong to no protocol, so they stay flat.
+// The reserved, server-level route belongs to no protocol, so it stays flat.
 // The flat route is not a catch-all: anything that is not a reserved name 404s
 // there rather than falling through to a protocol lookup.
 func TestReservedRoutesStayFlatAndAreNotACatchAll(t *testing.T) {
 	h := NewHttpServer(newNamespacedServer(t))
 	h.InitPages()
 
-	describeBody := encodeRequestBodyFor(t, "demo.App.v1", "__describe__", struct{}{})
-	req := httptest.NewRequest(http.MethodPost, "/__describe__", bytes.NewReader(describeBody))
+	// __describe__ is the name the flat route still recognises -- to refuse it.
+	// It reaching the reserved handler at all is what this asserts: a bare
+	// method name, by contrast, must not.
+	describeBody := encodeRequestBodyFor(t, "demo.App.v1", retiredDescribeMethod, struct{}{})
+	req := httptest.NewRequest(http.MethodPost, "/"+retiredDescribeMethod, bytes.NewReader(describeBody))
 	req.Header.Set("Content-Type", arrowContentType)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("__describe__ status = %d, want 200: %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("%s status = %d, want 404 -- it is retired: %s",
+			retiredDescribeMethod, rec.Code, rec.Body.String())
+	}
+	if kind := nsErrorKind(t, rec.Body.Bytes()); kind != "MethodNotImplementedError" {
+		t.Fatalf("error_kind = %q, want MethodNotImplementedError", kind)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/echo", bytes.NewReader(describeBody))

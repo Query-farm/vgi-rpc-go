@@ -231,9 +231,6 @@ func buildDescribeHTML(s *Server, prefix, protocolName, repoURL string) []byte {
 
 	var cards strings.Builder
 	for _, name := range names {
-		if name == "__describe__" {
-			continue
-		}
 		info := s.methods[name]
 		buildMethodCard(&cards, info)
 	}

@@ -130,12 +130,15 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	transportMeta := buildHTTPTransportMeta(req.Metadata, r)
+	// The owning binding's identity, not the server's primary: see
+	// Server.dispatchLabel.
+	logProtocol, logHash := h.server.dispatchLabel(binding)
 	dispatchInfo := DispatchInfo{
 		Method:            method,
 		MethodType:        DispatchMethodStream,
 		ServerID:          h.server.serverID,
-		Protocol:          h.server.serviceName,
-		ProtocolHash:      h.server.ProtocolHash(),
+		Protocol:          logProtocol,
+		ProtocolHash:      logHash,
 		ProtocolVersion:   h.server.protocolVersion,
 		RequestID:         req.RequestID,
 		TransportMetadata: transportMeta,
@@ -415,7 +418,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	// sealed stream fails the tag check and is refused exactly as an invalid
 	// token -- which is what makes edge visibility hold on continuations, and
 	// for a stream those are most of the requests.
-	info, _, routeErr := h.resolveHTTPRoute(r, protocol, method)
+	info, binding, routeErr := h.resolveHTTPRoute(r, protocol, method)
 	if routeErr != nil {
 		h.writeHttpError(w, http.StatusNotFound, routeErr, nil)
 		return
@@ -560,12 +563,17 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		// Tokens minted before the stream_id field was added — mint fresh.
 		streamID = RandomStreamID()
 	}
+	// Every continuation turn of a stream must label itself the way its /init
+	// turn did: a record set where the first turn names the owning protocol and
+	// the rest name the primary is worse than either alone, because the join key
+	// (stream_id) still lines them up.
+	logProtocol, logHash := h.server.dispatchLabel(binding)
 	dispatchInfo := DispatchInfo{
 		Method:            method,
 		MethodType:        DispatchMethodStream,
 		ServerID:          h.server.serverID,
-		Protocol:          h.server.serviceName,
-		ProtocolHash:      h.server.ProtocolHash(),
+		Protocol:          logProtocol,
+		ProtocolHash:      logHash,
 		ProtocolVersion:   h.server.protocolVersion,
 		TransportMetadata: transportMeta,
 		Auth:              auth,

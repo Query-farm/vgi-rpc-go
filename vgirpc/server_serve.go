@@ -224,9 +224,15 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 		return nil
 	}
 
-	// Handle __describe__ introspection
-	if req.Method == "__describe__" {
-		return s.serveDescribe(w, req)
+	// __describe__ is retired, not merely absent. Introspection is
+	// vgi_rpc.Reflection.v1 now -- an ordinary co-hosted protocol, reached the
+	// ordinary way -- and a stale caller is told so rather than being handed a
+	// capability answer it cannot act on. See retiredDescribeError.
+	if req.Method == retiredDescribeMethod {
+		emptySchema := arrow.NewSchema(nil, nil)
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, emptySchema,
+			retiredDescribeError(), s.serverID, req.RequestID, s.debugErrors))
+		return nil
 	}
 
 	// Handle __transport_options__ transport capability negotiation
@@ -289,12 +295,17 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 		if methodTypeString(info.Type) == DispatchMethodStream {
 			streamID = RandomStreamID()
 		}
+		// The owning binding's identity, not the server's primary: see
+		// Server.dispatchLabel. Fixed here and on the HTTP paths together --
+		// one transport labelling records differently from another is a gap of
+		// its own, since a record set spanning both no longer aggregates.
+		logProtocol, logHash := s.dispatchLabel(binding)
 		dispatchInfo = DispatchInfo{
 			Method:            req.Method,
 			MethodType:        methodTypeString(info.Type),
 			ServerID:          s.serverID,
-			Protocol:          s.serviceName,
-			ProtocolHash:      s.ProtocolHash(),
+			Protocol:          logProtocol,
+			ProtocolHash:      logHash,
 			ProtocolVersion:   s.protocolVersion,
 			RequestID:         req.RequestID,
 			TransportMetadata: req.Metadata,
@@ -388,23 +399,8 @@ func (s *Server) writeStreamHeader(w io.Writer, header ArrowSerializable, logs [
 	return headerWriter.Close()
 }
 
-// serveDescribe handles the __describe__ introspection request.
-func (s *Server) serveDescribe(w io.Writer, req *Request) error {
-	batch, meta := s.buildDescribeBatch()
-	defer batch.Release()
-
-	batchWithMeta := array.NewRecordBatchWithMetadata(
-		describeSchema, batch.Columns(), batch.NumRows(), meta)
-	defer batchWithMeta.Release()
-
-	writer := ipc.NewWriter(w, ipc.WithSchema(describeSchema))
-	defer writer.Close()
-
-	return writer.Write(batchWithMeta)
-}
-
 // serveTransportOptions handles the __transport_options__ capability handshake:
-// a framework-level negotiation (parallel to __describe__) through which the
+// a framework-level negotiation, owned by no protocol, through which the
 // client discovers whether the shared-memory side-channel may be used. The
 // worker's capabilities ride as response metadata under vgi_rpc.transport.*;
 // the response batch is empty. shm is offered only when this build supports it.

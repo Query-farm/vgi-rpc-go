@@ -119,12 +119,17 @@ func (h *HttpServer) handleRpcGet(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "RPC endpoints accept POST only", http.StatusMethodNotAllowed)
 }
 
-// handleReserved serves the flat, server-level reserved methods that belong to
-// no protocol and so are not namespaced: POST {prefix}/__describe__.
+// handleReserved answers the flat, server-level route for reserved method names
+// -- the names that belong to no protocol and so are not namespaced.
 //
-// Anything that is not a reserved name 404s here rather than falling through to
-// a protocol lookup -- the flat route is not a catch-all. Without that, every
-// unrelated one-segment POST would be answered as a malformed RPC call.
+// It serves none of them today: __describe__, the only one that was ever routed
+// here, is retired, and it is answered with a refusal naming its replacement
+// rather than with a bare capability answer. The route stays because the
+// refusal has to be reachable, and because the shape it rejects is worth
+// rejecting precisely: anything that is not a reserved name 404s here rather
+// than falling through to a protocol lookup -- the flat route is not a
+// catch-all. Without that, every unrelated one-segment POST would be answered
+// as a malformed RPC call.
 func (h *HttpServer) handleReserved(w http.ResponseWriter, r *http.Request) {
 	// Authentication first, as on every other RPC route: an anonymous probe of
 	// a path that does not exist must not learn that it does not exist before
@@ -149,8 +154,10 @@ func (h *HttpServer) handleReserved(w http.ResponseWriter, r *http.Request) {
 			fmt.Errorf("unsupported content type: %s", ct), nil)
 		return
 	}
-	if method == "__describe__" {
-		h.handleDescribe(w, r)
+	// Retired rather than absent, and the caller is told which: see
+	// retiredDescribeError for why the distinction is the whole point.
+	if method == retiredDescribeMethod {
+		h.writeHttpError(w, http.StatusNotFound, retiredDescribeError(), nil)
 		return
 	}
 	h.writeHttpError(w, http.StatusNotFound,

@@ -213,7 +213,7 @@ func DynamicStreamWithHeader[P any](s *Server, name string,
 // The catalog methods need this: their protocol shape is a single wrapped
 // `request` binary column holding an IPC-encoded inner batch, while the Go
 // handler declares the inner batch's fields directly and relies on
-// deserializeParams to unwrap. Without an override, `__describe__` advertises
+// deserializeParams to unwrap. Without an override, reflection advertises
 // the flat fields — and a client that builds its request from the advertised
 // schema (as the TypeScript client does) then finds none of its keys and sends
 // a batch of all-nulls. Decoding stays tolerant of both shapes; only what the

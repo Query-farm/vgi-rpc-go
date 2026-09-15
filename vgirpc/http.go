@@ -64,7 +64,6 @@ func resolveRequestID(r *http.Request) string {
 //	POST /{protocol}/{method}           — unary RPC call
 //	POST /{protocol}/{method}/init      — stream initialization (producer or exchange)
 //	POST /{protocol}/{method}/exchange  — exchange continuation with state token
-//	POST /__describe__                  — reserved, server-level, not namespaced
 //	GET  /                              — landing page (HTML)
 //	GET  /describe                      — API reference page (HTML)
 //

@@ -83,8 +83,8 @@ jobs:
       # install vgi_rpc from source off the default branch rather than
       # `pip install vgi-rpc`. external extras (aiohttp etc.) are required by
       # the externalize-always HTTP conformance variant; the host
-      # conformance_describe fixture (test_go_conformance.py) runs __describe__
-      # against the real Go worker across every transport.
+      # conformance_describe fixture (test_go_conformance.py) drives
+      # vgi_rpc.Reflection.v1 against the real Go worker across every transport.
       - name: Clone vgi-rpc-python reference
         run: git clone --depth 1 https://github.com/Query-farm/vgi-rpc-python.git "$RUNNER_TEMP/vgi-rpc-python"
 

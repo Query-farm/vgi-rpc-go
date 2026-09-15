@@ -77,8 +77,8 @@ upstream changed something not yet released. See `.github/workflows/ci.yml`.
 
 This port tracks `vgi-rpc-python` for wire compatibility. Two surfaces matter:
 
-- **`__describe__`** — `DescribeVersion = "4"`. The response batch is the slim 8-column schema (`name`, `method_type`, `has_return`, `params_schema_ipc`, `result_schema_ipc`, `has_header`, `header_schema_ipc`, `is_exchange`). Python-flavoured columns (`doc`, `param_types_json`, `param_defaults_json`, `param_docs_json`) are not on the wire. The response's `arrow.Metadata` carries `vgi_rpc.protocol_hash` — a SHA-256 hex digest over the canonical describe payload, computed by `computeProtocolHash` to mirror Python's `compute_protocol_hash` byte-for-byte. Within-port stable; cross-port byte equality is *not* guaranteed because Arrow IPC schema bytes vary across language Arrow libraries.
-- **Access log** — every dispatch fires `AccessLogHook` (when installed), writing one JSONL record per call. The record shape conforms to `vgi_rpc/access_log.schema.json` in the Python repo and validates under `vgi-rpc-test --access-log <path>`. `DispatchInfo` carries `Protocol`, `ProtocolHash`, `ProtocolVersion`, `RemoteAddr`, `RequestData`, `StreamID`, `Cancelled`, and `HTTPStatus`; the access-log emitter maps these to the spec field names. Configure protocol-version via `Server.SetProtocolVersion(...)`.
+- **Introspection** — `vgi_rpc.Reflection.v1`, an ordinary co-hosted protocol: `list_protocols` for what the server hosts, then `describe` for one protocol's methods. `__describe__` is retired and is refused with a message naming that replacement (see `retiredDescribeError`) rather than with a bare "no such method", which a stale client cannot tell from "this server was built without introspection". Each protocol's `protocol_hash` is the **canonical** digest (`ComputeProtocolHash`, `protocolhash.go`), taken over what Arrow decodes to rather than over serialized IPC bytes, and so comparable across ports — `WIRE_PROTOCOL.md §14`. The legacy byte-based digest taken over the old describe payload is gone with the payload.
+- **Access log** — every dispatch fires `AccessLogHook` (when installed), writing one JSONL record per call. The record shape conforms to `vgi_rpc/access_log.schema.json` in the Python repo and validates under `vgi-rpc-test --access-log <path>`. `DispatchInfo` carries `Protocol`, `ProtocolHash`, `ProtocolVersion`, `RemoteAddr`, `RequestData`, `StreamID`, `Cancelled`, and `HTTPStatus`; the access-log emitter maps these to the spec field names. `Protocol` and `ProtocolHash` name the protocol that **owns the dispatched method**, not the server's primary, and both come from `Server.dispatchLabel(binding)` at every emit site — a record naming one protocol while carrying another's digest is well-formed, passes the schema, and decodes against the wrong description. Configure protocol-version via `Server.SetProtocolVersion(...)`.
 
 The conformance worker accepts `--access-log <path>` anywhere on the CLI to enable JSONL emission, plus `--access-log-sample <rate>`, `--access-log-async`, `--access-log-queue-size <n>` and `--access-log-debug` (the CLI face of `AccessLogHook.SetDebug`).
 
@@ -216,7 +216,7 @@ shares it.
 
 ### Lazy state must be `sync.Once`
 
-`HttpServer.InitPages` and `Server.ProtocolHash` are both reached from the
+`HttpServer.InitPages` and `Server.canonicalHash` are both reached from the
 dispatch path and are guarded by `sync.Once`. Both previously used an
 unsynchronized check-then-act: concurrent first requests raced, and
 `InitPages` additionally panicked because `mux.HandleFunc` rejects a duplicate

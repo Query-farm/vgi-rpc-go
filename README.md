@@ -297,7 +297,6 @@ Routes use an empty prefix by default:
 | `POST /{protocol}/{method}` | Unary RPC call |
 | `POST /{protocol}/{method}/init` | Stream initialization |
 | `POST /{protocol}/{method}/exchange` | Exchange continuation |
-| `POST /__describe__` | Introspection (reserved, server-level, not namespaced) |
 
 RPC routes are namespaced by protocol. `vgi_rpc.protocol` in the request
 metadata is canonical -- it is the only carrier on the stdio, unix and
@@ -396,15 +395,24 @@ Use `errors.Is(err, vgirpc.ErrRpc)` to check whether any error in a chain is an 
 
 ## Introspection
 
-The `__describe__` endpoint returns a RecordBatch describing all registered methods. It is called automatically by the Python client's `describe()` method:
+Introspection is `vgi_rpc.Reflection.v1`, a protocol co-hosted alongside the
+application's own. Register it with `vgirpc.RegisterReflection(server)`; a
+client then calls `list_protocols` to learn what the server hosts and
+`describe` for one protocol's methods:
 
 ```python
-from vgi_rpc import Client
-client = Client(["./my-server"])
-info = client.describe()
+from vgi_rpc.introspect import introspect
+info = introspect(transport)          # list_protocols, then describe
 ```
 
-The response includes method names, types (unary/stream), parameter schemas, result schemas, defaults, and header information. The describe schema version is tracked by `vgirpc.DescribeVersion`.
+A description carries method names, types (unary/stream), parameter, result and
+header schemas, and the protocol's canonical `protocol_hash` — a digest taken
+over what Arrow decodes to, so two ports serving the same protocol agree on it.
+
+`__describe__`, the hardcoded method introspection used to be, is retired. A
+server still recognises the name, only to refuse it with a message naming the
+replacement: "retired" and "built without introspection" are indistinguishable
+from the caller's side and need opposite fixes.
 
 ## Reference
 

@@ -13,8 +13,6 @@ import (
 	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
-	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
 
 // unsupportedEncodingError is returned by readHTTPBody when the request's
@@ -96,44 +94,6 @@ func applyResponseCookies(w http.ResponseWriter, cookies []CookieSpec) {
 		}
 		http.SetCookie(w, hc)
 	}
-}
-
-// handleDescribe handles the __describe__ introspection endpoint.
-func (h *HttpServer) handleDescribe(w http.ResponseWriter, r *http.Request) {
-	body, err := h.readHTTPBody(r)
-	if err != nil {
-		h.writeBodyReadError(w, err, nil)
-		return
-	}
-
-	req, err := ReadRequest(bytes.NewReader(body))
-	if err != nil {
-		h.writeHttpError(w, http.StatusBadRequest, err, nil)
-		return
-	}
-	defer req.Batch.Release()
-
-	batch, meta := h.server.buildDescribeBatch()
-	defer batch.Release()
-
-	batchWithMeta := array.NewRecordBatchWithMetadata(
-		describeSchema, batch.Columns(), batch.NumRows(), meta)
-	defer batchWithMeta.Release()
-
-	var buf bytes.Buffer
-	writer := ipc.NewWriter(&buf, ipc.WithSchema(describeSchema))
-	h.logIPCWriteErr("describe-batch", "describe", writer.Write(batchWithMeta))
-	h.logIPCWriteErr("close", "describe", writer.Close())
-	budget := responseBudgetFromContext(r.Context())
-	if capErr := enforceResponseBudgets("__describe__", int64(buf.Len()), 0, budget.Limit, 0); capErr != nil {
-		buf.Reset()
-		h.logIPCWriteErr("describe-cap-error", "describe",
-			writeErrorResponse(&buf, describeSchema, capErr, h.server.serverID, "", h.server.debugErrors))
-		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
-		return
-	}
-
-	h.writeArrow(w, http.StatusOK, buf.Bytes())
 }
 
 // --- Helpers ---

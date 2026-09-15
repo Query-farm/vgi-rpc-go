@@ -791,13 +791,15 @@ def conformance_describe(
     go_unix_path: str,
     go_tcp_addr: tuple[str, int],
 ) -> ServiceDescription:
-    """Return a ``ServiceDescription`` from a real ``__describe__`` over the wire.
+    """Return a ``ServiceDescription`` from real reflection calls over the wire.
 
     Parallels ``conformance_conn`` — same transport matrix — but instead of a
-    proxy it sends an actual ``__describe__`` request to the Go worker under
-    test and parses the response, so ``TestDescribeConformance`` validates
-    introspection against the running Go server (not a throwaway in-process
-    Python one).  The Go server always exposes ``__describe__``.
+    proxy it drives ``vgi_rpc.Reflection.v1`` against the Go worker under test
+    (``list_protocols``, then ``describe``) and adapts the reply, so
+    ``TestDescribeConformance`` validates introspection against the running Go
+    server (not a throwaway in-process Python one).  The Go worker registers
+    reflection on every transport; ``__describe__``, which this fixture used to
+    call, is retired and answers only with a refusal naming its replacement.
     """
     from vgi_rpc.http import http_introspect
     from vgi_rpc.introspect import introspect

@@ -16,7 +16,6 @@ Routes use an empty prefix by default:
 | `POST /{protocol}/{method}` | Unary RPC call |
 | `POST /{protocol}/{method}/init` | Stream initialization |
 | `POST /{protocol}/{method}/exchange` | Exchange continuation |
-| `POST /__describe__` | Introspection (reserved, server-level, not namespaced) |
 
 RPC routes are namespaced by protocol. `vgi_rpc.protocol` in the request
 metadata is canonical -- it is the only carrier on the stdio, unix and

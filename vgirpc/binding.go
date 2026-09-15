@@ -154,6 +154,36 @@ func (s *Server) bindings() map[string]*protocolBinding {
 	return out
 }
 
+// dispatchLabel returns the protocol name and canonical hash an access record
+// must carry for a dispatch that resolved to b.
+//
+// docs/access-log-spec.md §3: protocol is "the wire name of the protocol that
+// owns the dispatched method … not a server-wide default", and protocol_hash is
+// that protocol's canonical digest -- "the registry key when decoding archived
+// records". Both sides of that pair have to come from the same place or a
+// record names one protocol and carries another's digest, which is worse than
+// either field being wrong alone: it is well-formed, it passes the schema, and
+// it decodes against the wrong description with nothing about it looking wrong.
+//
+// Returning both together is deliberate. Every emit site that fills one fills
+// the other, and a site that reads the name from the binding while reaching for
+// the server's hash is exactly the bug this exists to prevent.
+//
+// A nil binding means a framework endpoint owned by no protocol
+// (__transport_options__, __upload_url__) -- or a method that never resolved.
+// Those log the server's primary, which the spec prescribes rather than
+// tolerates.
+//
+// The hash is the canonical one, not the legacy byte-based digest the retired
+// __describe__ payload carried: the canonical hash is what compares across
+// ports, and what the access-log conformance validator asserts.
+func (s *Server) dispatchLabel(b *protocolBinding) (protocol, hash string) {
+	if b == nil {
+		return s.primaryProtocolName(), s.canonicalHash()
+	}
+	return b.Name, b.Hash
+}
+
 // primaryProtocolName is the wire name of the application protocol.
 func (s *Server) primaryProtocolName() string {
 	if s.serviceName != "" {

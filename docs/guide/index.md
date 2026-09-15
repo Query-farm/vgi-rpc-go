@@ -10,7 +10,7 @@ This guide covers the core concepts of `vgi-rpc-go` — from struct tags and str
 - **[HTTP Transport](http.md)** — serve RPC over HTTP with signed state tokens
 - **[Error Handling](errors.md)** — RpcError, ErrRpc sentinel, and standard error types
 - **[Observability](observability.md)** — dispatch hooks and OpenTelemetry instrumentation
-- **[Introspection](introspection.md)** — the `__describe__` endpoint for service discovery
+- **[Introspection](introspection.md)** — `vgi_rpc.Reflection.v1`, the co-hosted protocol for service discovery
 
 ## Quick Overview
 

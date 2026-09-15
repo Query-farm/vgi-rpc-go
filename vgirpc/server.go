@@ -101,8 +101,6 @@ type Server struct {
 	protocolVersion      string // canonical semver MAJOR.MINOR.PATCH, or "" when opted out
 	protocolVersionParts [3]int // parsed (major, minor, patch); used when protocolVersion != ""
 	protocolVersionSet   bool   // true when SetProtocolVersion was called with a non-empty value
-	protocolHash         string
-	protocolHashOnce     sync.Once
 	canonicalHashValue   string
 	canonicalHashOnce    sync.Once
 
@@ -279,17 +277,17 @@ func capabilitiesEqual(a, b map[string]bool) bool {
 // MAJOR.MINOR.PATCH (e.g. “"1.0.0"“); the empty string opts back out.
 //
 // When set, the server:
-//   - surfaces “v“ under “vgi_rpc.protocol_version“ in the
-//     “__describe__“ response custom_metadata (so a mismatched client
-//     can introspect the expected version), and
+//   - surfaces “v“ as protocol_version on the vgi_rpc.Reflection.v1
+//     description (so a mismatched client can introspect the expected
+//     version), and
 //   - enforces an exact major+minor match against the client's
 //     “vgi_rpc.protocol_version“ request metadata at the dispatch
 //     boundary. Patch is ignored. Mismatch raises
 //     [ProtocolVersionError] (vgi_rpc.error_kind =
 //     “protocol_version_mismatch“) with a directional message.
 //
-// “__describe__“ requests are exempt from the dispatch check so a
-// mismatched client can discover the server's version. Mirrors Python's
+// The vgi_rpc.Reflection.v1 binding is exempt from the dispatch check so
+// a mismatched client can discover the server's version. Mirrors Python's
 // “RpcServer(protocol)“ reading “Protocol.protocol_version“.
 //
 // Panics if “v“ is non-empty and not canonical semver. Pre-flight
@@ -378,23 +376,6 @@ func gateVersion(
 			"  Server: " + serverVersion + "\n" +
 			"  Direction: " + direction,
 	}
-}
-
-// ProtocolHash returns the SHA-256 hex digest of the canonical __describe__
-// payload. Computed lazily on first call and cached.
-//
-// The computation is guarded by a sync.Once: ProtocolHash is called from the
-// dispatch path, so concurrent first requests would otherwise race on the
-// cached field (and each redundantly build a describe batch).
-func (s *Server) ProtocolHash() string {
-	s.protocolHashOnce.Do(func() {
-		batch, meta := s.buildDescribeBatch()
-		batch.Release()
-		if v, ok := meta.GetValue(MetaProtocolHash); ok {
-			s.protocolHash = v
-		}
-	})
-	return s.protocolHash
 }
 
 // SetDebugErrors controls whether error responses include full stack traces

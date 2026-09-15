@@ -120,12 +120,15 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	transportMeta := buildHTTPTransportMeta(req.Metadata, r)
+	// The owning binding's identity, not the server's primary: see
+	// Server.dispatchLabel.
+	logProtocol, logHash := h.server.dispatchLabel(binding)
 	dispatchInfo := DispatchInfo{
 		Method:            method,
 		MethodType:        DispatchMethodUnary,
 		ServerID:          h.server.serverID,
-		Protocol:          h.server.serviceName,
-		ProtocolHash:      h.server.ProtocolHash(),
+		Protocol:          logProtocol,
+		ProtocolHash:      logHash,
 		ProtocolVersion:   h.server.protocolVersion,
 		RequestID:         req.RequestID,
 		TransportMetadata: transportMeta,
@@ -146,8 +149,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	// version", so gating a secondary against the primary would reject correct
 	// callers and name the wrong protocol when it did. A version-exempt binding
 	// (reflection) is skipped: it is what a mismatched client calls to learn
-	// what mismatched. ``__describe__`` never reaches here — it is a reserved,
-	// un-namespaced route. Mismatch surfaces as a 400 EXCEPTION batch carrying
+	// what mismatched. Mismatch surfaces as a 400 EXCEPTION batch carrying
 	// vgi_rpc.error_kind = "protocol_version_mismatch" with the directional
 	// message intact.
 	if binding.VersionSet && !binding.VersionExempt {

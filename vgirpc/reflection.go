@@ -41,6 +41,32 @@ import (
 // bootstrap, so there is nothing to discover it with.
 const ReflectionProtocolName = "vgi_rpc.Reflection.v1"
 
+// retiredDescribeMethod is the method introspection used to be.
+//
+// The name survives the handler by exactly one use: saying where introspection
+// went. A stale client told only "no such method" cannot tell "retired" from
+// "this server was built without introspection", and the two need opposite
+// fixes -- one is a client to update, the other a server to reconfigure.
+const retiredDescribeMethod = "__describe__"
+
+// retiredDescribeError refuses __describe__ by naming its replacement.
+//
+// Only __describe__ is special-cased. Every other reserved name keeps the plain
+// capability answer, which is what a client probing for an optional method
+// needs: "this server does not have it" is the whole content of that question,
+// and a redirection would be noise.
+//
+// Both transports build the refusal here so a caller cannot get two different
+// stories about where introspection went depending on how it connected.
+func retiredDescribeError() *MethodNotImplementedError {
+	return &MethodNotImplementedError{
+		Method: retiredDescribeMethod,
+		Message: "'" + retiredDescribeMethod + "' was retired. Introspection is now the '" +
+			ReflectionProtocolName + "' protocol: call 'list_protocols' for what this server hosts, " +
+			"then 'describe' for one protocol's methods.",
+	}
+}
+
 // IdempotencyLevels are the values MethodInfo.Idempotency may take, borrowed
 // from gRPC's idempotency_level.
 //
