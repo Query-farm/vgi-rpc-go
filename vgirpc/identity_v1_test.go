@@ -24,6 +24,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
 )
@@ -451,7 +452,7 @@ func TestIntrospectionRefusalPrecedesTheResolver(t *testing.T) {
 // an unauthorized caller something about the subject credential.
 func TestIntrospectionAuthorizationPrecedesEverySubjectCheck(t *testing.T) {
 	impl := introspectingIdentity(t, IdentityConfig{})
-	for _, token := range []string{"", "aaa.bbb.ccc", strings.Repeat("x", MaxTokenChars+1)} {
+	for _, token := range []string{"", "aaa.bbb.ccc", strings.Repeat("x", MaxTokenBytes+1)} {
 		_, err := impl.IntrospectToken(token, idCtx(idAuth("mallory", true, noAuthTime)))
 		var refused *IntrospectionRefusedError
 		if !errors.As(err, &refused) {
@@ -463,9 +464,16 @@ func TestIntrospectionAuthorizationPrecedesEverySubjectCheck(t *testing.T) {
 
 // Unknown, malformed and over-long are one answer. Distinguishing them would
 // confirm that a guessed credential exists.
+//
+// NOTE: this is a test about UNIFORMITY and is not, and never was, a test that
+// any of the guards fire. Its resolver does not know the over-long credential
+// either, so deleting the length cap leaves it green -- which is exactly the
+// vacuity trap spec 5b describes, and exactly what the reference shipped. The
+// guards are covered by the resolvable-probe tests at the end of this file; do
+// not add a guard case here and count it as coverage.
 func TestIntrospectionRejectionsAreUniform(t *testing.T) {
 	impl := introspectingIdentity(t, IdentityConfig{})
-	for _, token := range []string{"", "unknown", strings.Repeat("x", MaxTokenChars+1)} {
+	for _, token := range []string{"", "unknown", strings.Repeat("x", MaxTokenBytes+1)} {
 		_, err := impl.IntrospectToken(token, idCtx(idAuth("proxy", true, noAuthTime)))
 		var unresolved *TokenUnresolvedError
 		if !errors.As(err, &unresolved) {
@@ -1007,7 +1015,7 @@ func TestAnOpaqueCredentialStillReachesTheResolver(t *testing.T) {
 // padding down into the allowance -- what arrived is what a resolver would have
 // to handle.
 func TestTheLengthCheckRunsOnTheUntrimmedCredential(t *testing.T) {
-	padded := strings.Repeat(" ", MaxTokenChars) + "opaque" + strings.Repeat(" ", MaxTokenChars)
+	padded := strings.Repeat(" ", MaxTokenBytes) + "opaque" + strings.Repeat(" ", MaxTokenBytes)
 	var unresolved *TokenUnresolvedError
 	if err := RejectJWSShaped(padded); !errors.As(err, &unresolved) {
 		t.Errorf("got %v, want *TokenUnresolvedError for a credential over the byte cap", err)
@@ -1033,5 +1041,305 @@ func TestTheResolverReceivesTheCredentialUnmodified(t *testing.T) {
 	}
 	if !reflect.DeepEqual(seen, []string{padded}) {
 		t.Errorf("resolver saw %q, want the credential exactly as it arrived (%q)", seen, padded)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The enumerated trim floor
+// ---------------------------------------------------------------------------
+
+// identityTrimFloor is the whitespace set every port MUST trim before the JWS
+// shape test, enumerated rather than delegated to the language.
+//
+// "Whitespace" is itself a divergence one layer down, and it was measured
+// rather than assumed: JavaScript and Java both exclude U+0085 NEL, and an
+// ASCII-only literal excludes U+00A0 NBSP as well. A port trimming a narrower
+// set routes a padded JWS that another port refuses -- the same hole the trim
+// exists to close, one level down.
+//
+// Go is correct today because strings.TrimSpace delegates to unicode.IsSpace,
+// which covers the full Unicode White_Space property and so all eight of these.
+// Trimming wider than the floor is a safe difference; trimming narrower is a
+// leak. This pins the floor so that swapping in a hand-rolled trim -- an ASCII
+// loop, a cutset literal, strings.Trim(token, " \t\n") -- goes red here
+// instead of silently routing a credential this port is supposed to refuse.
+var identityTrimFloor = []rune{
+	'\t',     // HT
+	'\n',     // LF
+	'\v',     // VT
+	'\f',     // FF
+	'\r',     // CR
+	' ',      // SP
+	'\u0085', // NEL  -- excluded by JavaScript and Java
+	'\u00a0', // NBSP -- excluded by JavaScript, Java, and any ASCII-only literal
+}
+
+// Every codepoint in the floor must be trimmed, leading and trailing, so that no
+// amount of it can smuggle a JWS past the shape test.
+func TestTrimFloorIsTrimmedBothEnds(t *testing.T) {
+	for _, r := range identityTrimFloor {
+		t.Run(strconv.QuoteRune(r), func(t *testing.T) {
+			pad := string([]rune{r, r, r})
+			for name, token := range map[string]string{
+				"leading":  pad + "aaa.bbb.ccc",
+				"trailing": "aaa.bbb.ccc" + pad,
+				"both":     pad + "aaa.bbb.ccc" + pad,
+			} {
+				var unresolved *TokenUnresolvedError
+				if err := RejectJWSShaped(token); !errors.As(err, &unresolved) {
+					t.Errorf("%s U+%04X: got %v, want *TokenUnresolvedError -- this "+
+						"codepoint is in the required trim floor, so padding a JWS with "+
+						"it must not make the JWS unrecognisable", name, r, err)
+				}
+			}
+		})
+	}
+}
+
+// A credential made only of floor whitespace is not a credential. This is the
+// other half of the floor, and it fails if the trim misses a codepoint: the
+// untrimmed remainder is then a non-empty candidate that is simply not
+// JWS-shaped, and would be routed onward to a resolver.
+func TestTrimFloorAloneIsNotACredential(t *testing.T) {
+	for _, r := range identityTrimFloor {
+		t.Run(strconv.QuoteRune(r), func(t *testing.T) {
+			var unresolved *TokenUnresolvedError
+			if err := RejectJWSShaped(string([]rune{r, r, r})); !errors.As(err, &unresolved) {
+				t.Errorf("U+%04X: got %v, want *TokenUnresolvedError", r, err)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Guards behind uniform rejections: the vacuity trap (spec 5b)
+// ---------------------------------------------------------------------------
+
+// Rejections are deliberately uniform -- unknown, expired, malformed and
+// over-long are one answer -- and that makes the obvious guard test prove
+// NOTHING. An over-long credential is also an unknown one, so probing
+// IntrospectToken with a credential the resolver does not know cannot
+// distinguish "the cap refused it" from "the cap let it through and the
+// resolver refused it". Delete the cap from the dispatch path and such a test
+// stays green. Two ports hit this independently and the reference had it too.
+//
+// The resolvable-probe form is the fix, and it has two halves:
+//
+//   - a hook that resolves ANYTHING, so a rejection can only have come from the
+//     guard; and
+//   - an assertion that the hook was never reached.
+//
+// The second half is the one that fails when the guard is skipped, so it is not
+// optional decoration. Every test below was mutation-checked: the guard it
+// covers was deleted from the dispatch path on purpose and the test confirmed
+// red before the guard was restored.
+//
+// This port had the trap too, and it was measured rather than assumed: deleting
+// "len(token) > MaxTokenBytes" from RejectJWSShaped leaves
+// TestIntrospectionRejectionsAreUniform green. Adding a guard case to a
+// uniformity test does not make it a guard test.
+
+// resolveAnything is a resolver that resolves every credential it is handed, and
+// records what it saw. Its whole job is to make "the guard did not fire" a
+// success rather than another rejection that looks identical to the right one.
+func resolveAnything(seen *[]string) TokenResolver {
+	return func(token string) (TokenIdentity, bool, error) {
+		*seen = append(*seen, token)
+		return NewTokenIdentity("resolved-by-the-hook"), true, nil
+	}
+}
+
+// mintAnything is resolveAnything's counterpart for issue_grant.
+func mintAnything(seen *[]string) GrantMinter {
+	return func(principal, _ string, _ []string, _ int64) (IssuedGrant, error) {
+		*seen = append(*seen, principal)
+		return IssuedGrant{Token: "minted", ExpiresAt: 1, GrantID: "g"}, nil
+	}
+}
+
+// probeIdentity wires a resolvable probe behind the allowlist the tests share.
+func probeIdentity(t *testing.T, seen *[]string) *IdentityImpl {
+	t.Helper()
+	return mustIdentity(t, IdentityConfig{
+		ResolveToken:         resolveAnything(seen),
+		IntrospectPrincipals: []string{"proxy"},
+	})
+}
+
+// requireGuardFired asserts the guard refused AND that the hook behind it was
+// never reached. Mutation check: deleting the guard makes the hook resolve, so
+// err is nil and both halves fail.
+func requireGuardFired(t *testing.T, err error, seen []string, what string) {
+	t.Helper()
+	var unresolved *TokenUnresolvedError
+	if !errors.As(err, &unresolved) {
+		t.Errorf("%s: got %T (%v), want *TokenUnresolvedError", what, err, err)
+	}
+	if len(seen) != 0 {
+		t.Errorf("%s: the guard did not fire -- the hook was reached with %q", what, seen)
+	}
+}
+
+// The length cap fires, rather than the resolver happening to refuse.
+//
+// This is the case the reference's uniformity test appeared to cover and did
+// not: with a resolve-anything hook, an over-long credential that gets past the
+// cap RESOLVES, so removing the cap turns this red twice over.
+func TestTheLengthCapFiresBeforeTheResolver(t *testing.T) {
+	var seen []string
+	impl := probeIdentity(t, &seen)
+	ctx := idCtx(idAuth("proxy", true, noAuthTime))
+
+	_, err := impl.IntrospectToken(strings.Repeat("x", MaxTokenBytes+1), ctx)
+	requireGuardFired(t, err, seen, "over-long credential")
+
+	// The boundary, so the cap is the documented size and not merely "large".
+	// Exactly MaxTokenBytes is admitted; one byte more is not.
+	seen = nil
+	if _, err := impl.IntrospectToken(strings.Repeat("x", MaxTokenBytes), ctx); err != nil {
+		t.Errorf("a credential of exactly MaxTokenBytes was refused: %v", err)
+	}
+	if len(seen) != 1 {
+		t.Errorf("a credential of exactly MaxTokenBytes did not reach the resolver")
+	}
+}
+
+// The cap counts UTF-8 BYTES, not codepoints or UTF-16 code units.
+//
+// Invisible for an ASCII credential -- which every real bearer token is -- and
+// that is exactly why it is pinned: the ports reached for three different units
+// and all three agree until somebody sends a multibyte one. A string of
+// MaxTokenBytes/2 two-byte runes is at the cap in bytes but half of it in
+// codepoints, so a port measuring codepoints admits it.
+func TestTheLengthCapCountsBytesNotCodepoints(t *testing.T) {
+	var seen []string
+	impl := probeIdentity(t, &seen)
+	ctx := idCtx(idAuth("proxy", true, noAuthTime))
+
+	// U+00E9 is two bytes in UTF-8 and one codepoint.
+	overByBytesUnderByCodepoints := strings.Repeat("\u00e9", MaxTokenBytes/2+1)
+	if len(overByBytesUnderByCodepoints) <= MaxTokenBytes {
+		t.Fatalf("fixture is not over the byte cap: %d bytes", len(overByBytesUnderByCodepoints))
+	}
+	if utf8.RuneCountInString(overByBytesUnderByCodepoints) > MaxTokenBytes {
+		t.Fatalf("fixture is over the cap in codepoints too, so it proves nothing")
+	}
+	_, err := impl.IntrospectToken(overByBytesUnderByCodepoints, ctx)
+	requireGuardFired(t, err, seen, "multibyte credential over the byte cap")
+}
+
+// The JWS trap fires, rather than the resolver happening to refuse.
+//
+// Routing a JWS onward hands a third party a token the asker may itself have
+// rejected -- expired, wrong audience -- which turns this method into a
+// laundering step. The resolve-anything hook is what makes "routed onward"
+// visible: without it, a skipped guard produces the same token_unresolved the
+// guard produces.
+func TestTheJWSTrapFiresBeforeTheResolver(t *testing.T) {
+	var seen []string
+	impl := probeIdentity(t, &seen)
+	ctx := idCtx(idAuth("proxy", true, noAuthTime))
+	for _, token := range []string{"aaa.bbb.ccc", "  aaa.bbb.ccc\n", "aaa.bbb."} {
+		seen = nil
+		_, err := impl.IntrospectToken(token, ctx)
+		requireGuardFired(t, err, seen, strconv.Quote(token))
+	}
+}
+
+// The allowlist fires, rather than the resolver happening to refuse.
+//
+// A caller off the allowlist must reach nothing. The probe resolves anything,
+// so removing the check does not merely change the error -- it returns a
+// resolved identity for an unauthorized caller, which is the actual failure.
+func TestTheAllowlistFiresBeforeTheResolver(t *testing.T) {
+	var seen []string
+	impl := probeIdentity(t, &seen)
+	for _, caller := range []*AuthContext{
+		idAuth("mallory", true, noAuthTime), // authenticated, off the allowlist
+		idAuth("proxy", false, noAuthTime),  // on the list but not authenticated
+		Anonymous(),
+	} {
+		seen = nil
+		got, err := impl.IntrospectToken("anything", idCtx(caller))
+		var refused *IntrospectionRefusedError
+		if !errors.As(err, &refused) {
+			t.Errorf("caller %q: got %T (%v) and identity %+v, want *IntrospectionRefusedError",
+				caller.Principal, err, err, got)
+		}
+		if len(seen) != 0 {
+			t.Errorf("caller %q: the allowlist did not fire -- the resolver was reached", caller.Principal)
+		}
+	}
+}
+
+// The rate limit fires, rather than the resolver happening to refuse.
+//
+// The probe resolves anything, so an unlimited implementation answers the
+// over-limit call successfully and reaches the resolver a third time -- both of
+// which this asserts.
+func TestTheRateLimitFiresBeforeTheResolver(t *testing.T) {
+	var seen []string
+	impl := mustIdentity(t, IdentityConfig{
+		ResolveToken:         resolveAnything(&seen),
+		IntrospectPrincipals: []string{"proxy"},
+		IntrospectRateLimit:  2,
+	})
+	ctx := idCtx(idAuth("proxy", true, noAuthTime))
+	for i := range 2 {
+		if _, err := impl.IntrospectToken("anything", ctx); err != nil {
+			t.Fatalf("call %d inside the limit: %v", i, err)
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("resolver reached %d times inside the limit, want 2", len(seen))
+	}
+
+	_, err := impl.IntrospectToken("anything", ctx)
+	var refused *IntrospectionRefusedError
+	if !errors.As(err, &refused) {
+		t.Errorf("over-limit call: got %T (%v), want *IntrospectionRefusedError", err, err)
+	}
+	if len(seen) != 2 {
+		t.Errorf("the rate limit did not fire -- the resolver was reached %d times", len(seen))
+	}
+}
+
+// The freshness check fires, rather than the minter happening to refuse.
+//
+// The minter mints for anybody, so a skipped freshness check hands a grant to a
+// caller with no auth_time -- which is exactly the lineage escape the check
+// exists to close: a grant carries no auth_time, so a grant must not be able to
+// mint another grant.
+func TestTheFreshnessCheckFiresBeforeTheMinter(t *testing.T) {
+	var seen []string
+	impl := mustIdentity(t, IdentityConfig{MintGrant: mintAnything(&seen), MaxAuthAge: time.Minute})
+	for name, caller := range map[string]*AuthContext{
+		"no auth_time (a grant, or a static bearer)": idAuth("alice", true, noAuthTime),
+		"unauthenticated": idAuth("alice", false, noAuthTime),
+		"stale login":     idAuth("alice", true, float64(time.Now().Add(-time.Hour).Unix())),
+		"unparseable auth_time": {
+			Authenticated: true, Principal: "alice", Domain: "test",
+			Claims: map[string]any{"auth_time": "not-a-number"},
+		},
+	} {
+		seen = nil
+		got, err := impl.IssueGrant("backup", nil, 60, idCtx(caller))
+		var stale *StaleAuthError
+		if !errors.As(err, &stale) {
+			t.Errorf("%s: got %T (%v) and grant %+v, want *StaleAuthError", name, err, err, got)
+		}
+		if len(seen) != 0 {
+			t.Errorf("%s: the freshness check did not fire -- the minter was reached for %q", name, seen)
+		}
+	}
+
+	// The probe is only meaningful if it mints when the guard passes.
+	seen = nil
+	if _, err := impl.IssueGrant("backup", nil, 60,
+		idCtx(idAuth("alice", true, float64(time.Now().Unix())))); err != nil {
+		t.Fatalf("a freshly authenticated caller was refused: %v", err)
+	}
+	if len(seen) != 1 {
+		t.Fatal("the minting probe never mints, so every assertion above is vacuous")
 	}
 }

@@ -57,10 +57,20 @@ import (
 // register something else under the name a proxy trusts for identity answers.
 const IdentityProtocolName = "vgi_rpc.Identity.v1"
 
-// MaxTokenChars caps a credential we will even attempt to resolve. Anything
+// MaxTokenBytes caps a credential we will even attempt to resolve. Anything
 // longer is not a bearer token; refusing early keeps a resolver from being
 // handed megabytes.
-const MaxTokenChars = 4096
+//
+// The unit is UTF-8 BYTES, and the name says so because the ports reached for
+// three different units and none of them said which: codepoints (Python, Rust),
+// UTF-16 code units (Java, C#, TypeScript), bytes (Go, C++). All three agree for
+// an ASCII credential -- which every real bearer token is -- so the divergence
+// is invisible today and only appears on a multibyte one. Bytes is what the
+// purpose implies (what a resolver would actually have to handle) and the most
+// conservative of the three, so standardising on it can only refuse earlier.
+// Go's len(string) is already bytes, so this is a name that stopped leaving the
+// unit to the reader, not a change of behaviour.
+const MaxTokenBytes = 4096
 
 // DefaultTokenTTLSeconds is how long a resolved identity may be cached when the
 // answer names no lifetime of its own.
@@ -363,7 +373,7 @@ func CheckIntrospector(auth *AuthContext, principals map[string]bool) (string, e
 // it would make the worker answer about a string the caller never sent.
 func RejectJWSShaped(token string) error {
 	candidate := strings.TrimSpace(token)
-	if candidate == "" || len(token) > MaxTokenChars || identityJWSShaped.MatchString(candidate) {
+	if candidate == "" || len(token) > MaxTokenBytes || identityJWSShaped.MatchString(candidate) {
 		return &TokenUnresolvedError{Detail: "unresolved"}
 	}
 	return nil

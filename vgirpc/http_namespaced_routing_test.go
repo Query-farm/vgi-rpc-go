@@ -196,12 +196,23 @@ func TestAbsentProtocolMetadataIsRefused(t *testing.T) {
 // The segment is compared raw and never decoded: if the server decoded
 // "demo%2EApp%2Ev1" it would route the request the edge saw as a different
 // path, which is precisely the split-view this rule closes.
+//
+// DO NOT "simplify" the implementation to read r.PathValue("protocol"). This
+// test exists because that is exactly what the first version did, and it is
+// wrong in a way that is invisible: net/http's ServeMux percent-decodes every
+// path segment BEFORE the handler runs, so PathValue can never contain a
+// percent sign. A server checking PathValue has a `%` ban that cannot fire,
+// while the edge in front of it matched the escaped string -- the
+// Content-Length/Transfer-Encoding shape, one request read two ways, shipped
+// green. The check must read r.URL.EscapedPath(); see rawProtocolSegment in
+// http_routing.go, and TestPercentEscapedHostedProtocolDoesNotResolve below,
+// which fails against a PathValue implementation.
 func TestPercentInProtocolSegmentIsRefusedWithoutDecoding(t *testing.T) {
 	h := NewHttpServer(newNamespacedServer(t))
 	for _, raw := range []string{"demo%2EApp%2Ev1", "demo.App.v1%00", "%64emo.App.v1"} {
 		t.Run(raw, func(t *testing.T) {
-			// httptest.NewRequest keeps RawPath, and Go's mux hands the
-			// wildcard its decoded form -- so the check has to run on a value
+			// httptest.NewRequest preserves RawPath, and Go's mux hands the
+			// wildcard its DECODED form -- so the check has to run on a value
 			// that still carries the percent sign, which is what this asserts.
 			body := encodeRequestBodyFor(t, "demo.App.v1", "echo", nsEchoParams{Value: "hi"})
 			req := httptest.NewRequest(http.MethodPost, "/"+raw+"/echo", bytes.NewReader(body))
@@ -219,8 +230,19 @@ func TestPercentInProtocolSegmentIsRefusedWithoutDecoding(t *testing.T) {
 }
 
 // A percent-escaped path must never decode into a protocol this server hosts.
-// This is the concrete attack the raw comparison closes, so it is asserted
-// separately from the generic refusal above.
+//
+// This is the concrete attack the raw comparison closes, and it is asserted
+// separately from the generic refusal above because it is the one case where a
+// status code cannot tell you what happened: "demo%2EApp%2Ev1" decodes to a
+// protocol this server really does host, so a PathValue implementation answers
+// 200 and dispatches. The `called` flag, not the status, is what makes that
+// visible.
+//
+// Measured, not assumed: rewriting rawProtocolSegment to return
+// r.PathValue("protocol") turns both this test and the one above red -- above,
+// because "%64emo.App.v1" decodes to a hosted name and routes while
+// "demo.App.v1%00" decodes to a name that fails the grammar and so reports
+// protocol_not_supported instead of the percent refusal.
 func TestPercentEscapedHostedProtocolDoesNotResolve(t *testing.T) {
 	h := NewHttpServer(newNamespacedServer(t))
 	var called bool

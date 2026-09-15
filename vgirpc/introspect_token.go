@@ -70,10 +70,10 @@ const (
 	// otherwise admit megabytes into a JSON parse for a body whose only
 	// legitimate content is one credential.
 	introspectMaxBodyBytes = 8192
-	// Cap on a credential we will even attempt to resolve. Anything longer is
-	// not a bearer token; refusing early keeps a resolver from being handed
-	// megabytes.
-	introspectMaxTokenChars = MaxTokenChars
+	// Cap on a credential we will even attempt to resolve, in UTF-8 bytes.
+	// Anything longer is not a bearer token; refusing early keeps a resolver
+	// from being handed megabytes.
+	introspectMaxTokenBytes = MaxTokenBytes
 
 	introspectDefaultTTLSeconds = DefaultTokenTTLSeconds
 	introspectDefaultRateLimit  = DefaultIntrospectRateLimit
@@ -395,7 +395,7 @@ func readIntrospectToken(r *http.Request) (string, bool) {
 	if err := json.Unmarshal(raw, &body); err != nil {
 		return "", false
 	}
-	if body.Token == "" || len(body.Token) > introspectMaxTokenChars {
+	if body.Token == "" || len(body.Token) > introspectMaxTokenBytes {
 		return "", false
 	}
 	return body.Token, true
