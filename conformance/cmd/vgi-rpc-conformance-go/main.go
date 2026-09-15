@@ -180,6 +180,42 @@ func main() {
 		os.Exit(1)
 	}
 
+	// --identity {off,both,introspect-only} backs the shared
+	// vgi_rpc.Identity.v1 conformance group, which needs two workers built from
+	// one binary: one configuring both hooks and one configuring only the
+	// resolver, so that method-level narrowing -- an unconfigured hook makes its
+	// method absent rather than hosted-and-refusing, and shrinks the protocol
+	// hash with it -- is observable at all.
+	//
+	// The default is off, and stays off: the group asserts against the PLAIN
+	// worker that a deployment configuring no hook hosts no identity protocol
+	// whatsoever. That is the property which lets the protocol live in the
+	// framework without every worker growing a credential-to-identity oracle at
+	// its next dependency upgrade, so the default must not drift.
+	//
+	// Registered AFTER reflection so identity appears in reflection's own
+	// output. (Reflection reads the live binding table in this port, so the
+	// order is not load-bearing here -- but it is in ports whose reflection
+	// snapshots at registration.)
+	identityMode := conformance.IdentityMode(findFlagValue(os.Args, "--identity"))
+	if identityMode == "" {
+		identityMode = conformance.IdentityModeOff
+	}
+	if identityCfg, wanted := conformance.IdentityConfigFor(identityMode); wanted {
+		impl, err := vgirpc.NewIdentity(identityCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "building identity: %v\n", err)
+			os.Exit(1)
+		}
+		if err := vgirpc.RegisterIdentity(server, impl); err != nil {
+			fmt.Fprintf(os.Stderr, "registering identity: %v\n", err)
+			os.Exit(1)
+		}
+	} else if identityMode != conformance.IdentityModeOff {
+		fmt.Fprintf(os.Stderr, "invalid --identity %q (want off, both or introspect-only)\n", identityMode)
+		os.Exit(1)
+	}
+
 	if hasFlag(os.Args, "--fail-serve-start-once") {
 		var serveStartCalls atomic.Int64
 		server.SetServeStartHook(func(vgirpc.TransportKind, map[string]bool) error {
@@ -586,6 +622,19 @@ func main() {
 		// to this worker exactly as it connects to the plain one.
 		if hasFlag(os.Args, "--sticky-auth") {
 			httpServer.SetAuthenticate(principalFromHeader)
+		}
+		// The identity fixture authenticates from X-Conformance-Principal and
+		// carries X-Conformance-Auth-Time into claims["auth_time"] verbatim.
+		// Every Identity guard reads exactly those three things -- authenticated,
+		// principal, claims["auth_time"] -- so this is the whole of what the
+		// group needs an identity provider for, and a baked JWT would expire.
+		//
+		// SECURITY: trivially spoofable by anyone who can reach the port. It is a
+		// test fixture and must never be deployed. It does NOT move the prefix:
+		// the group connects to this worker exactly as it connects to the plain
+		// one.
+		if identityMode != conformance.IdentityModeOff {
+			httpServer.SetAuthenticate(conformance.IdentityAuthenticate)
 		}
 		// --introspect enables POST /__introspect_token__ with the fixed
 		// conformance resolver and a single-principal allowlist, backing the

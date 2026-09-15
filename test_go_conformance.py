@@ -239,6 +239,39 @@ def conformance_http_introspect_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_identity_port() -> Iterator[int]:
+    """A Go HTTP worker hosting ``vgi_rpc.Identity.v1`` with both hooks.
+
+    Backs the shared identity group.  The protocol is nearly all guards and
+    every guard reads deployment policy -- who may introspect, what a
+    credential resolves to, whether a grant is minted, how recently the caller
+    authenticated -- so no cross-port assertion exists against a worker whose
+    allowlist and hooks are unknown.  The policy is pinned by
+    ``IDENTITY_CONFORMANCE_FIXTURE.md`` and configured in
+    ``conformance/identity_fixture.go``.
+
+    It needs its own worker because ``TestIdentityAbsentByDefault`` asserts
+    against the *plain* one that a deployment configuring no hook hosts no
+    identity protocol at all -- so ``--identity`` must stay off there.
+    """
+    yield from _start_http_worker("--http", "--identity", "both")
+
+
+@pytest.fixture(scope="session")
+def conformance_http_identity_introspect_only_port() -> Iterator[int]:
+    """The same binary with the mint hook left out.
+
+    Method-level narrowing -- that an unconfigured hook makes its method
+    *absent* rather than hosted-and-refusing, and shrinks the ``protocol_hash``
+    with it -- is only observable against a second worker configured with one
+    hook.  A client compares that hash to decide whether its cached description
+    is still valid, so two different method sets sharing one hash means a
+    client keeps calling a method that is no longer there.
+    """
+    yield from _start_http_worker("--http", "--identity", "introspect-only")
+
+
+@pytest.fixture(scope="session")
 def conformance_http_cold_call_cache_port() -> Iterator[int]:
     """Start a Go HTTP server with the call-state cache disabled.
 
