@@ -42,7 +42,7 @@ func ValidateProtocolName(name string, allowReserved bool) error {
 		return fmt.Errorf("a protocol name may not be empty")
 	}
 	if len(name) > maxProtocolNameBytes {
-		return fmt.Errorf("protocol name exceeds %d bytes: %.64q...", maxProtocolNameBytes, name)
+		return fmt.Errorf("protocol name exceeds %d bytes; it begins %.64q", maxProtocolNameBytes, name)
 	}
 	if !protocolNameRe.MatchString(name) {
 		return fmt.Errorf(
