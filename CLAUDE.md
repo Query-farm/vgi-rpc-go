@@ -9,19 +9,53 @@ make build      # build all packages (root + otel, sentry, jwtauth, s3, gcs subm
 make lint       # go build + go vet + staticcheck (root + otel, sentry, jwtauth)
 make go-test    # Go unit tests (language-local only — see Testing Policy)
 make test       # go-test, then build conformance worker + run Python conformance tests
+make test-client        # the same suite driving THIS port's client, vs the Go server
+make test-client-python # ... vs the Python reference server -- the client-role gate
 make coverage   # run tests with Go coverage instrumentation
 make cross-port # compare this port to the Python reference (see below)
 make ci         # every gate in .github/workflows/ci.yml — run this before pushing
 ```
 
 `make ci` exists because the other targets, run together, are still not the CI
-gate list. Four gates live only there — `staticcheck` at the version CI pins
-(`STATICCHECK_VERSION`, since releases add and retire checks), the
-runner-driven `vgi-rpc-test` suite (the only place
+gate list. Four gates are reachable through no other make target —
+`staticcheck` at the version CI pins (`STATICCHECK_VERSION`, since releases add
+and retire checks), the runner-driven `vgi-rpc-test` suite (the only place
 `large_payload.echo_binary_over_int32_max` runs — pytest carries no
 `large_payload` cases), the access-log spec check, and `cross-port`. A fifth
 passes by *skipping*: `TestPythonNativeClientTypedExchange` no-ops unless
-`VGI_RPC_PYTHON` names an interpreter, so `make go-test` has never run it.
+`VGI_RPC_PYTHON` names an interpreter, so `make go-test` has never run it. The
+two client-role legs have their own targets, but nothing else runs them
+together with the server-role suite they are meant to be read against.
+
+### Client role (`make test-client-python`)
+
+`make test` and everything below it point the *Python* client at the *Go*
+server. That leaves the Go client covered by exactly one peer: the server it
+ships with. Which is the one configuration that cannot validate a client, since
+a server accepts its own client's habits and every accommodation it makes is
+invisible to precisely that pair. The Rust port shipped a client that sent bare
+URL paths carrying no routing key; green against its own server for weeks, 730
+failures the first time it met the strict Python reference.
+
+`conformance/cmd/vgi-rpc-conformance-client-driver` is how the shared suite
+drives this port's client instead. It speaks the JSONL control protocol
+specified in the reference's `tools/cross-port/specs/CLIENT_DRIVER_PROTOCOL.md`
+and relays -- it decodes no values, resolves no external pointers, retries
+nothing, and defaults neither the routing key nor the method name, because
+anything it repaired on the client's behalf would turn a client defect into a
+passing run.
+
+The gate is `make test-client-python`, against the reference. `make test-client`
+runs the same suite against the Go server and is a triage tool rather than a
+gate: its value is differential, because a client that passes its own server and
+fails the reference has a client bug, while failing both means something more
+basic. Both need a `vgi-rpc-python` checkout -- the reference servers live in
+that repository's `tests/`, not in the published wheel.
+
+Transports: `http`, `unix` and `tcp`. This port serves `stdio` and `shm` and
+dials neither, so the driver refuses them by name instead of substituting
+another transport; little wire coverage is lost, since `unix` and `tcp` carry
+the same raw Arrow IPC framing over a socket instead of a pipe.
 
 ### Cross-port drift (`make cross-port`)
 

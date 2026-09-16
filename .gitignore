@@ -1,4 +1,5 @@
 conformance-worker
+conformance-client-driver
 vgi-rpc-conformance-go
 hello-worker
 benchmark-worker

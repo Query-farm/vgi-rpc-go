@@ -54,7 +54,8 @@ endif
 
 .PHONY: build lint go-test test coverage leakcheck race docs docs-verify venv clean \
 	conformance-worker conformance-worker-cover benchmark-worker \
-	ci staticcheck-install conformance-runner conformance-access-log cross-port
+	ci staticcheck-install conformance-runner conformance-access-log cross-port \
+	conformance-client-driver test-client test-client-python
 
 # --- Build -----------------------------------------------------------------
 
@@ -75,6 +76,11 @@ conformance-worker:
 
 conformance-worker-cover:
 	go build -cover -covermode=atomic -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
+
+# The client-role driver: a JSONL bridge that lets the shared conformance
+# suite drive *this port's client*. PHONY for the same reason the worker is.
+conformance-client-driver:
+	go build -o conformance-client-driver ./conformance/cmd/vgi-rpc-conformance-client-driver
 
 benchmark-worker:
 	go build -o benchmark-worker ./benchmark/cmd/vgi-rpc-benchmark-go
@@ -133,6 +139,40 @@ go-test:
 	go test ./...
 
 test: go-test conformance-worker $(PYTHON_BOOTSTRAP)
+	$(PYTHON) -m pytest test_go_conformance.py -v
+
+# --- Client role -----------------------------------------------------------
+# The same suite, pointed the other way: the Go client under test, driven
+# through conformance/cmd/vgi-rpc-conformance-client-driver.
+#
+# Two legs, and only one of them is the gate.
+#
+#   test-client-python  the Go client against the Python REFERENCE server.
+#                       This is the conformance claim. A permissive server
+#                       cannot validate a client -- every accommodation a
+#                       server makes for the client it ships with is
+#                       invisible to exactly that pair, which is how another
+#                       port shipped a client that sent bare URL paths with
+#                       no routing key and passed its own suite for weeks.
+#   test-client         the Go client against the Go server. Not a gate; a
+#                       triage tool. When the two legs disagree the gap
+#                       localises the defect to the client immediately.
+#
+# Needs a vgi-rpc-python checkout for the reference servers: they live in
+# that repo's tests/ directory, not in the published wheel.
+
+CLIENT_DRIVER := $(CURDIR)/conformance-client-driver
+
+test-client: conformance-worker conformance-client-driver $(PYTHON_BOOTSTRAP)
+	VGI_CONFORMANCE_ROLE=client VGI_CONFORMANCE_SERVER=go \
+	VGI_CLIENT_DRIVER="$(CLIENT_DRIVER)" \
+	$(PYTHON) -m pytest test_go_conformance.py -v
+
+test-client-python: conformance-client-driver $(PYTHON_BOOTSTRAP)
+	VGI_CONFORMANCE_ROLE=client VGI_CONFORMANCE_SERVER=python \
+	VGI_CLIENT_DRIVER="$(CLIENT_DRIVER)" \
+	VGI_RPC_PYTHON_REPO="$(VGI_RPC_PYTHON_REPO)" \
+	VGI_RPC_PYTHON="$(PYTHON)" \
 	$(PYTHON) -m pytest test_go_conformance.py -v
 
 # --- Cross-port drift ------------------------------------------------------
@@ -200,6 +240,8 @@ ci: build staticcheck-install $(PYTHON_BOOTSTRAP)
 	go run ./tools/docverify
 	VGI_RPC_PYTHON=$(PYTHON) go test ./vgirpc -run '^TestPythonNativeClientTypedExchange$$' -count=1
 	$(MAKE) test
+	$(MAKE) test-client
+	$(MAKE) test-client-python
 	$(MAKE) conformance-runner
 	$(MAKE) conformance-access-log
 	$(MAKE) cross-port
@@ -252,5 +294,5 @@ docs:
 # --- Clean -----------------------------------------------------------------
 
 clean:
-	rm -f conformance-worker benchmark-worker $(ACCESS_LOG)
+	rm -f conformance-worker conformance-client-driver benchmark-worker $(ACCESS_LOG)
 	rm -rf $(COVDIR) coverage-go.txt

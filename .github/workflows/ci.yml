@@ -78,6 +78,12 @@ jobs:
       - name: Build conformance worker with coverage
         run: go build -cover -covermode=atomic -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
 
+      # The client-role driver. Not built with coverage: it exercises the
+      # client, and client coverage is attributed by the worker profile above
+      # only for the server half.
+      - name: Build conformance client driver
+        run: go build -o conformance-client-driver ./conformance/cmd/vgi-rpc-conformance-client-driver
+
       # The Go worker tracks the *unreleased* Python reference (the TCP
       # transport — tcp_connect / --tcp — lands on main ahead of PyPI), so
       # install vgi_rpc from source off the default branch rather than
@@ -109,6 +115,37 @@ jobs:
 
       - name: Run conformance tests
         run: timeout 120 python -m pytest test_go_conformance.py -x -v
+
+      # The same suite pointed the other way: this port's CLIENT under test.
+      #
+      # Until this step existed the Go client was exercised only against the
+      # Go server, which is the one configuration that cannot validate a
+      # client -- a permissive server accepts its own client's mistakes, and
+      # every accommodation it makes is invisible to exactly that pair. That
+      # is how a sibling port shipped a client sending bare URL paths with no
+      # routing key: green against its own server for weeks, 730 failures the
+      # first time it met the strict Python reference.
+      #
+      # So the gate is the SECOND of these two. The first is a regression
+      # check whose value is differential: a client that passes its own server
+      # and fails the reference has a client bug, and failing both means
+      # something more basic.
+      - name: Run conformance suite in client role (Go server)
+        env:
+          VGI_CONFORMANCE_ROLE: client
+          VGI_CONFORMANCE_SERVER: go
+          VGI_CLIENT_DRIVER: ${{ github.workspace }}/conformance-client-driver
+        run: timeout 300 python -m pytest test_go_conformance.py -v
+
+      - name: Run conformance suite in client role (Python reference server)
+        env:
+          VGI_CONFORMANCE_ROLE: client
+          VGI_CONFORMANCE_SERVER: python
+          VGI_CLIENT_DRIVER: ${{ github.workspace }}/conformance-client-driver
+          VGI_RPC_PYTHON_REPO: ${{ runner.temp }}/vgi-rpc-python
+        run: |
+          export VGI_RPC_PYTHON="$(command -v python)"
+          timeout 300 python -m pytest test_go_conformance.py -v
 
       # The runner-driven conformance suite, with no access log attached.
       #
