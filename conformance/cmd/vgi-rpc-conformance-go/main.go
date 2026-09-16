@@ -732,6 +732,7 @@ func main() {
 		}
 	} else if len(os.Args) > 2 && os.Args[1] == "--unix" {
 		path := os.Args[2]
+		configureByteStreamStorage(server)
 		if err := server.RunUnix(path, 0, func(boundPath string) {
 			fmt.Printf("UNIX:%s\n", boundPath)
 			_ = os.Stdout.Sync()
@@ -746,6 +747,7 @@ func main() {
 		//
 		// SECURITY: raw TCP carries no authentication or TLS — trusted
 		// networks only. Use --http for untrusted networks.
+		configureByteStreamStorage(server)
 		addr := os.Args[2]
 		host, portStr := "127.0.0.1", addr
 		if i := strings.LastIndex(addr, ":"); i >= 0 {
@@ -822,4 +824,30 @@ func testDrainHandler(handle *vgirpc.DrainHandle, drain bool) http.HandlerFunc {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// configureByteStreamStorage wires externalisation onto a raw-transport worker
+// when --fake-storage names a backend.
+//
+// The HTTP modes each have their own storage flag; the byte-stream modes had
+// none, so this port's pointer *producer* was only ever exercised over HTTP --
+// and with it the client resolver on the other side of a socket, which the
+// shared TestExternalByteStream group exists to reach. The threshold is one
+// byte on purpose: the group asserts that every data-bearing batch really went
+// through storage, and a threshold that quietly leaves batches inline would let
+// it pass while proving nothing.
+func configureByteStreamStorage(server *vgirpc.Server) {
+	storageURL := ""
+	for i := 2; i+1 < len(os.Args); i++ {
+		if os.Args[i] == "--fake-storage" {
+			storageURL = os.Args[i+1]
+		}
+	}
+	if storageURL == "" {
+		return
+	}
+	cfg := vgirpc.DefaultExternalLocationConfig(conformance.NewFakeStorage(storageURL))
+	cfg.URLValidator = conformance.AllowAllValidator
+	cfg.ExternalizeThresholdBytes = 1
+	server.SetExternalLocation(cfg)
 }

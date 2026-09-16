@@ -692,6 +692,94 @@ def conformance_http_externalize_always_port(conformance_fake_storage: str) -> I
     )
 
 
+@pytest.fixture(scope="session")
+def go_external_unix_path(conformance_fake_storage: str) -> Iterator[str]:
+    """A Unix-socket worker that externalises every data-bearing batch.
+
+    Separate from ``go_unix_path`` because the threshold has to be one byte:
+    the group behind it asserts that each batch really went through storage,
+    and a worker that left them inline would pass it while proving nothing.
+    """
+    path = _short_unix_path("extconf")
+    argv = (
+        [_REF_PYTHON, _PY_SERVE_UNIX, path]
+        if SERVER == "python"
+        else [GO_WORKER, "--unix", path, "--fake-storage", conformance_fake_storage]
+    )
+    if SERVER == "python":
+        pytest.skip("the reference's byte-stream externalisation target is its own fixture")
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert proc.stdout is not None
+        line = proc.stdout.readline().decode().strip()
+        assert line == f"UNIX:{path}", f"Expected UNIX:{path}, got: {line!r}"
+        _wait_for_unix(path)
+        yield path
+    finally:
+        proc.terminate()
+        proc.wait(timeout=_WORKER_TEARDOWN_TIMEOUT)
+
+
+@pytest.fixture(scope="session")
+def conformance_bytestream_external_target(
+    conformance_fake_storage: str,
+    go_external_unix_path: str,
+) -> Iterator[Any]:
+    """Expose an externalising byte-stream connection to the shared group.
+
+    The pointer *producer* and the pointer *resolver* are different halves of
+    the protocol, and until this existed only the producer was exercised over a
+    socket -- the resolver was reached over HTTP and nowhere else. Under
+    ``ROLE=client`` the connection is the Go client, which is the half the
+    group is there to check.
+
+    Unix rather than a pipe: this port has no stdio client, so a pipe target
+    would have nothing to drive in client role.
+    """
+    from vgi_rpc.conformance._external_bytestream_pytest import ByteStreamExternalTarget
+    from vgi_rpc.external import ExternalLocationConfig
+
+    def connect(
+        on_log: Callable[[Message], None] | None = None,
+    ) -> contextlib.AbstractContextManager[Any]:
+        if ROLE == "client":
+            from go_client_proxy import GoClientProxy
+
+            @contextlib.contextmanager
+            def _driver_conn() -> Iterator[Any]:
+                proxy = GoClientProxy(
+                    "unix",
+                    go_external_unix_path,
+                    on_log,
+                    # The fake storage vends http://127.0.0.1 URLs, which the
+                    # default HTTPS-only policy would correctly refuse.
+                    external_config=ExternalLocationConfig(url_validator=None),
+                )
+                try:
+                    yield proxy
+                finally:
+                    proxy.close()
+
+            return _driver_conn()
+        return unix_connect(
+            ConformanceService,
+            go_external_unix_path,
+            on_log=on_log,
+            external_location=ExternalLocationConfig(url_validator=None),
+        )
+
+    def uploaded_objects() -> int:
+        response = httpx.get(f"{conformance_fake_storage}/_stats", timeout=5.0)
+        response.raise_for_status()
+        return int(response.json()["object_count"])
+
+    yield ByteStreamExternalTarget(
+        name="go-unix",
+        connect=connect,
+        uploaded_objects=uploaded_objects,
+    )
+
+
 def _short_unix_path(name: str) -> str:
     """Return a short /tmp path for a Unix domain socket (macOS 104-byte limit)."""
     fd, path = tempfile.mkstemp(prefix=f"vgi-go-{name}-", suffix=".sock", dir="/tmp")

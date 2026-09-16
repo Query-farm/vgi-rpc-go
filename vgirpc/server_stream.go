@@ -399,12 +399,23 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				// Maybe externalize large data batches
 				dataBatch := ab.batch
 				if s.externalConfig != nil && dataBatch.NumRows() > 0 {
-					extBatch, _, extErr := maybeExternalizeBatchCtx(ctx, dataBatch, arrow.Metadata{}, s.externalConfig)
+					extBatch, extMeta, extErr := maybeExternalizeBatchCtx(ctx, dataBatch, arrow.Metadata{}, s.externalConfig)
 					if extErr != nil {
 						slog.Error("failed to externalize stream batch", "err", extErr)
 					} else if extBatch != dataBatch {
+						// The metadata IS the pointer: vgi_rpc.location is
+						// what tells the reader to go and fetch. Writing the
+						// batch without it sent a zero-row batch that no
+						// resolver recognises, so the caller got an empty
+						// result and no error -- silent data loss, on every
+						// externalised batch of every stream over a raw
+						// transport. The unary path has always attached it;
+						// this one dropped it on the floor.
+						annotated := array.NewRecordBatchWithMetadata(
+							extBatch.Schema(), extBatch.Columns(), extBatch.NumRows(), extMeta)
+						extBatch.Release()
 						dataBatch.Release()
-						dataBatch = extBatch
+						dataBatch = annotated
 					}
 				}
 				// Maybe ship the data batch through shared memory.
