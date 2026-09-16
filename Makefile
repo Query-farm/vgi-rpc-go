@@ -53,7 +53,8 @@ PYTHON_BOOTSTRAP :=
 endif
 
 .PHONY: build lint go-test test coverage leakcheck race docs docs-verify venv clean \
-	conformance-worker conformance-worker-cover benchmark-worker
+	conformance-worker conformance-worker-cover benchmark-worker \
+	ci staticcheck-install conformance-runner conformance-access-log
 
 # --- Build -----------------------------------------------------------------
 
@@ -79,6 +80,15 @@ benchmark-worker:
 	go build -o benchmark-worker ./benchmark/cmd/vgi-rpc-benchmark-go
 
 # --- Lint ------------------------------------------------------------------
+# STATICCHECK_VERSION mirrors the pin in .github/workflows/ci.yml. It is not
+# cosmetic: releases add and retire checks, so a locally installed older
+# staticcheck reports a different finding set and can call a tree clean that
+# CI then rejects. `make staticcheck-install` puts the pinned one in $(GOBIN).
+
+STATICCHECK_VERSION ?= v0.8.0
+
+staticcheck-install:
+	GOTOOLCHAIN=local go install honnef.co/go/tools/cmd/staticcheck@$(STATICCHECK_VERSION)
 
 lint:
 	go build ./...
@@ -124,6 +134,55 @@ go-test:
 
 test: go-test conformance-worker $(PYTHON_BOOTSTRAP)
 	$(PYTHON) -m pytest test_go_conformance.py -v
+
+# --- CI parity -------------------------------------------------------------
+# The complete gate list from .github/workflows/ci.yml in one command, so the
+# answer to "will CI pass" does not require pushing to find out.
+#
+# Three of these gates are reachable through no other make target, which is
+# exactly how an ST1005 finding reached main:
+#
+#   staticcheck            `make lint` runs it, but against whatever version
+#                          happens to be installed -- see STATICCHECK_VERSION.
+#   conformance-runner     the runner-driven suite. `make test` runs pytest,
+#                          which carries no large_payload cases at all, so
+#                          large_payload.echo_binary_over_int32_max (>2 GiB on
+#                          each side) runs here and nowhere else.
+#   conformance-access-log the access-record spec check. Verified by hand for
+#                          months and drifted anyway.
+#
+# And one gate passes by *skipping* everywhere else: the native Go client test
+# no-ops unless VGI_RPC_PYTHON names an interpreter, so `make go-test` has
+# never run it.
+#
+# PYTHON_BIN is where the venv's console scripts live, derived from PYTHON so
+# that an interpreter supplied by the caller still resolves its own
+# vgi-rpc-test rather than the repo venv's.
+
+PYTHON_BIN := $(dir $(PYTHON))
+ACCESS_LOG := $(CURDIR)/_access-log.jsonl
+
+conformance-runner: conformance-worker $(PYTHON_BOOTSTRAP)
+	$(PYTHON_BIN)vgi-rpc-test --cmd "$(GO_CONFORMANCE_WORKER)"
+
+conformance-access-log: conformance-worker $(PYTHON_BOOTSTRAP)
+	rm -f $(ACCESS_LOG)
+	$(PYTHON_BIN)vgi-rpc-test \
+		--cmd "$(GO_CONFORMANCE_WORKER) --access-log $(ACCESS_LOG) --access-log-debug" \
+		--access-log "$(ACCESS_LOG)" \
+		--require-request-data \
+		--filter '!large_payload.echo_binary_over_int32_max'
+	rm -f $(ACCESS_LOG)
+
+ci: build staticcheck-install $(PYTHON_BOOTSTRAP)
+	go vet ./...
+	$(GOBIN)/staticcheck ./...
+	go test ./...
+	go run ./tools/docverify
+	VGI_RPC_PYTHON=$(PYTHON) go test ./vgirpc -run '^TestPythonNativeClientTypedExchange$$' -count=1
+	$(MAKE) test
+	$(MAKE) conformance-runner
+	$(MAKE) conformance-access-log
 
 # --- Coverage --------------------------------------------------------------
 
@@ -173,5 +232,5 @@ docs:
 # --- Clean -----------------------------------------------------------------
 
 clean:
-	rm -f conformance-worker benchmark-worker
+	rm -f conformance-worker benchmark-worker $(ACCESS_LOG)
 	rm -rf $(COVDIR) coverage-go.txt

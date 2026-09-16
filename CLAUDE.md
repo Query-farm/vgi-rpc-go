@@ -10,7 +10,17 @@ make lint      # go build + go vet + staticcheck (root + otel, sentry, jwtauth)
 make go-test   # Go unit tests (language-local only — see Testing Policy)
 make test      # go-test, then build conformance worker + run Python conformance tests
 make coverage  # run tests with Go coverage instrumentation
+make ci        # every gate in .github/workflows/ci.yml — run this before pushing
 ```
+
+`make ci` exists because the other targets, run together, are still not the CI
+gate list. Three gates live only there — `staticcheck` at the version CI pins
+(`STATICCHECK_VERSION`, since releases add and retire checks), the
+runner-driven `vgi-rpc-test` suite (the only place
+`large_payload.echo_binary_over_int32_max` runs — pytest carries no
+`large_payload` cases), and the access-log spec check. A fourth passes by
+*skipping*: `TestPythonNativeClientTypedExchange` no-ops unless
+`VGI_RPC_PYTHON` names an interpreter, so `make go-test` has never run it.
 
 ### Python dependency
 
