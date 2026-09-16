@@ -3,6 +3,7 @@ import contextlib
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
@@ -29,10 +30,208 @@ GO_WORKER = os.environ.get(
     str(Path(__file__).parent / "conformance-worker"),
 )
 
+# Two axes, and only one combination of them is the conformance claim.
+#
+# ROLE   "server" (default) points the *Python* client at the *Go* server --
+#        what this file has always done.  "client" turns it around and drives
+#        the Go client through conformance/cmd/vgi-rpc-conformance-client-driver.
+# SERVER which conformance server the suite talks to: "go" (default) or the
+#        Python reference.
+#
+# ROLE=client SERVER=python is the gate.  A green client run against the Go
+# server proves only that the two halves of this port agree with each other:
+# a server accepts its own client's habits, so every accommodation it makes is
+# invisible to exactly that pair.  The Rust port shipped a client sending bare
+# URL paths with no routing key, green against its own server for weeks and 730
+# failures the first time it met the reference.
+ROLE = os.environ.get("VGI_CONFORMANCE_ROLE", "server")
+SERVER = os.environ.get("VGI_CONFORMANCE_SERVER", "go")
+
+# The Python reference, when SERVER=python.  Its conformance servers live in
+# the *repository's* tests/ directory, not in the published wheel, so this
+# needs a checkout rather than an install.  Same env-var names the Rust port
+# uses, so one CI recipe configures either.
+_REF_REPO = Path(os.environ.get("VGI_RPC_PYTHON_REPO") or Path.home() / "Development" / "vgi-rpc-python")
+_REF_PYTHON = os.environ.get("VGI_RPC_PYTHON") or sys.executable
+_PY_TESTS = Path(os.environ.get("VGI_PY_TESTS_DIR") or _REF_REPO / "tests")
+_PY_SERVE_HTTP = str(_PY_TESTS / "serve_conformance_http.py")
+_PY_SERVE_STRICT = str(_PY_TESTS / "serve_conformance_http_strict.py")
+_PY_SERVE_AUTH = str(_PY_TESTS / "serve_conformance_http_auth.py")
+_PY_SERVE_PIPE = str(_PY_TESTS / "serve_conformance_pipe.py")
+_PY_SERVE_UNIX = str(_PY_TESTS / "serve_conformance_unix.py")
+_PY_SERVE_TCP = str(_PY_TESTS / "serve_conformance_tcp.py")
+
+if SERVER == "python" and not _PY_TESTS.is_dir():
+    pytest.skip(
+        f"VGI_CONFORMANCE_SERVER=python needs a vgi-rpc-python checkout; {_PY_TESTS} does not exist. "
+        "The reference conformance servers ship in that repository's tests/ directory, not in the wheel. "
+        "Point VGI_RPC_PYTHON_REPO at a checkout.",
+        allow_module_level=True,
+    )
+
+
+# Under ROLE=client, re-bind the module-level ``vgi_rpc.http`` entry points to
+# the driver.  The HTTP feature groups -- external location, sticky sessions,
+# response caps, upload URLs -- import ``http_connect`` / ``http_capabilities``
+# / ``request_upload_urls`` *inside the test body*, so without this they
+# quietly exercise the Python client and prove nothing about this port.
+if ROLE == "client":
+    import go_client_proxy as _shim
+
+    _shim.DRIVER.install_http_overrides()
+
+
+#: Transports the current role can drive.
+#:
+#: Under ROLE=client this is what the Go *client* can dial, which is narrower
+#: than what the Go *server* serves: the port has no stdio or shm client, so
+#: ``pipe``, ``subprocess`` and ``shm`` are absent.  Left absent rather than
+#: mapped onto another transport -- a substitution would report a pass for a
+#: call the client cannot make.  ``unix`` and ``tcp`` carry the same raw Arrow
+#: IPC framing that stdio does, so little wire coverage is lost.
+_ALL_CONN_TRANSPORTS = ("pipe", "subprocess", "shm", "http", "http_externalize_always", "unix", "tcp")
+_ALL_RAW_TRANSPORTS = ("pipe", "subprocess", "shm", "unix", "tcp")
+
+
+def _transports(candidates: tuple[str, ...]) -> list[str]:
+    """Narrow a transport matrix to this role, honouring ``VGI_TRANSPORTS``."""
+    if ROLE == "client":
+        from go_client_proxy import CLIENT_TRANSPORTS
+
+        candidates = tuple(name for name in candidates if name in CLIENT_TRANSPORTS)
+    requested = os.environ.get("VGI_TRANSPORTS")
+    if requested:
+        wanted = {name.strip() for name in requested.split(",") if name.strip()}
+        candidates = tuple(name for name in candidates if name in wanted)
+    # An empty params list makes pytest collect nothing at all, which reads as
+    # a green run over zero tests. Fail the collection instead.
+    if not candidates:
+        raise RuntimeError(f"no conformance transports selected (ROLE={ROLE}, VGI_TRANSPORTS={requested!r})")
+    return list(candidates)
+
+
+_CONN_TRANSPORTS = _transports(_ALL_CONN_TRANSPORTS)
+
+
+def _free_port() -> int:
+    """Reserve a loopback port for a server that cannot bind zero itself."""
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    return port
+
+
+def _pipe_worker_cmd() -> list[str]:
+    """Argv for a stdio conformance worker on the current SERVER."""
+    if SERVER == "python":
+        # The reference CLI needs reflection turned on explicitly; the Go
+        # worker registers it unconditionally.
+        return [_REF_PYTHON, _PY_SERVE_PIPE, "--describe"]
+    return [GO_WORKER]
+
+
+def _translate_http_args(args: tuple[str, ...]) -> list[str]:
+    """Map this worker's HTTP flag vector onto the Python reference's.
+
+    Translating the flags -- rather than giving every fixture a per-server
+    branch -- keeps each fixture's comment describing *what it configures*
+    instead of two spellings of how.  A flag vector with no reference
+    equivalent skips rather than silently starting a differently configured
+    server, because a fixture quietly standing in for another one is how a
+    group passes while testing nothing.
+    """
+    rest = list(args)
+    script = _PY_SERVE_HTTP
+    out: list[str] = []
+    storage_mode = False
+
+    if rest and rest[0] == "--http-auth":
+        if rest[1:]:
+            pytest.skip(f"reference auth server takes no extra flags: {args!r}")
+        # This one binds the port it is told to and echoes it back, rather than
+        # binding zero and reporting what it got, so the port has to be picked
+        # here. Racy in principle; the reference's own harness does the same.
+        return [_REF_PYTHON, _PY_SERVE_AUTH, "--port", str(_free_port())]
+    if rest and rest[0] == "--http-proof":
+        pytest.skip("proxy-proof workers are not wired for SERVER=python")
+    if rest and rest[0] == "--http-strict":
+        script, rest, storage_mode = _PY_SERVE_STRICT, rest[1:], True
+    elif rest and rest[0] == "--http-with-storage":
+        out += ["--fake-storage", rest[1]]
+        rest, storage_mode = rest[2:], True
+    elif rest and rest[0] == "--http-with-zstd-storage":
+        out += ["--fake-storage", rest[1], "--compression", "zstd"]
+        rest, storage_mode = rest[2:], True
+    elif rest and rest[0] == "--http-external-security":
+        # The reference spells this configuration out; the Go worker bundles
+        # it behind one flag. The numbers are the shared suite's.
+        out += [
+            "--fake-storage", rest[1],
+            "--max-request-bytes", "1048576",
+            "--max-fetch-bytes", "4096",
+            "--max-decompressed-fetch-bytes", "8192",
+            "--reject-localhost-redirects",
+        ]
+        rest, storage_mode = rest[2:], True
+    elif rest and rest[0] == "--http":
+        rest = rest[1:]
+
+    index = 0
+    while index < len(rest):
+        flag = rest[index]
+        if flag in (
+            "--no-compression",
+            "--no-call-state-cache",
+            "--sticky-auth",
+            "--introspect",
+            "--fail-serve-start-once",
+            "--reject-localhost-redirects",
+        ):
+            out.append(flag)
+            index += 1
+        elif flag in (
+            "--max-request-bytes",
+            "--sticky-ttl",
+            "--token-key",
+            "--identity",
+            "--cors-origin",
+            "--access-log",
+            "--fake-storage",
+            "--externalize-threshold",
+            "--max-response-bytes",
+            "--max-externalized-response-bytes",
+        ):
+            out += [flag, rest[index + 1]]
+            storage_mode = storage_mode or flag in ("--fake-storage", "--externalize-threshold")
+            index += 2
+        elif flag == "--server-id":
+            # The reference mints a fresh server id per process, so the sticky
+            # peer pair differs without being told to. Dropping the flag is
+            # what the Rust harness does, for the same reason.
+            index += 2
+        else:
+            pytest.skip(f"no reference equivalent for worker flag {flag!r} (from {args!r})")
+
+    if script is _PY_SERVE_STRICT:
+        return [_REF_PYTHON, script, "--port", "0", "--describe", *out]
+    if storage_mode:
+        # The reference's externalisation branch is selected by the *absence*
+        # of --http; it binds --port and prints PORT: just the same.
+        return [_REF_PYTHON, script, "--port", "0", "--describe", *out]
+    return [_REF_PYTHON, script, "--http", "--describe", *out]
+
+
+def _http_worker_argv(args: tuple[str, ...]) -> list[str]:
+    """Argv for an HTTP conformance worker on the current SERVER."""
+    if SERVER == "python":
+        return _translate_http_args(args)
+    return [GO_WORKER, *args]
+
 
 @pytest.fixture(scope="session")
 def go_transport() -> Iterator[SubprocessTransport]:
-    transport = SubprocessTransport([GO_WORKER])
+    transport = SubprocessTransport(_pipe_worker_cmd())
     yield transport
     transport.close()
 
@@ -55,9 +254,9 @@ def _wait_for_http(port: int, timeout: float = 5.0) -> None:
 
 
 def _start_http_worker(*extra_args: str, tcp_only_ready: bool = False) -> Iterator[int]:
-    """Spawn the Go HTTP conformance worker and yield its TCP port."""
+    """Spawn an HTTP conformance worker and yield its TCP port."""
     proc = subprocess.Popen(
-        [GO_WORKER, *extra_args],
+        _http_worker_argv(extra_args),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
@@ -105,7 +304,7 @@ def conformance_resource_soak_target() -> Iterator[Any]:
     )
 
     proc = subprocess.Popen(
-        [GO_WORKER, "--http"],
+        _http_worker_argv(("--http",)),
         stdout=subprocess.PIPE,
     )
     try:
@@ -373,6 +572,9 @@ def proof_worker_factory() -> Iterator[Callable[..., Any]]:
     The shared suite owns the matrix; this only has to know how to start one
     worker for a given configuration.
     """
+    if SERVER != "go":
+        pytest.skip(f"proof worker not wired for SERVER={SERVER}")
+
     from vgi_rpc.conformance.proof_harness import ProofWorker, ProofWorkerConfig
 
     @contextlib.contextmanager
@@ -518,11 +720,12 @@ def _wait_for_unix(path: str, timeout: float = 5.0) -> None:
 def go_unix_path() -> Iterator[str]:
     """Start Go conformance Unix socket server."""
     path = _short_unix_path("conf")
-    proc = subprocess.Popen(
-        [GO_WORKER, "--unix", path],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    argv = (
+        [_REF_PYTHON, _PY_SERVE_UNIX, path]
+        if SERVER == "python"
+        else [GO_WORKER, "--unix", path]
     )
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         assert proc.stdout is not None
         line = proc.stdout.readline().decode().strip()
@@ -550,11 +753,12 @@ def _wait_for_tcp(host: str, port: int, timeout: float = 5.0) -> None:
 @pytest.fixture(scope="session")
 def go_tcp_addr() -> Iterator[tuple[str, int]]:
     """Start Go conformance raw-TCP server on a loopback auto-selected port."""
-    proc = subprocess.Popen(
-        [GO_WORKER, "--tcp", "127.0.0.1:0"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    argv = (
+        [_REF_PYTHON, _PY_SERVE_TCP, "127.0.0.1", "0"]
+        if SERVER == "python"
+        else [GO_WORKER, "--tcp", "127.0.0.1:0"]
     )
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     try:
         assert proc.stdout is not None
         line = proc.stdout.readline().decode().strip()
@@ -582,7 +786,14 @@ class _KindProbe(Protocol):
 
 @pytest.fixture(scope="class")
 def conformance_transport_kind_probes() -> tuple[tuple[str, Callable[[], str]], ...]:
-    """Real Go-worker probes for every transport kind the port supports."""
+    """Real Go-worker probes for every transport kind the port supports.
+
+    Go-worker only: the probe is a protocol this port's conformance binary
+    registers (``--transport-kind-probe``), and the reference server hosts no
+    such thing. There is nothing here for a foreign server to answer.
+    """
+    if SERVER != "go":
+        pytest.skip(f"transport-kind probe is a Go-worker fixture; SERVER={SERVER}")
 
     def probe_pipe() -> str:
         transport = SubprocessTransport([GO_WORKER, "--transport-kind-probe"])
@@ -679,7 +890,49 @@ class _ShmAdapter:
         self._inner.close()
 
 
-@pytest.fixture(params=["pipe", "subprocess", "shm", "http", "http_externalize_always", "unix", "tcp"])
+def _client_factory(
+    param: str,
+    on_log: Callable[[Message], None] | None,
+    http_port: int | None,
+    unix_path: str | None,
+    tcp_addr: tuple[str, int] | None,
+    ext_port: int | None,
+) -> contextlib.AbstractContextManager[Any]:
+    """Yield a Go-client-backed proxy (``VGI_CONFORMANCE_ROLE=client``)."""
+    from go_client_proxy import GoClientProxy
+
+    external_config = None
+    if param == "http":
+        transport, target = "http", f"http://127.0.0.1:{http_port}"
+    elif param == "http_externalize_always":
+        from vgi_rpc.external import ExternalLocationConfig
+
+        transport, target = "http", f"http://127.0.0.1:{ext_port}"
+        # Resolution happens in the client under test, never here: doing it on
+        # this side would make the external-location group pass without the
+        # client ever performing a fetch. The validator is opted out because
+        # the fake storage vends http:// loopback URLs.
+        external_config = ExternalLocationConfig(url_validator=None)
+    elif param == "unix":
+        transport, target = "unix", unix_path
+    elif param == "tcp":
+        assert tcp_addr is not None
+        transport, target = "tcp", f"{tcp_addr[0]}:{tcp_addr[1]}"
+    else:
+        raise AssertionError(f"transport {param!r} has no client in this port")
+
+    @contextlib.contextmanager
+    def _conn() -> Iterator[Any]:
+        proxy = GoClientProxy(transport, target, on_log, external_config=external_config)
+        try:
+            yield proxy
+        finally:
+            proxy.close()
+
+    return _conn()
+
+
+@pytest.fixture(params=_CONN_TRANSPORTS)
 def conformance_conn(
     request: pytest.FixtureRequest,
     go_transport: SubprocessTransport,
@@ -690,11 +943,24 @@ def conformance_conn(
     def factory(
         on_log: Callable[[Message], None] | None = None,
     ) -> contextlib.AbstractContextManager[Any]:
+        if ROLE == "client":
+            return _client_factory(
+                request.param,
+                on_log,
+                go_http_port if request.param == "http" else None,
+                go_unix_path if request.param == "unix" else None,
+                go_tcp_addr if request.param == "tcp" else None,
+                (
+                    request.getfixturevalue("conformance_http_externalize_always_port")
+                    if request.param == "http_externalize_always"
+                    else None
+                ),
+            )
         if request.param == "pipe":
 
             @contextlib.contextmanager
             def _pipe_conn() -> Iterator[_RpcProxy]:
-                transport = SubprocessTransport([GO_WORKER])
+                transport = SubprocessTransport(_pipe_worker_cmd())
                 try:
                     yield _RpcProxy(ConformanceService, transport, on_log)
                 finally:
@@ -708,7 +974,7 @@ def conformance_conn(
                 from vgi_rpc.shm import ShmSegment
 
                 segment = ShmSegment.create(8 * 1024 * 1024)
-                transport = SubprocessTransport([GO_WORKER])
+                transport = SubprocessTransport(_pipe_worker_cmd())
                 wrapped = _ShmAdapter(transport, segment)
                 try:
                     yield _RpcProxy(ConformanceService, wrapped, on_log)
@@ -761,14 +1027,21 @@ def conformance_conn(
     return factory
 
 
-@pytest.fixture(params=["pipe", "subprocess", "shm", "unix", "tcp"])
+@pytest.fixture(params=_ALL_RAW_TRANSPORTS)
 def conformance_raw_conn(
     request: pytest.FixtureRequest,
     go_transport: SubprocessTransport,
     go_unix_path: str,
     go_tcp_addr: tuple[str, int],
 ) -> ConnFactory:
-    """Connect only through transports exposing a persistent byte stream."""
+    """Connect only through transports exposing a persistent byte stream.
+
+    Always the Python raw proxy, in either role. The group behind this fixture
+    writes deliberately malformed frames onto the socket and then reuses it, so
+    it is a *server* contract probe that bypasses whatever client is under
+    test -- and there is no client API for emitting a mutated frame, which is
+    the point of testing it this way.
+    """
 
     def factory(
         on_log: Callable[[Message], None] | None = None,
@@ -777,7 +1050,7 @@ def conformance_raw_conn(
 
             @contextlib.contextmanager
             def _pipe_conn() -> Iterator[_RpcProxy]:
-                transport = SubprocessTransport([GO_WORKER])
+                transport = SubprocessTransport(_pipe_worker_cmd())
                 try:
                     yield _RpcProxy(ConformanceService, transport, on_log)
                 finally:
@@ -798,7 +1071,7 @@ def conformance_raw_conn(
                 from vgi_rpc.shm import ShmSegment
 
                 segment = ShmSegment.create(8 * 1024 * 1024)
-                transport = SubprocessTransport([GO_WORKER])
+                transport = SubprocessTransport(_pipe_worker_cmd())
                 wrapped = _ShmAdapter(transport, segment)
                 try:
                     yield _RpcProxy(ConformanceService, wrapped, on_log)
@@ -823,7 +1096,7 @@ def conformance_raw_conn(
     return factory
 
 
-@pytest.fixture(params=["pipe", "subprocess", "shm", "http", "http_externalize_always", "unix", "tcp"])
+@pytest.fixture(params=_CONN_TRANSPORTS)
 def conformance_describe(
     request: pytest.FixtureRequest,
     go_transport: SubprocessTransport,
@@ -846,10 +1119,28 @@ def conformance_describe(
     from vgi_rpc.rpc import TcpTransport, UnixTransport
 
     param = request.param
+    if ROLE == "client":
+        # The description the *client under test* decoded, relayed as JSON.
+        # Reflection's reply is two nested payloads rather than one flat batch,
+        # so this is the single op the control protocol relays decoded -- see
+        # the driver spec's section 4.3.
+        with _client_factory(
+            param,
+            None,
+            go_http_port if param == "http" else None,
+            go_unix_path if param == "unix" else None,
+            go_tcp_addr if param == "tcp" else None,
+            (
+                request.getfixturevalue("conformance_http_externalize_always_port")
+                if param == "http_externalize_always"
+                else None
+            ),
+        ) as proxy:
+            return proxy.describe()
     if param in ("pipe", "shm"):
         # No describe-specific side channel needed; a fresh stdio worker is the
         # faithful equivalent of Python's fresh in-process pipe server.
-        transport = SubprocessTransport([GO_WORKER])
+        transport = SubprocessTransport(_pipe_worker_cmd())
         try:
             return introspect(transport)
         finally:
