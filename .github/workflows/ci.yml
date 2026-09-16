@@ -160,6 +160,44 @@ jobs:
             --require-request-data \
             --filter '!large_payload.echo_binary_over_int32_max'
 
+      # The reference's two cross-implementation drift checks, run against
+      # this port. Neither is expressible inside this repository: both compare
+      # this implementation *to Python*, so until they were wired in here they
+      # ran only when a maintainer remembered to run them on a laptop — which
+      # is how four ports came to describe vgi_rpc.Reflection.v1 as hosting
+      # zero methods, and six ports came to log six different wrong
+      # protocol_hash values, with every port's own CI green throughout.
+      #
+      # describe_diff spawns ./conformance-worker, asks it over
+      # vgi_rpc.Reflection.v1 for every protocol it hosts, describes each, and
+      # compares protocol_hash and then every field of every method against
+      # Python's. identity_consistency greps this port's source for the
+      # Identity.v1 constants and error kinds.
+      #
+      # This reuses the reference clone and install from the steps above
+      # deliberately: a second job would clone and pip-install again, and — far
+      # worse — would be a second place for the reference's origin to be
+      # written down. The clone is unpinned (`--depth 1` off the default
+      # branch) on purpose. A pinned ref is how the Java port's Iroh lane
+      # reported green for eleven days against a reference that had moved; the
+      # intended behaviour is that a reference change which breaks this port
+      # turns this port red that day.
+      #
+      # The script arranges the sibling layout the tools require
+      # (<repos>/vgi-rpc-<name>) out of symlinks, so the clone above can stay
+      # where it is, and it refuses to pass when identity_consistency audits no
+      # go files — that tool reports an absent repository and still exits 0, so
+      # an empty matrix would otherwise read as agreement.
+      - name: Cross-port drift check
+        env:
+          VGI_RPC_PYTHON_REPO: ${{ runner.temp }}/vgi-rpc-python
+          PYTHON: python
+        # describe_diff builds the worker's repo with `make build`, which
+        # here also resolves the five submodules (otel, sentry, jwtauth, s3,
+        # gcs) this job has not otherwise fetched — minutes on a cold module
+        # cache, so the budget is generous rather than tight.
+        run: timeout 900 ./scripts/cross-port-check.sh
+
       - name: Merge coverage profiles
         run: go tool covdata textfmt -i=_covdata -o=coverage-go.txt
 

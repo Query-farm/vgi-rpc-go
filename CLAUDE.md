@@ -5,22 +5,47 @@
 All common tasks are available via `make`:
 
 ```bash
-make build     # build all packages (root + otel, sentry, jwtauth, s3, gcs submodules)
-make lint      # go build + go vet + staticcheck (root + otel, sentry, jwtauth)
-make go-test   # Go unit tests (language-local only — see Testing Policy)
-make test      # go-test, then build conformance worker + run Python conformance tests
-make coverage  # run tests with Go coverage instrumentation
-make ci        # every gate in .github/workflows/ci.yml — run this before pushing
+make build      # build all packages (root + otel, sentry, jwtauth, s3, gcs submodules)
+make lint       # go build + go vet + staticcheck (root + otel, sentry, jwtauth)
+make go-test    # Go unit tests (language-local only — see Testing Policy)
+make test       # go-test, then build conformance worker + run Python conformance tests
+make coverage   # run tests with Go coverage instrumentation
+make cross-port # compare this port to the Python reference (see below)
+make ci         # every gate in .github/workflows/ci.yml — run this before pushing
 ```
 
 `make ci` exists because the other targets, run together, are still not the CI
-gate list. Three gates live only there — `staticcheck` at the version CI pins
+gate list. Four gates live only there — `staticcheck` at the version CI pins
 (`STATICCHECK_VERSION`, since releases add and retire checks), the
 runner-driven `vgi-rpc-test` suite (the only place
 `large_payload.echo_binary_over_int32_max` runs — pytest carries no
-`large_payload` cases), and the access-log spec check. A fourth passes by
-*skipping*: `TestPythonNativeClientTypedExchange` no-ops unless
+`large_payload` cases), the access-log spec check, and `cross-port`. A fifth
+passes by *skipping*: `TestPythonNativeClientTypedExchange` no-ops unless
 `VGI_RPC_PYTHON` names an interpreter, so `make go-test` has never run it.
+
+### Cross-port drift (`make cross-port`)
+
+Every other gate asks whether this port is self-consistent. This one asks the
+question no gate inside this repository can: does this port still agree with
+the Python reference? It runs the reference's own two tools —
+`describe_diff.py`, which spawns `./conformance-worker`, asks it over
+`vgi_rpc.Reflection.v1` for every protocol it hosts and compares
+`protocol_hash` and then every field of every method against Python's; and
+`identity_consistency.py`, which greps this port's source for the
+`vgi_rpc.Identity.v1` constants and error kinds.
+
+They ran only by hand until they were wired into CI, and in one day of running
+them properly they found four ports describing `vgi_rpc.Reflection.v1` as
+hosting zero methods and six ports logging six different wrong `protocol_hash`
+values — with every one of those ports' own CI green the whole time.
+
+Both need a `vgi-rpc-python` checkout, resolved through `VGI_RPC_PYTHON_REPO`
+like the rest of the Python dependency below; `scripts/cross-port-check.sh`
+builds the sibling layout the tools expect out of symlinks, so the checkout can
+live anywhere. It refuses rather than skipping when there is no checkout, and
+refuses when `identity_consistency` audited no files — that tool exits 0 when
+it cannot find the repository at all, and an empty matrix must not read as
+agreement.
 
 ### Python dependency
 

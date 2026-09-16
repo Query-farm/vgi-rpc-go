@@ -54,7 +54,7 @@ endif
 
 .PHONY: build lint go-test test coverage leakcheck race docs docs-verify venv clean \
 	conformance-worker conformance-worker-cover benchmark-worker \
-	ci staticcheck-install conformance-runner conformance-access-log
+	ci staticcheck-install conformance-runner conformance-access-log cross-port
 
 # --- Build -----------------------------------------------------------------
 
@@ -135,11 +135,26 @@ go-test:
 test: go-test conformance-worker $(PYTHON_BOOTSTRAP)
 	$(PYTHON) -m pytest test_go_conformance.py -v
 
+# --- Cross-port drift ------------------------------------------------------
+# The reference's two cross-implementation checks, run against this port. They
+# compare this port *to Python* — describe_diff over vgi_rpc.Reflection.v1
+# (protocol_hash first, then every field of every method), identity_consistency
+# over the Identity.v1 constants — so neither is expressible inside this
+# repository alone, and until they were wired into CI they ran only when a
+# maintainer remembered to run them. That is how four ports came to describe
+# vgi_rpc.Reflection.v1 as having zero methods.
+#
+# Needs a vgi-rpc-python checkout; the script explains how to point at one, and
+# refuses rather than skipping when there is none. See scripts/cross-port-check.sh.
+
+cross-port: conformance-worker $(PYTHON_BOOTSTRAP)
+	VGI_RPC_PYTHON_REPO="$(VGI_RPC_PYTHON_REPO)" PYTHON="$(PYTHON)" $(CURDIR)/scripts/cross-port-check.sh
+
 # --- CI parity -------------------------------------------------------------
 # The complete gate list from .github/workflows/ci.yml in one command, so the
 # answer to "will CI pass" does not require pushing to find out.
 #
-# Three of these gates are reachable through no other make target, which is
+# Four of these gates are reachable through no other make target, which is
 # exactly how an ST1005 finding reached main:
 #
 #   staticcheck            `make lint` runs it, but against whatever version
@@ -150,6 +165,10 @@ test: go-test conformance-worker $(PYTHON_BOOTSTRAP)
 #                          each side) runs here and nowhere else.
 #   conformance-access-log the access-record spec check. Verified by hand for
 #                          months and drifted anyway.
+#   cross-port             the reference's describe_diff / identity_consistency,
+#                          which compare this port to Python. Nothing inside this
+#                          repo can perform that comparison, so before it was
+#                          wired up it ran when someone remembered to run it.
 #
 # And one gate passes by *skipping* everywhere else: the native Go client test
 # no-ops unless VGI_RPC_PYTHON names an interpreter, so `make go-test` has
@@ -183,6 +202,7 @@ ci: build staticcheck-install $(PYTHON_BOOTSTRAP)
 	$(MAKE) test
 	$(MAKE) conformance-runner
 	$(MAKE) conformance-access-log
+	$(MAKE) cross-port
 
 # --- Coverage --------------------------------------------------------------
 
