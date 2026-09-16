@@ -31,6 +31,7 @@ type tcpClientConfig struct {
 	protocolVersion string
 	maxRequest      int64
 	maxResponse     int64
+	external        *ExternalLocationConfig
 	onLog           ClientLogHandler
 }
 
@@ -178,10 +179,53 @@ func NewTcpClient(ctx context.Context, host string, port int, options ...TcpClie
 	return newTcpClientFromConn(conn, config), nil
 }
 
+// NewUnixClient connects to a raw VGI worker over a Unix domain socket.
+//
+// The wire is the same ordered Arrow IPC byte stream [NewTcpClient] speaks --
+// only the address family differs -- so the returned client is a [TcpClient]
+// and every [TcpClientOption] applies. What differs is the trust model: a Unix
+// socket is filesystem-scoped and its peer is on this machine, which is why
+// there is no proxy option and no connect host.
+func NewUnixClient(ctx context.Context, path string, options ...TcpClientOption) (*TcpClient, error) {
+	if ctx == nil {
+		return nil, errors.New("vgirpc: Unix client context must not be nil")
+	}
+	if path == "" {
+		return nil, errors.New("vgirpc: Unix client requires a socket path")
+	}
+	config := tcpClientConfig{
+		connectTimeout: defaultTCPClientConnectTimeout,
+		maxRequest:     defaultClientMaxRequestBytes,
+		maxResponse:    defaultClientMaxDecodedResponseBytes,
+	}
+	for _, option := range options {
+		if option != nil {
+			if err := option(&config); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if config.proxyConfigured {
+		return nil, errors.New("vgirpc: Unix client does not support a proxy")
+	}
+	dialCtx := ctx
+	if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > config.connectTimeout {
+		var cancel context.CancelFunc
+		dialCtx, cancel = context.WithTimeout(ctx, config.connectTimeout)
+		defer cancel()
+	}
+	conn, err := (&net.Dialer{}).DialContext(dialCtx, "unix", path)
+	if err != nil {
+		return nil, fmt.Errorf("vgirpc: connect Unix worker: %w", err)
+	}
+	return newTcpClientFromConn(conn, config), nil
+}
+
 func newTcpClientFromConn(conn net.Conn, config tcpClientConfig) *TcpClient {
 	return &TcpClient{
 		conn: conn,
 		codec: &HttpClient{
+			external:        config.external,
 			protocol:        config.protocol,
 			protocolVersion: config.protocolVersion,
 			maxRequest:      config.maxRequest,
@@ -195,6 +239,22 @@ func newTcpClientFromConn(conn net.Conn, config tcpClientConfig) *TcpClient {
 // must call Release. Independent calls may be issued concurrently; they are
 // serialized on the single stateful connection.
 func (client *TcpClient) CallUnary(ctx context.Context, method string, params arrow.RecordBatch,
+	expected *arrow.Schema) (*ClientBatch, error) {
+	if client == nil {
+		return nil, errors.New("vgirpc: TCP client is nil")
+	}
+	return client.callUnaryOn(ctx, client.codec.protocol, method, params, expected)
+}
+
+// callUnaryOn is [TcpClient.CallUnary] addressed to an explicit protocol.
+//
+// Only a bootstrap protocol a client may call without being configured for it
+// -- vgi_rpc.Reflection.v1 -- uses this; every other call routes to the
+// client's own protocol. The connection is stateful and single-threaded, so the
+// borrowed routing key changes nothing but the one metadata field: the lock,
+// the deadline handling, and the poisoning on a failed call are the same ones
+// an application call gets.
+func (client *TcpClient) callUnaryOn(ctx context.Context, protocol, method string, params arrow.RecordBatch,
 	expected *arrow.Schema) (*ClientBatch, error) {
 	if client == nil {
 		return nil, errors.New("vgirpc: TCP client is nil")
@@ -213,7 +273,7 @@ func (client *TcpClient) CallUnary(ctx context.Context, method string, params ar
 	if err := ctx.Err(); err != nil {
 		return nil, contextualIrohError(client.conn, err, IrohStageCancel, IrohNotSent)
 	}
-	body, err := client.codec.initialBody(method, params)
+	body, err := client.codec.initialBodyFor(protocol, method, params)
 	if err != nil {
 		return nil, err
 	}
@@ -236,11 +296,21 @@ func (client *TcpClient) CallUnary(ctx context.Context, method string, params ar
 		}
 		return nil, client.poison(err)
 	}
-	parsed, err := client.codec.parseIPCStream(
+	parsed, drained, err := client.codec.parseIPCStreamDrained(
 		&cappedTCPReader{reader: client.conn, limit: client.codec.maxDecoded}, expected, true)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			err = contextualIrohError(client.conn, ctxErr, IrohStageRead, IrohSent)
+			return nil, client.poison(err)
+		}
+		// A handler that raised is not a transport that broke. The response
+		// was read to its end, so the byte stream is back at a message
+		// boundary and the next call on this connection is safe -- which the
+		// shared conformance suite requires: a unary error must not poison
+		// the proxy that observed it. Poisoning here made the *next* call
+		// fail with the previous call's error.
+		if drained {
+			return nil, err
 		}
 		return nil, client.poison(err)
 	}
@@ -268,9 +338,6 @@ func (client *TcpClient) OpenProducer(ctx context.Context, method string, params
 // exclusively owns the connection until Close, Cancel, or Abort.
 func (client *TcpClient) OpenExchange(ctx context.Context, method string, params arrow.RecordBatch,
 	schemas ClientStreamSchema) (*TcpClientStream, error) {
-	if schemas.Input == nil {
-		return nil, errors.New("vgirpc: exchange input schema is required")
-	}
 	return client.openStream(ctx, method, params, schemas, true)
 }
 
@@ -278,9 +345,6 @@ func (client *TcpClient) openStream(ctx context.Context, method string, params a
 	schemas ClientStreamSchema, exchange bool) (*TcpClientStream, error) {
 	if client == nil {
 		return nil, errors.New("vgirpc: TCP client is nil")
-	}
-	if schemas.Output == nil {
-		return nil, errors.New("vgirpc: stream output schema is required")
 	}
 	client.mu.Lock()
 	release := true
@@ -317,10 +381,15 @@ func (client *TcpClient) openStream(ctx context.Context, method string, params a
 		return nil, client.poison(err)
 	}
 	var header *ClientBatch
-	if schemas.Header != nil {
-		parsed, parseErr := client.codec.parseIPCStream(
+	if schemas.Header != nil || schemas.HasHeader {
+		parsed, drained, parseErr := client.codec.parseIPCStreamDrained(
 			&cappedTCPReader{reader: client.conn, limit: client.codec.maxDecoded}, schemas.Header, true)
 		if parseErr != nil {
+			// Same rule as the unary path: a stream the server refused to
+			// open, reported in full, leaves the connection reusable.
+			if drained {
+				return nil, parseErr
+			}
 			return nil, client.poison(parseErr)
 		}
 		defer parsed.releaseExceptFirst()
@@ -359,11 +428,17 @@ func (client *TcpClient) setOperationDeadline(ctx context.Context) (func(), erro
 // connection. It is not safe for concurrent use. Call Close or Cancel; Abort
 // is the non-blocking escape hatch when a peer is no longer responsive.
 type TcpClientStream struct {
-	client       *TcpClient
-	schemas      ClientStreamSchema
-	exchange     bool
-	header       *ClientBatch
-	inputWriter  *ipc.Writer
+	client      *TcpClient
+	schemas     ClientStreamSchema
+	exchange    bool
+	header      *ClientBatch
+	inputWriter *ipc.Writer
+	// inputSchema is the schema inputWriter was opened with. An IPC stream
+	// carries exactly one schema, so a later sentinel -- the empty batch that
+	// spells cancel, or the one that closes the stream -- has to be written
+	// against it. Recorded rather than recomputed because the first turn's
+	// schema is the only authority when the caller declared none.
+	inputSchema  *arrow.Schema
 	outputReader *ipc.Reader
 	outputCount  *cappedTCPReader
 	finished     bool
@@ -390,6 +465,12 @@ func (stream *TcpClientStream) Finished() bool { return stream != nil && stream.
 // Next sends one producer tick and returns its data batch, or ok=false when
 // the producer finishes without data.
 func (stream *TcpClientStream) Next(ctx context.Context) (*ClientBatch, bool, error) {
+	return stream.NextWithMetadata(ctx, nil)
+}
+
+// NextWithMetadata is [TcpClientStream.Next] with Arrow custom metadata sent
+// upstream on the tick. See [HttpClientStream.NextWithMetadata].
+func (stream *TcpClientStream) NextWithMetadata(ctx context.Context, custom map[string]string) (*ClientBatch, bool, error) {
 	if err := stream.requireOpen(false); err != nil {
 		return nil, false, err
 	}
@@ -398,7 +479,7 @@ func (stream *TcpClientStream) Next(ctx context.Context) (*ClientBatch, bool, er
 	}
 	tick := emptyBatch(arrow.NewSchema(nil, nil))
 	defer tick.Release()
-	if err := stream.writeTurn(ctx, tick, nil, false); err != nil {
+	if err := stream.writeTurn(ctx, tick, custom, false); err != nil {
 		return nil, false, err
 	}
 	batch, err := stream.readNextData(ctx)
@@ -413,7 +494,10 @@ func (stream *TcpClientStream) Exchange(ctx context.Context, input arrow.RecordB
 	if stream.finished {
 		return nil, &RpcError{Type: "ProtocolError", Message: "exchange stream is finished"}
 	}
-	if input == nil || !clientSchemasEqual(input.Schema(), stream.schemas.Input) {
+	if input == nil {
+		return nil, &RpcError{Type: "TypeError", Message: "exchange input batch must not be nil"}
+	}
+	if stream.schemas.Input != nil && !clientSchemasEqual(input.Schema(), stream.schemas.Input) {
 		return nil, &RpcError{Type: "TypeError", Message: fmt.Sprintf(
 			"exchange input schema mismatch: expected %s", stream.schemas.Input)}
 	}
@@ -428,6 +512,21 @@ func (stream *TcpClientStream) Exchange(ctx context.Context, input arrow.RecordB
 		return nil, stream.fail(&RpcError{Type: "ProtocolError", Message: "exchange response ended without a data batch"})
 	}
 	return batch, nil
+}
+
+// sentinelSchema is the schema an empty control batch must carry.
+//
+// Once the input writer exists its schema is the only valid answer, declared
+// or not: an IPC stream cannot change schema mid-flight, and a cancel written
+// against a different one is refused by the writer rather than by the peer.
+func (stream *TcpClientStream) sentinelSchema() *arrow.Schema {
+	if stream.inputSchema != nil {
+		return stream.inputSchema
+	}
+	if stream.exchange && stream.schemas.Input != nil {
+		return stream.schemas.Input
+	}
+	return arrow.NewSchema(nil, nil)
 }
 
 func (stream *TcpClientStream) requireOpen(exchange bool) error {
@@ -468,8 +567,14 @@ func (stream *TcpClientStream) writeTurn(ctx context.Context, batch arrow.Record
 	}
 	defer cleanup()
 	if stream.inputWriter == nil {
-		stream.inputWriter = ipc.NewWriter(stream.client.conn, ipc.WithSchema(batch.Schema()))
-	} else if !clientSchemasEqual(stream.schemas.Input, batch.Schema()) && stream.exchange {
+		stream.inputSchema = batch.Schema()
+		stream.inputWriter = ipc.NewWriter(stream.client.conn, ipc.WithSchema(stream.inputSchema))
+	} else if stream.exchange && stream.inputSchema != nil && !clientSchemasEqual(stream.inputSchema, batch.Schema()) {
+		// Against the schema the writer was actually opened with, not the
+		// declared one: an IPC stream carries one schema, so a caller that
+		// declared none still cannot change it mid-stream -- and reporting
+		// that as a TypeError beats letting the writer fail and poison the
+		// connection.
 		return &RpcError{Type: "TypeError", Message: "exchange input schema changed within one stream"}
 	}
 	var outbound arrow.RecordBatch = batch
@@ -503,7 +608,7 @@ func (stream *TcpClientStream) ensureOutputReader() error {
 	if err != nil {
 		return fmt.Errorf("read raw stream response: %w", err)
 	}
-	if !clientSchemasEqual(reader.Schema(), stream.schemas.Output) {
+	if stream.schemas.Output != nil && !clientSchemasEqual(reader.Schema(), stream.schemas.Output) {
 		reader.Release()
 		return &RpcError{Type: "TypeError", Message: fmt.Sprintf(
 			"response schema mismatch: expected %s, got %s", stream.schemas.Output, reader.Schema())}
@@ -540,8 +645,11 @@ func (stream *TcpClientStream) readNextData(ctx context.Context) (*ClientBatch, 
 			continue
 		}
 		if metadata[MetaLocation] != "" {
-			record.Release()
-			return nil, stream.fail(&RpcError{Type: "ProtocolError", Message: "external-location responses require an external resolver"})
+			resolved, resolvedMeta, resolveErr := resolveExternalBatch(stream.client.codec.external, stream.client.codec.onLog, record, metadata)
+			if resolveErr != nil {
+				return nil, stream.fail(resolveErr)
+			}
+			record, metadata = resolved, resolvedMeta
 		}
 		return &ClientBatch{Batch: record, Metadata: metadata}, nil
 	}
@@ -564,11 +672,7 @@ func (stream *TcpClientStream) Cancel(ctx context.Context) error {
 	if stream.finished {
 		return stream.finish(ctx)
 	}
-	schema := arrow.NewSchema(nil, nil)
-	if stream.exchange {
-		schema = stream.schemas.Input
-	}
-	batch := emptyBatch(schema)
+	batch := emptyBatch(stream.sentinelSchema())
 	defer batch.Release()
 	if err := stream.writeTurn(ctx, batch, nil, true); err != nil {
 		return err
@@ -595,11 +699,8 @@ func (stream *TcpClientStream) finish(ctx context.Context) error {
 	}
 	defer cleanup()
 	if stream.inputWriter == nil {
-		schema := arrow.NewSchema(nil, nil)
-		if stream.exchange {
-			schema = stream.schemas.Input
-		}
-		stream.inputWriter = ipc.NewWriter(stream.client.conn, ipc.WithSchema(schema))
+		stream.inputSchema = stream.sentinelSchema()
+		stream.inputWriter = ipc.NewWriter(stream.client.conn, ipc.WithSchema(stream.inputSchema))
 	}
 	if err := stream.inputWriter.Close(); err != nil {
 		return stream.fail(err)

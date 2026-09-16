@@ -22,6 +22,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
+	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -48,16 +49,28 @@ func (b *ClientBatch) Release() {
 }
 
 // ClientStreamSchema declares the exact Arrow schemas for a stream. Input is
-// required for exchange streams and must be nil for producers. Output is
-// always required. Header is optional.
+// declared for exchange streams and must be nil for producers. Header is
+// declared when the method carries one.
 //
-// Every batch sent through Exchange is checked against Input before any bytes
-// are written. This makes all-null and zero-row batches retain their declared
-// types, child fields, and nullability instead of relying on value inference.
+// A batch sent through Exchange is checked against Input, when one is
+// declared, before any bytes are written. This makes all-null and zero-row
+// batches retain their declared types, child fields, and nullability instead
+// of relying on value inference.
+//
+// A nil schema means "do not enforce", exactly as the expected parameter of
+// [HttpClient.CallUnary] does. That is for a caller that discovered the method
+// at runtime rather than from a compiled declaration and so has no schema to
+// enforce; a caller that has one should pass it, because an unenforced schema
+// is a type error found later and further away. Because a nil Header cannot
+// then distinguish "no header" from "a header of unknown shape", set HasHeader
+// to read one without declaring its schema.
 type ClientStreamSchema struct {
 	Input  *arrow.Schema
 	Output *arrow.Schema
 	Header *arrow.Schema
+	// HasHeader reads a header whose schema is not declared. Ignored when
+	// Header is non-nil, which already says a header is present.
+	HasHeader bool
 }
 
 // ClientLogHandler receives client-directed log batches. It runs synchronously
@@ -79,6 +92,9 @@ type httpClientConfig struct {
 	acceptedMaxResponse int64
 	responseLimitsSet   bool
 	acceptedResponseSet bool
+	external            *ExternalLocationConfig
+	compressRequests    bool
+	compressionLevel    int
 	onLog               ClientLogHandler
 	closeIdleOnClose    bool
 	tcpProxy            string
@@ -226,6 +242,30 @@ func WithClientRequestLimit(maxBytes int64) HttpClientOption {
 	}
 }
 
+// WithClientRequestCompression compresses request bodies with zstd at level.
+//
+// Off by default, and deliberately: request params are usually small enough
+// that framing costs more than it saves, and an intermediary in front of the
+// server may not carry a Content-Encoding nobody asked it for. A caller
+// shipping large params turns it on.
+//
+// level is the codec's four-value speed enum (1 fastest to 4 best), not
+// zstd's own 1-22 scale -- passing 9 fails construction rather than silently
+// sending an uncompressed body, which is the right failure but a surprising
+// one if you expected zstd's numbering.
+func WithClientRequestCompression(level int) HttpClientOption {
+	return func(cfg *httpClientConfig) error {
+		probe, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.EncoderLevel(level)))
+		if err != nil {
+			return fmt.Errorf("vgirpc: invalid client request compression level %d: %w", level, err)
+		}
+		probe.Close()
+		cfg.compressRequests = true
+		cfg.compressionLevel = level
+		return nil
+	}
+}
+
 // WithClientLogHandler installs a callback for client-directed log batches.
 func WithClientLogHandler(handler ClientLogHandler) HttpClientOption {
 	return func(cfg *httpClientConfig) error {
@@ -253,6 +293,12 @@ type HttpClient struct {
 	maxEncoded             int64
 	maxDecoded             int64
 	acceptedMaxResponse    int64
+	external               *ExternalLocationConfig
+	requestExternal        *requestExternalizer
+	compressRequests       bool
+	compressionLevel       int
+	sessionMu              sync.Mutex
+	sessions               []*clientSession
 	onLog                  ClientLogHandler
 	closeIdleOnClose       bool
 	ownedTransport         io.Closer
@@ -355,6 +401,10 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 		maxEncoded:          cfg.maxEncoded,
 		maxDecoded:          cfg.maxDecoded,
 		acceptedMaxResponse: cfg.acceptedMaxResponse,
+		external:            cfg.external,
+		requestExternal:     &requestExternalizer{},
+		compressRequests:    cfg.compressRequests,
+		compressionLevel:    cfg.compressionLevel,
 		onLog:               cfg.onLog,
 		closeIdleOnClose:    cfg.closeIdleOnClose,
 		ownedTransport:      cfg.ownedTransport,
@@ -385,11 +435,22 @@ func (c *HttpClient) CallUnary(
 	params arrow.RecordBatch,
 	expected *arrow.Schema,
 ) (*ClientBatch, error) {
-	body, err := c.initialBody(method, params)
+	return c.callUnaryOn(ctx, c.protocol, method, params, expected)
+}
+
+// callUnaryOn is [HttpClient.CallUnary] addressed to an explicit protocol.
+func (c *HttpClient) callUnaryOn(
+	ctx context.Context,
+	protocol string,
+	method string,
+	params arrow.RecordBatch,
+	expected *arrow.Schema,
+) (*ClientBatch, error) {
+	body, err := c.initialBodyFor(protocol, method, params)
 	if err != nil {
 		return nil, err
 	}
-	response, err := c.post(ctx, c.rpcPath(method, ""), body)
+	response, err := c.post(ctx, c.rpcPathFor(protocol, method, ""), body)
 	if err != nil {
 		return nil, err
 	}
@@ -406,8 +467,9 @@ func (c *HttpClient) CallUnary(
 	return result, nil
 }
 
-// OpenProducer starts a producer stream. schemas.Input must be nil and
-// schemas.Output must be the declared output schema.
+// OpenProducer starts a producer stream. schemas.Input must be nil;
+// schemas.Output is the declared output schema, or nil to accept whatever the
+// server sends.
 func (c *HttpClient) OpenProducer(
 	ctx context.Context,
 	method string,
@@ -420,17 +482,14 @@ func (c *HttpClient) OpenProducer(
 	return c.openStream(ctx, method, params, schemas, false)
 }
 
-// OpenExchange starts a lockstep exchange stream. Both Input and Output are
-// required and are enforced exactly for every exchange turn.
+// OpenExchange starts a lockstep exchange stream. Input and Output are
+// enforced exactly for every exchange turn when declared.
 func (c *HttpClient) OpenExchange(
 	ctx context.Context,
 	method string,
 	params arrow.RecordBatch,
 	schemas ClientStreamSchema,
 ) (*HttpClientStream, error) {
-	if schemas.Input == nil {
-		return nil, errors.New("vgirpc: exchange input schema is required")
-	}
 	return c.openStream(ctx, method, params, schemas, true)
 }
 
@@ -441,9 +500,6 @@ func (c *HttpClient) openStream(
 	schemas ClientStreamSchema,
 	exchange bool,
 ) (*HttpClientStream, error) {
-	if schemas.Output == nil {
-		return nil, errors.New("vgirpc: stream output schema is required")
-	}
 	body, err := c.initialBody(method, params)
 	if err != nil {
 		return nil, err
@@ -454,7 +510,7 @@ func (c *HttpClient) openStream(
 	}
 	raw := bytes.NewReader(response.body)
 	var header *ClientBatch
-	if schemas.Header != nil {
+	if schemas.Header != nil || schemas.HasHeader {
 		parsedHeader, err := c.parseIPCStream(raw, schemas.Header, true)
 		if err != nil {
 			return nil, response.wrap(err)
@@ -481,15 +537,23 @@ func (c *HttpClient) openStream(
 		return nil, &RpcError{Type: "ProtocolError", Message: "trailing bytes after stream init response"}
 	}
 	if exchange {
-		if len(parsed.batches) != 0 {
+		// An exchange must not preload output: the first turn has not been
+		// sent yet. What is being refused is *data*, so a batch with no rows
+		// and no columns does not count -- that is how a zero-column schema is
+		// framed, it carries nothing, and rejecting the stream over it refuses
+		// a peer that has said nothing at all.
+		for _, batch := range parsed.batches {
+			if batch.Batch.NumRows() == 0 && batch.Batch.NumCols() == 0 {
+				continue
+			}
 			parsed.release()
 			if header != nil {
 				header.Release()
 			}
 			return nil, &RpcError{Type: "ProtocolError", Message: "exchange init response contained unexpected data"}
 		}
+		parsed.release()
 		if parsed.token == "" || parsed.callToken == "" {
-			parsed.release()
 			if header != nil {
 				header.Release()
 			}
@@ -527,6 +591,13 @@ func (c *HttpClient) openStream(
 }
 
 func (c *HttpClient) initialBody(method string, params arrow.RecordBatch) ([]byte, error) {
+	return c.initialBodyFor(c.protocol, method, params)
+}
+
+// initialBodyFor encodes one request addressed to protocol rather than to the
+// client's own routing key. Only a bootstrap protocol a client may call without
+// being configured for it -- vgi_rpc.Reflection.v1 -- uses this.
+func (c *HttpClient) initialBodyFor(protocol, method string, params arrow.RecordBatch) ([]byte, error) {
 	if err := validateMethod(method); err != nil {
 		return nil, err
 	}
@@ -535,13 +606,22 @@ func (c *HttpClient) initialBody(method string, params arrow.RecordBatch) ([]byt
 		return nil, err
 	}
 	metadata := recordMetadata(params)
+	// A caller's own application protocol version, if it stamped one. The
+	// client's configured value wins -- it is the version this client was
+	// built against -- but a generic caller relaying a request it did not
+	// author has no way to configure one, and dropping what it stamped would
+	// silently downgrade the call to unversioned.
+	callerProtocolVersion := metadata[MetaProtocolVersion]
 	stripClientControlMetadata(metadata)
 	metadata[MetaMethod] = method
-	metadata[MetaProtocol] = c.protocol
+	metadata[MetaProtocol] = protocol
 	metadata[MetaRequestVersion] = ProtocolVersion
 	metadata[MetaRequestID] = requestID
-	if c.protocolVersion != "" {
+	switch {
+	case c.protocolVersion != "":
 		metadata[MetaProtocolVersion] = c.protocolVersion
+	case callerProtocolVersion != "":
+		metadata[MetaProtocolVersion] = callerProtocolVersion
 	}
 	return encodeClientBatch(params, metadata, c.maxRequest)
 }
@@ -568,7 +648,12 @@ func (r clientHTTPResponse) wrap(err error) error {
 // protocol from another. suffix is "" for unary, "/init" or "/exchange" for
 // streams.
 func (c *HttpClient) rpcPath(method, suffix string) string {
-	return c.protocol + "/" + method + suffix
+	return c.rpcPathFor(c.protocol, method, suffix)
+}
+
+// rpcPathFor renders an endpoint below a protocol other than the client's own.
+func (c *HttpClient) rpcPathFor(protocol, method, suffix string) string {
+	return protocol + "/" + method + suffix
 }
 
 func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (clientHTTPResponse, error) {
@@ -578,17 +663,71 @@ func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (cl
 	if err := c.ensureResponseBudgetSupport(ctx); err != nil {
 		return clientHTTPResponse{}, err
 	}
+	// Externalising a request means asking the server for an upload URL, which
+	// is itself a request. Excluding that one route is what terminates the
+	// recursion; it is also the only route below a prefix rather than below a
+	// routing key, so no application method can collide with it.
+	if !isFrameworkEndpoint(endpoint) {
+		externalized, replaced, err := c.maybeExternalizeRequest(ctx, body)
+		if err != nil {
+			return clientHTTPResponse{}, err
+		}
+		if replaced {
+			return c.postOnce(ctx, endpoint, externalized)
+		}
+		response, err := c.postOnce(ctx, endpoint, body)
+		var status *HTTPStatusError
+		if err != nil && errors.As(err, &status) && status.StatusCode == http.StatusRequestEntityTooLarge {
+			// The server has now told us its cap; retrying through the
+			// upload-URL route is the whole reason it answers 413 rather than
+			// closing the connection.
+			//
+			// Safe to repeat even for an exchange turn, which is otherwise
+			// never retried: 413 is the one non-2xx that says the body was
+			// refused *before* dispatch, so no handler ran and no cursor was
+			// consumed. Every ambiguous outcome -- a timeout, a reset, a
+			// malformed reply -- still poisons the turn. The reference
+			// retries a 413 on the exchange path for the same reason.
+			retried, buildErr := c.externalizeRequestBody(ctx, body)
+			if buildErr != nil {
+				return clientHTTPResponse{}, err
+			}
+			return c.postOnce(ctx, endpoint, retried)
+		}
+		return response, err
+	}
+	return c.postOnce(ctx, endpoint, body)
+}
+
+// isFrameworkEndpoint reports whether a path is the server's own upload-URL
+// route rather than an RPC method.
+//
+// The other framework route, session deletion, never reaches here: it is a
+// DELETE built directly rather than a POST through this path.
+func isFrameworkEndpoint(endpoint string) bool {
+	return strings.HasPrefix(endpoint, UploadURLMethod)
+}
+
+func (c *HttpClient) postOnce(ctx context.Context, endpoint string, body []byte) (clientHTTPResponse, error) {
 	if int64(len(body)) > c.maxRequest {
 		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("request body exceeds client limit (%d > %d bytes)", len(body), c.maxRequest)}
 	}
+	encodedBody, requestEncoding, err := c.encodeRequestBody(body)
+	if err != nil {
+		return clientHTTPResponse{}, err
+	}
 	u := *c.baseURL
 	u.Path = strings.TrimRight(c.baseURL.Path, "/") + c.prefix + "/" + endpoint
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(encodedBody))
 	if err != nil {
 		return clientHTTPResponse{}, fmt.Errorf("vgirpc: build HTTP request: %w", err)
 	}
 	req.Header = c.headers.Clone()
 	req.Header.Set("Content-Type", arrowContentType)
+	if requestEncoding != "" {
+		req.Header.Set(contentEncodingHeader, requestEncoding)
+	}
+	c.applySessionHeaders(req.Header)
 	req.Header.Set(customAcceptEncodingHeader, "zstd, gzip, identity")
 	req.Header.Set(acceptEncodingHeader, "zstd, gzip, identity")
 	req.Header.Set(acceptMaxResponseBytesHeader, fmt.Sprintf("%d", c.acceptedMaxResponse))
@@ -601,6 +740,7 @@ func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (cl
 		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("HTTP request failed: %v", err)}
 	}
 	defer resp.Body.Close()
+	c.observeSessionHeaders(resp.Header)
 	caps, err := ParseHTTPServerCapabilities(resp.Header)
 	if err != nil {
 		return clientHTTPResponse{}, &RpcError{Type: "ProtocolError", Message: err.Error()}
@@ -609,6 +749,11 @@ func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (cl
 		return clientHTTPResponse{}, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf(
 			"server must advertise %s: true on every RPC response", acceptMaxResponseBytesSupportHeader)}
 	}
+	// Cached only now, below the support check: an intermediary's 502 page or
+	// a gateway's 413 carries no VGI headers at all, and caching the all-zero
+	// snapshot it parses as would erase what the server actually advertised --
+	// which is read later to decide whether a body can be externalised.
+	c.observeCapabilities(caps)
 	c.responseBudgetMu.Lock()
 	if caps.MaxResponseBytes > 0 {
 		c.serverMaxResponse = caps.MaxResponseBytes
@@ -651,9 +796,24 @@ func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (cl
 		return clientHTTPResponse{}, &RpcError{Type: "TransportError", Message: fmt.Sprintf("decoded HTTP response exceeds client limit (%d > %d bytes)", len(decoded), decodedLimit)}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		envelope := decodeErrorEnvelope(decoded)
+		// 413 keeps its status even when the body explains itself, because
+		// the status is the actionable half: it is how a client knows to
+		// re-send through the upload-URL route rather than to give up. Every
+		// other non-2xx is better described by the envelope the peer wrote.
+		if envelope != nil && resp.StatusCode != http.StatusRequestEntityTooLarge {
+			if envelope.RequestID == "" {
+				envelope.RequestID = resp.Header.Get(requestIDHeader)
+			}
+			return clientHTTPResponse{}, envelope
+		}
+		detail := boundedText(decoded)
+		if envelope != nil {
+			detail = envelope.Error()
+		}
 		return clientHTTPResponse{}, &HTTPStatusError{
 			StatusCode: resp.StatusCode,
-			Detail:     boundedText(decoded),
+			Detail:     detail,
 			RequestID:  resp.Header.Get(requestIDHeader),
 		}
 	}
@@ -662,6 +822,63 @@ func (c *HttpClient) post(ctx context.Context, endpoint string, body []byte) (cl
 		body:     decoded,
 		rpcError: strings.EqualFold(resp.Header.Get(rpcErrorHeader), "true"),
 	}, nil
+}
+
+// encodeRequestBody applies the configured request Content-Encoding.
+//
+// Returns the body unchanged, and an empty encoding, when compression is off --
+// the default -- so the common path copies nothing.
+func (c *HttpClient) encodeRequestBody(body []byte) ([]byte, string, error) {
+	if !c.compressRequests || len(body) == 0 {
+		return body, "", nil
+	}
+	var buf bytes.Buffer
+	writer, err := newCompressWriter("zstd", &buf, c.compressionLevel)
+	if err != nil {
+		return nil, "", fmt.Errorf("vgirpc: compress request body: %w", err)
+	}
+	if _, err := writer.Write(body); err != nil {
+		_ = writer.Close()
+		return nil, "", fmt.Errorf("vgirpc: compress request body: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("vgirpc: compress request body: %w", err)
+	}
+	return buf.Bytes(), "zstd", nil
+}
+
+// decodeErrorEnvelope recovers the RPC error a non-2xx response carries, or
+// nil when the body is not an Arrow exception envelope.
+//
+// A server answers a bad request with the status *and* the envelope: the status
+// is for the intermediaries, the envelope is for the caller. Reading only the
+// status throws the caller's half away -- a parameter-validation failure
+// arrives as HTTP 400 whose detail is the raw Arrow bytes, so the error type
+// the peer named is gone and the message is binary noise. That went unnoticed
+// because this client had only ever been run against a server that pairs with
+// it; the Python reference returns 400 for every parameter and schema
+// rejection, and so does this port's own server.
+//
+// Only an Arrow body is reinterpreted. A 401's JSON envelope, a proxy's HTML
+// error page, and a bodyless 404 stay [HTTPStatusError], because for those the
+// status really is the whole answer.
+func decodeErrorEnvelope(body []byte) *RpcError {
+	if len(body) == 0 {
+		return nil
+	}
+	reader, err := ipc.NewReader(bytes.NewReader(body))
+	if err != nil {
+		return nil
+	}
+	defer reader.Release()
+	for reader.Next() {
+		record := reader.RecordBatch()
+		metadata := recordMetadata(record)
+		if record.NumRows() == 0 && metadata[MetaLogLevel] == string(LogException) {
+			return rpcErrorFromMetadata(metadata)
+		}
+	}
+	return nil
 }
 
 func (c *HttpClient) ensureResponseBudgetSupport(ctx context.Context) error {
@@ -733,9 +950,32 @@ func (s *HttpClientStream) Header() *ClientBatch {
 // Finished reports whether the worker has ended this stream.
 func (s *HttpClientStream) Finished() bool { return s.finished }
 
+// Token returns the opaque continuation token the server last minted for this
+// stream, or "" once the stream has ended.
+//
+// Read after [HttpClientStream.Next] it is the cursor that resumes *after* the
+// batch just returned, which is what a caller check-pointing a long producer
+// persists alongside it.
+func (s *HttpClientStream) Token() string {
+	if s == nil {
+		return ""
+	}
+	return s.token
+}
+
 // Next returns the next producer batch. ok is false at end-of-stream. The
 // caller owns a returned batch and must Release it.
 func (s *HttpClientStream) Next(ctx context.Context) (batch *ClientBatch, ok bool, err error) {
+	return s.NextWithMetadata(ctx, nil)
+}
+
+// NextWithMetadata is [HttpClientStream.Next] with Arrow custom metadata sent
+// upstream on the continuation request.
+//
+// A producer turn carries no data from the client, but it does carry metadata:
+// this is how a caller passes per-turn direction (a resume hint, a trace
+// context, a budget) to a stream it is pulling rather than pushing.
+func (s *HttpClientStream) NextWithMetadata(ctx context.Context, custom map[string]string) (batch *ClientBatch, ok bool, err error) {
 	if s.closed {
 		return nil, false, errors.New("vgirpc: stream is closed")
 	}
@@ -752,7 +992,7 @@ func (s *HttpClientStream) Next(ctx context.Context) (batch *ClientBatch, ok boo
 			s.finished = true
 			return nil, false, nil
 		}
-		body, err := s.continuationBody(false, nil)
+		body, err := s.continuationBody(false, nil, custom)
 		if err != nil {
 			return nil, false, err
 		}
@@ -791,10 +1031,10 @@ func (s *HttpClientStream) Exchange(ctx context.Context, input arrow.RecordBatch
 	if s.finished || s.token == "" {
 		return nil, &RpcError{Type: "ProtocolError", Message: "exchange stream has no continuation token"}
 	}
-	if !clientSchemasEqual(input.Schema(), s.schemas.Input) {
+	if s.schemas.Input != nil && !clientSchemasEqual(input.Schema(), s.schemas.Input) {
 		return nil, &RpcError{Type: "TypeError", Message: fmt.Sprintf("exchange input schema mismatch: expected %s, got %s", s.schemas.Input, input.Schema())}
 	}
-	body, err := s.continuationBody(false, input)
+	body, err := s.continuationBody(false, input, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -836,7 +1076,7 @@ func (s *HttpClientStream) Cancel(ctx context.Context) error {
 		s.finished = true
 		return nil
 	}
-	body, err := s.continuationBody(true, nil)
+	body, err := s.continuationBody(true, nil, nil)
 	if err == nil {
 		var response clientHTTPResponse
 		response, err = s.client.post(ctx, s.client.rpcPath(s.method, "/exchange"), body)
@@ -874,7 +1114,7 @@ func (s *HttpClientStream) Close() {
 	s.closed = true
 }
 
-func (s *HttpClientStream) continuationBody(cancel bool, input arrow.RecordBatch) ([]byte, error) {
+func (s *HttpClientStream) continuationBody(cancel bool, input arrow.RecordBatch, custom map[string]string) ([]byte, error) {
 	requestID, err := clientRequestID()
 	if err != nil {
 		return nil, err
@@ -884,6 +1124,9 @@ func (s *HttpClientStream) continuationBody(cancel bool, input arrow.RecordBatch
 		defer input.Release()
 	}
 	metadata := recordMetadata(input)
+	for key, value := range custom {
+		metadata[key] = value
+	}
 	stripClientControlMetadata(metadata)
 	metadata[MetaStreamState] = s.token
 	metadata[MetaRequestID] = requestID
@@ -925,15 +1168,33 @@ func (p *parsedClientStream) releaseExceptFirst() {
 }
 
 func (c *HttpClient) parseIPCStream(raw io.Reader, expected *arrow.Schema, tokenIsData bool) (*parsedClientStream, error) {
+	parsed, _, err := c.parseIPCStreamDrained(raw, expected, tokenIsData)
+	return parsed, err
+}
+
+// parseIPCStreamDrained is [HttpClient.parseIPCStream] reporting whether the
+// response stream was read to its end.
+//
+// That distinction only matters where the stream *is* the connection. Over
+// HTTP the body is a finished buffer and a caller can stop reading wherever it
+// likes. Over a raw socket, stopping early leaves the rest of the response in
+// the byte stream, so the next call reads the tail of the last one -- which is
+// why a remote handler error used to poison a raw connection: refusing to
+// reuse it was the only safe thing left to do, and the conformance suite
+// requires it to stay usable. Draining first makes reuse correct, and the flag
+// is how the caller knows it may.
+func (c *HttpClient) parseIPCStreamDrained(raw io.Reader, expected *arrow.Schema, tokenIsData bool) (*parsedClientStream, bool, error) {
 	reader, err := ipc.NewReader(raw)
 	if err != nil {
-		return nil, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf("read Arrow IPC response: %v", err)}
+		return nil, false, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf("read Arrow IPC response: %v", err)}
 	}
 	defer reader.Release()
 	if expected != nil && !clientSchemasEqual(reader.Schema(), expected) {
-		return nil, &RpcError{Type: "TypeError", Message: fmt.Sprintf("response schema mismatch: expected %s, got %s", expected, reader.Schema())}
+		return nil, false, &RpcError{Type: "TypeError", Message: fmt.Sprintf("response schema mismatch: expected %s, got %s", expected, reader.Schema())}
 	}
 	parsed := &parsedClientStream{}
+	var remote *RpcError
+	cursorOnly := -1
 	for reader.Next() {
 		record := reader.RecordBatch()
 		record.Retain()
@@ -941,12 +1202,21 @@ func (c *HttpClient) parseIPCStream(raw io.Reader, expected *arrow.Schema, token
 		if level := metadata[MetaLogLevel]; record.NumRows() == 0 && level != "" {
 			record.Release()
 			if level == string(LogException) {
-				parsed.release()
-				return nil, rpcErrorFromMetadata(metadata)
+				// Keep reading. The error is the answer, but the messages
+				// behind it still belong to this response, and on a raw
+				// transport they are still in the socket.
+				if remote == nil {
+					remote = rpcErrorFromMetadata(metadata)
+				}
+				continue
 			}
 			if c.onLog != nil {
 				c.onLog(logMessageFromMetadata(metadata))
 			}
+			continue
+		}
+		if remote != nil {
+			record.Release()
 			continue
 		}
 		token := metadata[MetaStreamState]
@@ -959,21 +1229,61 @@ func (c *HttpClient) parseIPCStream(raw io.Reader, expected *arrow.Schema, token
 			delete(metadata, MetaCallState)
 		}
 		if metadata[MetaLocation] != "" {
-			record.Release()
-			parsed.release()
-			return nil, &RpcError{Type: "ProtocolError", Message: "external-location responses require an external resolver"}
+			resolved, resolvedMeta, resolveErr := resolveExternalBatch(c.external, c.onLog, record, metadata)
+			if resolveErr != nil {
+				parsed.release()
+				return nil, false, resolveErr
+			}
+			record, metadata = resolved, resolvedMeta
+			// The cursor rides the data batch, so when that batch is
+			// externalised the cursor goes up to storage with it and reaches
+			// the client only inside the fetched stream. Reading the pointer
+			// batch alone finds no cursor and reports a stream that ended
+			// mid-exchange -- a failure that cannot occur against a peer which
+			// never externalises, which is every peer this client had met.
+			if resumed := metadata[MetaStreamState]; resumed != "" {
+				token = resumed
+				parsed.token = resumed
+				delete(metadata, MetaStreamState)
+			}
+			if call := metadata[MetaCallState]; call != "" {
+				parsed.callToken = call
+				delete(metadata, MetaCallState)
+			}
 		}
 		if token != "" && record.NumRows() == 0 && !tokenIsData {
 			record.Release()
 			continue
 		}
+		if token != "" && record.NumRows() == 0 {
+			// A zero-row batch that carried the cursor *might* be a bare
+			// sentinel rather than data. It cannot be told apart yet: a server
+			// that merges the cursor onto an empty data batch produces the
+			// same shape, and against a zero-column schema even the column
+			// count does not separate them. Note it and decide once the whole
+			// response is in hand.
+			cursorOnly = len(parsed.batches)
+		}
 		parsed.batches = append(parsed.batches, &ClientBatch{Batch: record, Metadata: metadata})
 	}
 	if err := reader.Err(); err != nil {
 		parsed.release()
-		return nil, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf("read Arrow IPC response batch: %v", err)}
+		return nil, false, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf("read Arrow IPC response batch: %v", err)}
 	}
-	return parsed, nil
+	if remote != nil {
+		parsed.release()
+		return nil, true, remote
+	}
+	// Now it can be told apart: a cursor batch beside another batch was a bare
+	// sentinel, because a stream turn carries at most one data batch. A cursor
+	// batch that is the only one was the data batch with the cursor on it.
+	// (Only a stream turn mints a cursor, so this cannot misread the
+	// multi-batch upload-URL reply, which has none.)
+	if cursorOnly >= 0 && len(parsed.batches) > 1 {
+		parsed.batches[cursorOnly].Release()
+		parsed.batches = append(parsed.batches[:cursorOnly], parsed.batches[cursorOnly+1:]...)
+	}
+	return parsed, true, nil
 }
 
 func clientSchemasEqual(left, right *arrow.Schema) bool {

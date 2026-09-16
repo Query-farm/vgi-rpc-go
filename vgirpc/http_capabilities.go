@@ -11,14 +11,35 @@ import (
 	"strings"
 )
 
-// HTTPServerCapabilities is the bounded capability snapshot returned by
+// HTTPServerCapabilities is the capability snapshot returned by
 // DiscoverCapabilities. Zero numeric fields mean the server did not advertise
 // a limit.
+//
+// The byte caps and the budget flag are what the client enforces on itself;
+// the rest describes optional server features a caller decides whether to use.
+// They are read from the same response headers -- every response carries them,
+// not just the OPTIONS probe -- so reporting only some of them left a Go caller
+// unable to discover sticky sessions or upload URLs at all, while the server
+// had been advertising both all along.
 type HTTPServerCapabilities struct {
 	MaxRequestBytes               int64
 	MaxResponseBytes              int64
+	MaxExternalizedResponseBytes  int64
 	AcceptMaxResponseBytesSupport bool
 	ExternalizationEnabled        bool
+	// UploadURLSupport reports whether {prefix}/__upload_url__/init is routed.
+	UploadURLSupport bool
+	MaxUploadBytes   int64
+	// SupportedEncodings are the lowercase wire tokens the server can decode
+	// on a request body -- "zstd", "gzip", "identity" -- in the order
+	// advertised. Empty when the server names none.
+	SupportedEncodings []string
+	StickyEnabled      bool
+	// StickyDefaultTTL is in seconds, and 0 means unadvertised.
+	StickyDefaultTTL int64
+	// StickyEchoHeaders are the header names, prefix removed, that the server
+	// will echo on a session-opening response for the client to replay.
+	StickyEchoHeaders []string
 }
 
 func parseCapabilityDecimal(headers http.Header, name string) (int64, error) {
@@ -62,9 +83,64 @@ func ParseHTTPServerCapabilities(headers http.Header) (HTTPServerCapabilities, e
 	return HTTPServerCapabilities{
 		MaxRequestBytes:               maxRequest,
 		MaxResponseBytes:              maxResponse,
+		MaxExternalizedResponseBytes:  capabilityDecimal(headers, maxExternalizedResponseBytesHeader),
 		AcceptMaxResponseBytesSupport: supportPresent,
 		ExternalizationEnabled:        external == "true",
+		UploadURLSupport:              capabilityFlag(headers, uploadURLHeader),
+		MaxUploadBytes:                capabilityDecimal(headers, maxUploadBytesHeader),
+		SupportedEncodings:            capabilityList(headers, supportedEncodingsHeader),
+		StickyEnabled:                 capabilityFlag(headers, stickyEnabledHeader),
+		StickyDefaultTTL:              capabilityDecimal(headers, stickyDefaultTTLHeader),
+		StickyEchoHeaders:             capabilityList(headers, stickyEchoHeadersHeader),
 	}, nil
+}
+
+// capabilityDecimal reads an optional-feature capability header, reporting 0
+// for absent, malformed, or out-of-range.
+//
+// Deliberately more forgiving than [parseCapabilityDecimal], which fails the
+// whole response. That strictness is right for the two byte caps the client
+// enforces on itself -- getting those wrong means sending or accepting a body
+// nobody agreed to. These describe optional features instead, and this runs on
+// every response: turning one malformed advertisement of a feature the caller
+// never asked for into total unavailability is the wrong trade, so an
+// unreadable value reads as "not advertised".
+func capabilityDecimal(headers http.Header, name string) int64 {
+	raw := strings.TrimSpace(headers.Get(name))
+	if raw == "" {
+		return 0
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value < 0 {
+		return 0
+	}
+	return value
+}
+
+// capabilityFlag reads a boolean capability header.
+//
+// Anything other than "true" is false, including a malformed value: an
+// optional feature a client cannot confidently read is a feature it should not
+// use, and refusing the whole response over one unparseable optional flag
+// would make a server unusable for every caller that never wanted the feature.
+func capabilityFlag(headers http.Header, name string) bool {
+	return strings.EqualFold(strings.TrimSpace(headers.Get(name)), "true")
+}
+
+// capabilityList splits a comma-separated capability header, dropping empties.
+func capabilityList(headers http.Header, name string) []string {
+	raw := strings.TrimSpace(headers.Get(name))
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // DiscoverCapabilities probes OPTIONS /health and validates the advertised

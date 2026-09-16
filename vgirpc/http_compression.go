@@ -139,7 +139,7 @@ func decompressBounded(encoding string, data []byte, maxOutput int64) ([]byte, e
 		}
 		opts := []zstd.DOption{}
 		if maxOutput > 0 {
-			opts = append(opts, zstd.WithDecoderMaxMemory(uint64(maxOutput)))
+			opts = append(opts, zstd.WithDecoderMaxMemory(zstdDecoderMemory(maxOutput)))
 		}
 		zr, err := zstd.NewReader(bytes.NewReader(data), opts...)
 		if err != nil {
@@ -172,6 +172,32 @@ func decompressBounded(encoding string, data []byte, maxOutput int64) ([]byte, e
 		return nil, &requestBodyTooLargeError{Limit: maxOutput}
 	}
 	return out, nil
+}
+
+// zstdDecoderMemory bounds decoder working memory for an output budget.
+//
+// Not simply the budget itself, which is what this used to pass. The two are
+// different limits: the budget bounds how many bytes may come *out*, while the
+// decoder's memory bound also caps the frame's compression *window*, and an
+// encoder is free to choose a window far larger than the payload it ends up
+// producing. Passing the budget straight through therefore rejected
+// well-formed frames from any peer whose compressor happened to be configured
+// more generously -- reported as "window size exceeded", which names the
+// decoder's own setting rather than anything wrong with the data. It went
+// unnoticed because both sides of a single port pick the same window.
+//
+// The bomb defence does not live here. Every caller bounds the read itself, so
+// no frame can produce more than its budget however it is framed; this one
+// additionally rejects an oversized frame before decoding when the frame
+// declares its content size, which a streaming encoder often omits. The floor
+// is generous enough for any window a standard encoder emits, including
+// long-range modes, and the decoder's own window ceiling is unaffected by it.
+func zstdDecoderMemory(maxOutput int64) uint64 {
+	const floor = 128 << 20
+	if maxOutput < floor {
+		return floor
+	}
+	return uint64(maxOutput)
 }
 
 // DecodeContentEncoding decodes an HTTP body per its Content-Encoding

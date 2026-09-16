@@ -396,7 +396,9 @@ func decompressZstdCapped(compressed []byte, cap int64) ([]byte, error) {
 		defer zstdDecoderPool.Put(decoder)
 		return decoder.DecodeAll(compressed, nil)
 	}
-	reader, err := zstd.NewReader(bytes.NewReader(compressed), zstd.WithDecoderMaxMemory(uint64(cap)))
+	// The cap bounds the output; see [zstdDecoderMemory] for why the decoder's
+	// memory bound must not simply be the same number.
+	reader, err := zstd.NewReader(bytes.NewReader(compressed), zstd.WithDecoderMaxMemory(zstdDecoderMemory(cap)))
 	if err != nil {
 		return nil, err
 	}
@@ -418,6 +420,22 @@ func ResolveExternalLocation(
 	batch arrow.RecordBatch,
 	meta arrow.Metadata,
 	config *ExternalLocationConfig,
+) (arrow.RecordBatch, arrow.Metadata, error) {
+	return resolveExternalLocationWithLog(batch, meta, config, nil)
+}
+
+// resolveExternalLocationWithLog is [ResolveExternalLocation] with somewhere to
+// put the log records the fetched payload carries.
+//
+// An externalised response is a whole IPC stream, so the producer's log batches
+// travel inside it alongside the data. Discarding them -- which is what
+// happens with no sink -- means a call's logs simply vanish once its output
+// grows past the externalisation threshold, and nothing says they did.
+func resolveExternalLocationWithLog(
+	batch arrow.RecordBatch,
+	meta arrow.Metadata,
+	config *ExternalLocationConfig,
+	onLog ClientLogHandler,
 ) (arrow.RecordBatch, arrow.Metadata, error) {
 	if config == nil {
 		return batch, meta, nil
@@ -484,14 +502,29 @@ func ResolveExternalLocation(
 	}
 	defer reader.Release()
 
-	// Read all batches, looking for the data batch
+	// Read all batches, looking for the data batch.
+	//
+	// The deferred release covers the early returns below: the data batch may
+	// already have been retained when a later batch turns out to be an
+	// exception or a redirect loop, and the caller of a failing resolve has no
+	// handle to release it with.
 	var resolvedBatch arrow.RecordBatch
+	failed := true
+	defer func() {
+		if failed && resolvedBatch != nil {
+			resolvedBatch.Release()
+		}
+	}()
 	for reader.Next() {
 		rec := reader.RecordBatch()
-		// Skip log/error batches
 		recMeta := batchMetadata(rec)
-		_, isLog := metaGet(recMeta, MetaLogLevel)
-		if isLog {
+		if level, isLog := metaGet(recMeta, MetaLogLevel); isLog {
+			if level == string(LogException) {
+				return batch, meta, rpcErrorFromMetadata(metadataMap(recMeta))
+			}
+			if onLog != nil {
+				onLog(logMessageFromMetadata(metadataMap(recMeta)))
+			}
 			continue
 		}
 		// Check for redirect loops
@@ -507,14 +540,32 @@ func ResolveExternalLocation(
 		return batch, meta, fmt.Errorf("no data batch found in external IPC stream")
 	}
 
-	// Build metadata with fetch info
+	// Carry the fetched batch's own metadata out, with the fetch provenance
+	// merged on top.
+	//
+	// Returning only the provenance keys silently dropped everything the
+	// producer attached to the batch it externalised -- application keys, and
+	// the stream cursor, which rides the data batch and therefore travels
+	// inside the upload. A client that lost it saw a stream end mid-exchange
+	// and could not tell why. The reference merges the same way round
+	// (resolve_external_location in vgi_rpc/external.py), so a key a producer
+	// chose to spell like a provenance key does not shadow the real one.
 	fetchMs := fmt.Sprintf("%.1f", float64(time.Since(start).Microseconds())/1000.0)
-	resolvedMeta := arrow.NewMetadata(
-		[]string{MetaLocationFetchMs, MetaLocationSource},
-		[]string{fetchMs, locationURL},
-	)
+	fetchedMeta := batchMetadata(resolvedBatch)
+	keys := make([]string, 0, fetchedMeta.Len()+2)
+	values := make([]string, 0, fetchedMeta.Len()+2)
+	for i, key := range fetchedMeta.Keys() {
+		if key == MetaLocationFetchMs || key == MetaLocationSource {
+			continue
+		}
+		keys = append(keys, key)
+		values = append(values, fetchedMeta.Values()[i])
+	}
+	keys = append(keys, MetaLocationFetchMs, MetaLocationSource)
+	values = append(values, fetchMs, locationURL)
 
-	return resolvedBatch, resolvedMeta, nil
+	failed = false
+	return resolvedBatch, arrow.NewMetadata(keys, values), nil
 }
 
 // fetchExternalData fetches data from a URL, handling zstd decompression.
@@ -597,6 +648,17 @@ func redactExternalURL(rawURL string) string {
 
 // batchMetadata extracts custom metadata from a record batch.
 func batchMetadata(rec arrow.RecordBatch) arrow.Metadata {
+	// A batch's own IPC custom_metadata first. This used to read only the
+	// schema's, which is a different field carrying different things: the
+	// per-batch keys -- log level, stream cursor, whatever the producer
+	// attached to this emit -- live on the batch. Reading the schema instead
+	// found nothing, so a log batch inside an externalised payload was
+	// delivered as data and a cursor inside one was lost.
+	if annotated, ok := rec.(arrow.RecordBatchWithMetadata); ok {
+		if meta := annotated.Metadata(); meta.Len() > 0 {
+			return meta
+		}
+	}
 	if rec.Schema().HasMetadata() {
 		return rec.Schema().Metadata()
 	}
@@ -911,4 +973,14 @@ func fetchSimple(client *http.Client, rawURL string, cfg *FetchConfig) ([]byte, 
 	}
 
 	return data, nil
+}
+
+// metadataMap renders Arrow metadata as the map the log and error decoders read.
+func metadataMap(meta arrow.Metadata) map[string]string {
+	keys, values := meta.Keys(), meta.Values()
+	out := make(map[string]string, len(keys))
+	for i := range keys {
+		out[keys[i]] = values[i]
+	}
+	return out
 }
