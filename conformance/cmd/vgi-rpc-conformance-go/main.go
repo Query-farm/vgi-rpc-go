@@ -782,6 +782,7 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
+		configureByteStreamStorage(server)
 		server.RunStdio()
 	}
 }
@@ -837,17 +838,30 @@ func testDrainHandler(handle *vgirpc.DrainHandle, drain bool) http.HandlerFunc {
 // through storage, and a threshold that quietly leaves batches inline would let
 // it pass while proving nothing.
 func configureByteStreamStorage(server *vgirpc.Server) {
-	storageURL := ""
-	for i := 2; i+1 < len(os.Args); i++ {
-		if os.Args[i] == "--fake-storage" {
-			storageURL = os.Args[i+1]
-		}
-	}
+	// findFlagValue scans from the start. The hand-rolled loop this replaced
+	// began at index 2, which silently assumed a positional transport argument
+	// preceded the flag -- true for "--unix <path> --fake-storage <url>", false
+	// for a stdio worker whose first argument IS "--fake-storage". A stdio
+	// invocation therefore configured no storage even once this function was
+	// reached.
+	storageURL := findFlagValue(os.Args[1:], "--fake-storage")
 	if storageURL == "" {
 		return
 	}
 	cfg := vgirpc.DefaultExternalLocationConfig(conformance.NewFakeStorage(storageURL))
 	cfg.URLValidator = conformance.AllowAllValidator
+	// One byte by default, per the comment above. An explicit
+	// --externalize-threshold still wins: accepting a flag and ignoring it is
+	// the defect this port just fixed one layer down in serializeBatchAsIPC,
+	// and it reads as handled while doing nothing.
 	cfg.ExternalizeThresholdBytes = 1
+	if raw := findFlagValue(os.Args[1:], "--externalize-threshold"); raw != "" {
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "invalid --externalize-threshold: %v\n", err)
+			os.Exit(2)
+		}
+		cfg.ExternalizeThresholdBytes = v
+	}
 	server.SetExternalLocation(cfg)
 }
