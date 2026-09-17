@@ -301,11 +301,16 @@ func unpackTokenPayload(data []byte) ([]byte, error) {
 
 // stateTokenAad builds the AEAD associated data that binds a state token
 // to the authenticated caller and to the protocol that owns its stream.
-// Mirrors Python's _compute_aad in
-// vgi_rpc/http/server/_state_token.py byte-for-byte: anonymous tokens
-// carry b"\x00anonymous"; authenticated tokens carry
+// Follows Python's _compute_aad in vgi_rpc/http/server/_state_token.py:
+// anonymous tokens carry b"\x00anonymous"; authenticated tokens carry
 // b"\x01" + domain + b"\x00" + principal; both then carry
 // b"\x00" + protocol.
+//
+// The layouts happen to agree today, but that is not a contract and must not
+// be relied on. Associated data never crosses the wire and a sealed token is
+// only ever opened by the implementation that minted it, so this construction
+// is internal to this worker framework and MAY diverge from the reference
+// (WIRE_PROTOCOL.md §5c). Several ports already have.
 //
 // The domain MUST appear between the 0x01 byte and the principal even
 // when empty — Python emits b"\x01\x00" + principal in that case, so

@@ -20,7 +20,9 @@ import (
 //	wire:      version:u8(1) | nonce:bytes(24) | ciphertext+tag
 //	plaintext: created_at:u64 LE | server_id_len:u8 | server_id_bytes |
 //	           session_id:bytes(12) | expires_at:u64 LE
-//	AAD:       same as stream tokens — b"vgi_rpc.state.v4\x00" + principal tail
+//	AAD:       same as stream tokens — see stateTokenAad (currently the
+//	           vgi_rpc.state.v6/v7 prefix plus the principal tail and
+//	           protocol scope); an internal detail, not a wire contract
 //	encoding:  base64url, no padding
 const (
 	sessionTokenVersion = 0x01
