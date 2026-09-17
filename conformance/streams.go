@@ -6,6 +6,7 @@ package conformance
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"sync"
 
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
@@ -36,6 +37,7 @@ func init() {
 	vgirpc.RegisterStateType(&sessionCounterProducerState{})
 	vgirpc.RegisterStateType(&sessionCounterExchangeState{})
 	vgirpc.RegisterStateType(&tickMetadataProducerState{})
+	vgirpc.RegisterStateType(&annotatedProducerState{})
 }
 
 // --- Cancel probe (process-wide counters for cancel conformance tests) ---
@@ -266,6 +268,53 @@ func (s *largeProducerState) Produce(_ context.Context, out *vgirpc.OutputCollec
 	defer valArr.Release()
 
 	if err := out.EmitArrays([]arrow.Array{idxArr, valArr}, numRows); err != nil {
+		return err
+	}
+	s.Current++
+	return nil
+}
+
+// annotatedProducerState emits Count batches, each carrying distinct per-emit
+// custom metadata.
+//
+// It exists to pin the one place metadata and externalization meet. Two ports
+// shipped opposite defects there: one refused to externalize any batch
+// carrying metadata (using "has metadata" as a proxy for "is a control
+// batch"), the other externalized and *then* replaced the result's metadata,
+// erasing vgi_rpc.location and leaving a zero-row batch no resolver
+// recognises. This port had the first of those two.
+//
+// conformance.batch_index varies per batch and the tests check *which* batch
+// carried *which* value: a constant label alone would pass against a port that
+// cached the first turn's metadata and reused it.
+type annotatedProducerState struct {
+	Count        int
+	RowsPerBatch int
+	Current      int
+}
+
+func (s *annotatedProducerState) Produce(_ context.Context, out *vgirpc.OutputCollector, _ *vgirpc.CallContext) error {
+	if s.Current >= s.Count {
+		return out.Finish()
+	}
+	base := int64(s.Current) * 1_000_000
+	numRows := int64(s.RowsPerBatch)
+
+	builder := array.NewInt64Builder(memory.NewGoAllocator())
+	defer builder.Release()
+	for row := int64(0); row < numRows; row++ {
+		builder.Append(base + row)
+	}
+	values := builder.NewArray()
+	defer values.Release()
+
+	batch := array.NewRecordBatch(annotatedSchema, []arrow.Array{values}, numRows)
+	if err := out.EmitWithMetadata(batch, map[string]string{
+		"conformance.batch_index": strconv.Itoa(s.Current),
+		"conformance.batch_total": strconv.Itoa(s.Count),
+		"conformance.emit_label":  annotatedEmitLabel,
+	}); err != nil {
+		batch.Release()
 		return err
 	}
 	s.Current++

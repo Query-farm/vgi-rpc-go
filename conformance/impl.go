@@ -263,6 +263,7 @@ func RegisterMethods(server *vgirpc.Server) {
 	vgirpc.Producer(server, "produce_empty", counterSchema, produceEmpty)
 	vgirpc.Producer(server, "produce_single", counterSchema, produceSingle)
 	vgirpc.Producer(server, "produce_large_batches", counterSchema, produceLargeBatches)
+	vgirpc.Producer(server, "produce_annotated_batches", annotatedSchema, produceAnnotatedBatches)
 	vgirpc.Producer(server, "produce_with_logs", counterSchema, produceWithLogs)
 	vgirpc.Producer(server, "produce_error_mid_stream", counterSchema, produceErrorMidStream)
 	vgirpc.Producer(server, "produce_error_on_init", counterSchema, produceErrorOnInit)
@@ -407,6 +408,10 @@ type produceSingleParams struct{}
 type produceLargeBatchesParams struct {
 	RowsPerBatch int64 `vgirpc:"rows_per_batch"`
 	BatchCount   int64 `vgirpc:"batch_count"`
+}
+type produceAnnotatedBatchesParams struct {
+	Count        int64 `vgirpc:"count"`
+	RowsPerBatch int64 `vgirpc:"rows_per_batch"`
 }
 type produceWithLogsParams struct {
 	Count int64 `vgirpc:"count"`
@@ -769,6 +774,14 @@ func produceLargeBatches(_ context.Context, ctx *vgirpc.CallContext, p produceLa
 	return &vgirpc.StreamResult{
 		OutputSchema: counterSchema,
 		State:        &largeProducerState{RowsPerBatch: int(p.RowsPerBatch), BatchCount: int(p.BatchCount)},
+	}, nil
+}
+
+// produceAnnotatedBatches emits batches carrying per-emit custom metadata.
+func produceAnnotatedBatches(_ context.Context, _ *vgirpc.CallContext, p produceAnnotatedBatchesParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: annotatedSchema,
+		State:        &annotatedProducerState{Count: int(p.Count), RowsPerBatch: int(p.RowsPerBatch)},
 	}, nil
 }
 

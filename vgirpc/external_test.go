@@ -177,6 +177,65 @@ func TestMaybeExternalizeBatch_AboveThreshold(t *testing.T) {
 	}
 }
 
+// TestMaybeExternalizeBatch_CustomMetadataRidesThePayload pins which side of
+// the pointer/payload split custom metadata lands on.
+//
+// The pointer batch's metadata IS the pointer — writing the emit's keys there
+// would overwrite vgi_rpc.location and leave a zero-row batch no resolver
+// recognises. So the keys go inside the uploaded object, which is where a
+// reader that has already fetched will look for them. Asserted directly
+// because the uploaded bytes are otherwise observable only through a live
+// storage backend.
+func TestMaybeExternalizeBatch_CustomMetadataRidesThePayload(t *testing.T) {
+	storage := newMockStorage()
+	config := &ExternalLocationConfig{
+		Storage:                   storage,
+		ExternalizeThresholdBytes: 10,
+	}
+	batch := makeBatch(100)
+	defer batch.Release()
+
+	emitMeta := arrow.NewMetadata(
+		[]string{"conformance.batch_index", "conformance.emit_label"},
+		[]string{"2", "ünïcode-λ"},
+	)
+	extBatch, extMeta, err := MaybeExternalizeBatch(batch, emitMeta, config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extBatch.Release()
+
+	if _, ok := metaGet(extMeta, MetaLocation); !ok {
+		t.Fatal("pointer batch lost vgi_rpc.location to the emit's metadata")
+	}
+	if v, ok := metaGet(extMeta, "conformance.batch_index"); ok {
+		t.Fatalf("emit metadata leaked onto the pointer batch: %q", v)
+	}
+	if len(storage.data) != 1 {
+		t.Fatalf("expected 1 upload, got %d", len(storage.data))
+	}
+
+	var uploaded []byte
+	for _, v := range storage.data {
+		uploaded = v
+	}
+	reader, err := ipc.NewReader(bytes.NewReader(uploaded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Release()
+	if !reader.Next() {
+		t.Fatal("uploaded payload carried no batch")
+	}
+	payloadMeta := batchMetadata(reader.RecordBatch())
+	if v, _ := metaGet(payloadMeta, "conformance.batch_index"); v != "2" {
+		t.Fatalf("payload conformance.batch_index = %q, want \"2\"", v)
+	}
+	if v, _ := metaGet(payloadMeta, "conformance.emit_label"); v != "ünïcode-λ" {
+		t.Fatalf("payload conformance.emit_label = %q, want the non-ASCII label", v)
+	}
+}
+
 func TestMaybeExternalizeBatch_BelowThreshold(t *testing.T) {
 	storage := newMockStorage()
 	config := &ExternalLocationConfig{

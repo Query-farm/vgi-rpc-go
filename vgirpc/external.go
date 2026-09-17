@@ -234,6 +234,15 @@ func MakeExternalLocationBatch(schema *arrow.Schema, locationURL string, sha256H
 // serializeBatchAsIPC serializes a record batch to Arrow IPC format bytes.
 func serializeBatchAsIPC(batch arrow.RecordBatch, meta *arrow.Metadata) ([]byte, error) {
 	var buf bytes.Buffer
+	// Custom metadata rides the payload, not the pointer. The batch that goes
+	// into external storage has to carry whatever the emit attached, because
+	// the pointer batch's own metadata is the location — a reader that fetches
+	// gets back only what is inside the object. The parameter was accepted and
+	// then ignored, which is the same data loss with no way to see it.
+	if meta != nil && meta.Len() > 0 {
+		batch = array.NewRecordBatchWithMetadata(batch.Schema(), batch.Columns(), batch.NumRows(), *meta)
+		defer batch.Release()
+	}
 	w := ipc.NewWriter(&buf, ipc.WithSchema(batch.Schema()))
 	if err := w.Write(batch); err != nil {
 		w.Close()
@@ -319,8 +328,12 @@ func externalizeBatchCtxMode(
 		return batch, meta, 0, nil
 	}
 
-	// Serialize to IPC
-	ipcData, err := serializeBatchAsIPC(batch, nil)
+	// Serialize to IPC, custom metadata included: the caller's metadata
+	// belongs inside the uploaded object, while the returned pointer batch
+	// carries only vgi_rpc.location. Mirrors the reference's
+	// maybe_externalize_batch, which writes custom_metadata into the payload
+	// and returns the pointer's own metadata.
+	ipcData, err := serializeBatchAsIPC(batch, &meta)
 	if err != nil {
 		return batch, meta, 0, fmt.Errorf("serializing batch for external storage: %w", err)
 	}

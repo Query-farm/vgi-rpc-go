@@ -467,6 +467,19 @@ var tickMetadataSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "seen", Type: arrow.BinaryTypes.String},
 }, nil)
 
+// annotatedSchema is the output schema of produce_annotated_batches: one
+// nullable int64 column, matching the reference's _ANNOTATED_SCHEMA. The
+// batches themselves are unremarkable; what the method exists to carry is the
+// per-emit custom metadata attached to each one.
+var annotatedSchema = arrow.NewSchema([]arrow.Field{
+	{Name: "value", Type: arrow.PrimitiveTypes.Int64, Nullable: true},
+}, nil)
+
+// annotatedEmitLabel is deliberately non-ASCII: a port that round-trips
+// metadata through a latin-1 or C-string path fails on this constant rather
+// than in someone's production data.
+const annotatedEmitLabel = "\u00fcn\u00efcode-\u03bb"
+
 // sessionCounterOutputSchema is the schema for the sticky-session
 // producer / exchange counter streams: a single value column carrying
 // the post-update counter value. Matches Python's

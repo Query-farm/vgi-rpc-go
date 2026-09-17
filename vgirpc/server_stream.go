@@ -383,21 +383,46 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			break
 		}
 
-		// Flush all accumulated batches to output writer
+		// Flush all accumulated batches to output writer.
+		//
+		// Which entry is the data batch is a property of the collector
+		// (dataBatchIdx), not something to infer from whether the entry
+		// carries metadata. Inferring it sent every *annotated* data batch
+		// down the log/control path, where it was never offered for
+		// externalization — so a batch well over the operator's threshold
+		// went inline and the threshold was silently not honoured. The HTTP
+		// paths already classify this way; this one did not.
 		for i, ab := range out.batches {
 			var writeErr error
-			if ab.meta != nil {
-				// Use the batch's own schema (it may be narrower than the
-				// declared output schema after projection pushdown); attach
-				// the custom metadata on top.
-				batchWithMeta := array.NewRecordBatchWithMetadata(
-					ab.batch.Schema(), ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
-				writeErr = outputWriter.Write(batchWithMeta)
-				batchWithMeta.Release()
+			if i != out.dataBatchIdx {
+				// Log / error / control batch: written inline, metadata and
+				// all. Use the batch's own schema (it may be narrower than
+				// the declared output schema after projection pushdown).
+				if ab.meta != nil {
+					batchWithMeta := array.NewRecordBatchWithMetadata(
+						ab.batch.Schema(), ab.batch.Columns(), ab.batch.NumRows(), *ab.meta)
+					writeErr = outputWriter.Write(batchWithMeta)
+					batchWithMeta.Release()
+				} else {
+					writeErr = outputWriter.Write(ab.batch)
+				}
 				ab.batch.Release()
 			} else {
-				// Maybe externalize large data batches
+				// The per-emit metadata goes onto the batch *before* it is
+				// offered for externalization or shm, so it rides the
+				// uploaded payload — which is where the reader reads it back
+				// from. Attaching it afterwards would put it on the pointer
+				// batch instead, overwriting vgi_rpc.location and erasing the
+				// pointer's only reason to exist.
 				dataBatch := ab.batch
+				dataBatch.Retain()
+				if ab.meta != nil {
+					wrapped := array.NewRecordBatchWithMetadata(
+						dataBatch.Schema(), dataBatch.Columns(), dataBatch.NumRows(), *ab.meta)
+					dataBatch.Release()
+					dataBatch = wrapped
+				}
+				// Maybe externalize large data batches
 				if s.externalConfig != nil && dataBatch.NumRows() > 0 {
 					extBatch, extMeta, extErr := maybeExternalizeBatchCtx(ctx, dataBatch, arrow.Metadata{}, s.externalConfig)
 					if extErr != nil {
@@ -434,6 +459,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				}
 				writeErr = outputWriter.Write(dataBatch)
 				dataBatch.Release()
+				ab.batch.Release()
 			}
 			if writeErr != nil {
 				// Release remaining batches and break
