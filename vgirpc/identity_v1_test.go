@@ -445,8 +445,7 @@ func TestIntrospectionRefusalPrecedesTheResolver(t *testing.T) {
 
 // The guard ORDER is load-bearing, so it is pinned rather than left to reading.
 //
-// Authorization and rate limiting come before the length and JWS checks, which
-// means an unauthorized caller presenting an over-long or JWS-shaped token still
+// Authorization comes before the length and JWS checks, which means an unauthorized caller presenting an over-long or JWS-shaped token still
 // gets introspection_refused and never token_unresolved. Reordering for tidiness
 // would turn the difference between the two answers into a side channel telling
 // an unauthorized caller something about the subject credential.
@@ -539,23 +538,57 @@ func TestIdentityUnavailableIsTransientNotDefinitive(t *testing.T) {
 	}
 }
 
-// Bounds, rather than closes, the oracle an allowlisted caller still has: a
-// caller whose own credential leaks can still test guesses.
-func TestIntrospectionIsRateLimited(t *testing.T) {
-	impl := introspectingIdentity(t, IdentityConfig{IntrospectRateLimit: 2})
+// Introspection is not rate limited: the allowlisted caller is answered however
+// often it asks. The allowlist is the control. The caller is the asker -- in
+// practice a proxy -- introspecting on behalf of every client that presents a
+// bearer, so a per-caller limit was one budget for every user's login,
+// drainable by unauthenticated junk credentials; and its refusal was the
+// definitive introspection_refused, which a caller following the spec
+// negative-caches against valid credentials.
+//
+// Concurrent, so the burst lands inside any one-second window however slow the
+// machine running it, and 500 calls in all -- twenty-five times the retired
+// default of 20 -- so a limiter anyone reintroduces at any plausible ceiling
+// fires here. The shared suite pins the same property over the wire
+// (TestIntrospectionIsNotThrottled); this one also runs under -race.
+func TestIntrospectionIsNotThrottled(t *testing.T) {
+	var seen []string
+	var mu sync.Mutex
+	impl := mustIdentity(t, IdentityConfig{
+		ResolveToken: func(credential string) (TokenIdentity, bool, error) {
+			mu.Lock()
+			seen = append(seen, credential)
+			mu.Unlock()
+			return NewTokenIdentity("bob"), true, nil
+		},
+		IntrospectPrincipals: []string{"proxy"},
+	})
 	ctx := idCtx(idAuth("proxy", true, noAuthTime))
-	for i := range 2 {
-		if got, err := impl.IntrospectToken("good", ctx); err != nil || got.Principal != "bob" {
-			t.Fatalf("call %d: %+v, %v", i, got, err)
-		}
+
+	const goroutines, perGoroutine = 10, 50
+	var wg sync.WaitGroup
+	refusals := make(chan error, goroutines*perGoroutine)
+	for range goroutines {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range perGoroutine {
+				if got, err := impl.IntrospectToken("good", ctx); err != nil {
+					refusals <- err
+				} else if got.Principal != "bob" {
+					refusals <- errors.New("resolved to " + got.Principal)
+				}
+			}
+		}()
 	}
-	_, err := impl.IntrospectToken("good", ctx)
-	var refused *IntrospectionRefusedError
-	if !errors.As(err, &refused) {
-		t.Fatalf("got %T (%v), want *IntrospectionRefusedError", err, err)
+	wg.Wait()
+	close(refusals)
+	if n := len(refusals); n > 0 {
+		t.Fatalf("%d of %d introspections from the allowlisted caller failed, e.g. %v -- "+
+			"introspection is not rate limited", n, goroutines*perGoroutine, <-refusals)
 	}
-	if !strings.Contains(refused.Error(), "rate limit") {
-		t.Errorf("message = %q, want it to name the rate limit", refused.Error())
+	if len(seen) != goroutines*perGoroutine {
+		t.Errorf("resolver reached %d times, want %d", len(seen), goroutines*perGoroutine)
 	}
 }
 
@@ -841,84 +874,6 @@ func TestIdentityRefusalsNeverEchoTheCredential(t *testing.T) {
 			t.Errorf("the credential reached an error message: %v", err)
 		}
 	}
-}
-
-// ---------------------------------------------------------------------------
-// The rate limiter
-// ---------------------------------------------------------------------------
-
-// Fixed-window, because the state is one integer per caller rather than a float
-// that has to be aged.
-func TestRateLimiterAdmitsUpToTheLimit(t *testing.T) {
-	limiter := NewRateLimiter(3, time.Second)
-	now := time.Unix(100, 0)
-	var got []bool
-	for range 4 {
-		got = append(got, limiter.allowAt("a", now))
-	}
-	if !reflect.DeepEqual(got, []bool{true, true, true, false}) {
-		t.Errorf("admissions = %v, want [true true true false]", got)
-	}
-}
-
-// A new window resets the count.
-func TestRateLimiterWindowRolls(t *testing.T) {
-	limiter := NewRateLimiter(1, time.Second)
-	if !limiter.allowAt("a", time.Unix(100, 0)) {
-		t.Error("the first request in a window must be admitted")
-	}
-	if limiter.allowAt("a", time.Unix(100, 500_000_000)) {
-		t.Error("a second request inside the window must be refused")
-	}
-	if !limiter.allowAt("a", time.Unix(101, 500_000_000)) {
-		t.Error("the window must roll")
-	}
-}
-
-// One caller exhausting its budget must not refuse another.
-func TestRateLimiterCallersAreIndependent(t *testing.T) {
-	limiter := NewRateLimiter(1, time.Second)
-	now := time.Unix(100, 0)
-	if !limiter.allowAt("a", now) || !limiter.allowAt("b", now) {
-		t.Error("two callers each have their own budget")
-	}
-	if limiter.allowAt("a", now) {
-		t.Error("a caller's own budget must still be enforced")
-	}
-}
-
-// Whole-map reset rather than per-key ageing, so an attacker cycling keys cannot
-// grow the map without bound between sweeps.
-func TestRateLimiterCyclingKeysCannotGrowTheMap(t *testing.T) {
-	limiter := NewRateLimiter(1, time.Second)
-	now := time.Unix(100, 0)
-	for i := range 1000 {
-		limiter.allowAt("k"+strconv.Itoa(i), now)
-	}
-	limiter.allowAt("fresh", time.Unix(200, 0))
-	limiter.mu.Lock()
-	defer limiter.mu.Unlock()
-	if len(limiter.counts) != 1 {
-		t.Errorf("map holds %d keys after a window roll, want 1", len(limiter.counts))
-	}
-}
-
-// Every transport dispatches from more than one goroutine, so a limiter that
-// raced would admit more than its ceiling under exactly the load it exists to
-// bound. Run with -race.
-func TestRateLimiterIsGoroutineSafe(t *testing.T) {
-	limiter := NewRateLimiter(1_000_000, time.Hour)
-	var wg sync.WaitGroup
-	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range 500 {
-				limiter.Allow("k" + strconv.Itoa(i%16))
-			}
-		}()
-	}
-	wg.Wait()
 }
 
 // The payloads must actually cross the wire, not merely describe a schema.
@@ -1269,38 +1224,6 @@ func TestTheAllowlistFiresBeforeTheResolver(t *testing.T) {
 		if len(seen) != 0 {
 			t.Errorf("caller %q: the allowlist did not fire -- the resolver was reached", caller.Principal)
 		}
-	}
-}
-
-// The rate limit fires, rather than the resolver happening to refuse.
-//
-// The probe resolves anything, so an unlimited implementation answers the
-// over-limit call successfully and reaches the resolver a third time -- both of
-// which this asserts.
-func TestTheRateLimitFiresBeforeTheResolver(t *testing.T) {
-	var seen []string
-	impl := mustIdentity(t, IdentityConfig{
-		ResolveToken:         resolveAnything(&seen),
-		IntrospectPrincipals: []string{"proxy"},
-		IntrospectRateLimit:  2,
-	})
-	ctx := idCtx(idAuth("proxy", true, noAuthTime))
-	for i := range 2 {
-		if _, err := impl.IntrospectToken("anything", ctx); err != nil {
-			t.Fatalf("call %d inside the limit: %v", i, err)
-		}
-	}
-	if len(seen) != 2 {
-		t.Fatalf("resolver reached %d times inside the limit, want 2", len(seen))
-	}
-
-	_, err := impl.IntrospectToken("anything", ctx)
-	var refused *IntrospectionRefusedError
-	if !errors.As(err, &refused) {
-		t.Errorf("over-limit call: got %T (%v), want *IntrospectionRefusedError", err, err)
-	}
-	if len(seen) != 2 {
-		t.Errorf("the rate limit did not fire -- the resolver was reached %d times", len(seen))
 	}
 }
 

@@ -61,33 +61,8 @@ func reportTransportKind(
 
 // conformancePrincipalHeader names the principal a request should be
 // authenticated as. Another fixture affordance: it lets one worker be reachable
-// as several identities, which the sticky replay case and the introspector
-// allowlist both need.
+// as several identities, which the sticky replay case needs.
 const conformancePrincipalHeader = "X-Conformance-Principal"
-
-// Fixed values the shared TestTokenIntrospection group posts and asserts, so
-// they are part of this worker's contract rather than decoration. They mirror
-// the constants in the upstream _pytest_suite.py.
-const (
-	conformanceIntrospector     = "conformance-introspector"
-	conformanceSubjectToken     = "conformance-opaque-subject-token"
-	conformanceSubjectPrincipal = "subject@conformance.example"
-	conformanceSubjectTokenName = "conformance-subject"
-	// JWS-shaped and deliberately *resolvable*: against an unknown JWS a port
-	// with no shape guard rejects it as unknown and passes the test for the
-	// wrong reason. Resolvable, the guard is the only thing that can produce a
-	// rejection.
-	conformanceJWSTrapToken = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.c2lnbmF0dXJl"
-	// The credential whose resolution is *unknowable* rather than unknown. The
-	// shared suite posts it to check that a backing-store outage surfaces as a
-	// transient 503 and not as this endpoint's own definitive 404 — which a
-	// caller may negative-cache, so a briefly unreachable store would be
-	// remembered as a bad credential for the cache's lifetime.
-	conformanceUnavailableToken = "conformance-unavailable-token"
-	// Well above the ~13 introspections the shared group makes in one second,
-	// so the limiter can never turn a conformance run into a flake.
-	conformanceIntrospectRateLimit = 200
-)
 
 // principalFromHeader authenticates as whatever principal the request names.
 // Requests without the header stay anonymous rather than being rejected: the
@@ -103,26 +78,6 @@ func principalFromHeader(r *http.Request) (*vgirpc.AuthContext, error) {
 		Authenticated: true,
 		Principal:     principal,
 	}, nil
-}
-
-// conformanceTokenResolver resolves the fixed credentials the shared
-// introspection group posts.
-//
-// Three answers, deliberately: an identity, ok=false for "does not resolve",
-// and an error for "I could not find out". The third is not a flavour of the
-// second — ok=false becomes the definitive 404 a caller may negative-cache.
-func conformanceTokenResolver(credential string) (vgirpc.TokenIdentity, bool, error) {
-	if credential == conformanceUnavailableToken {
-		return vgirpc.TokenIdentity{}, false, vgirpc.NewAuthUnavailable("conformance: mapping store unreachable")
-	}
-	if credential == conformanceSubjectToken || credential == conformanceJWSTrapToken {
-		return vgirpc.TokenIdentity{
-			Principal:  conformanceSubjectPrincipal,
-			TokenName:  conformanceSubjectTokenName,
-			TTLSeconds: 300,
-		}, true, nil
-	}
-	return vgirpc.TokenIdentity{}, false, nil
 }
 
 // rejectAll refuses every request, with the reason the caller named when it
@@ -635,23 +590,6 @@ func main() {
 		// one.
 		if identityMode != conformance.IdentityModeOff {
 			httpServer.SetAuthenticate(conformance.IdentityAuthenticate)
-		}
-		// --introspect enables POST /__introspect_token__ with the fixed
-		// conformance resolver and a single-principal allowlist, backing the
-		// shared TestTokenIntrospection group. It implies principal-header
-		// auth so the allowlist has something to check, and leaves the prefix
-		// where the plain worker serves. The companion off-mode group runs
-		// against the default worker, which is why this needs its own.
-		if hasFlag(os.Args, "--introspect") {
-			httpServer.SetAuthenticate(principalFromHeader)
-			if err := httpServer.EnableTokenIntrospection(vgirpc.TokenIntrospectionConfig{
-				Resolver:           conformanceTokenResolver,
-				Principals:         []string{conformanceIntrospector},
-				RateLimitPerSecond: conformanceIntrospectRateLimit,
-			}); err != nil {
-				fmt.Fprintf(os.Stderr, "EnableTokenIntrospection: %v\n", err)
-				os.Exit(1)
-			}
 		}
 		// The conformance suite's test_echo_header_round_trip probes for
 		// a fixed marker echo header; advertise it under the same name

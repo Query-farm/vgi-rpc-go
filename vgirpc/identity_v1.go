@@ -11,7 +11,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -21,9 +20,11 @@ import (
 // protocol: a bearer token is not a VGI concept, the auth primitives it builds
 // on (AuthContext, ChainAuthenticate, AuthUnavailableError) are already here,
 // and implementing it once is the whole point. It was previously an HTTP JSON
-// route, POST {prefix}/__introspect_token__ (still served; see
-// introspect_token.go), which meant it existed only on one transport and had to
-// be hand-written in every port.
+// route, POST {prefix}/__introspect_token__, which meant it existed only on one
+// transport and had to be hand-written in every port. That route is retired and
+// no longer served: this protocol is the only introspection surface, because
+// two surfaces are two sets of guards to keep identical, and the second had
+// already drifted.
 //
 // Two methods share this file's guards, and they are guarded *differently* on
 // purpose.
@@ -34,14 +35,24 @@ import (
 // using credentials the worker does not hold -- storage credentials,
 // entitlement lookups, policy-tier selection. "Trust it as much as you trust
 // the worker" is the wrong frame: it must be trusted *more*. So every rejection
-// is uniform, the caller must be on an allowlist with no permissive default, a
-// JWS-shaped subject never reaches the resolver, and the whole thing is rate
-// limited.
+// is uniform, the caller must be on an allowlist with no permissive default, and
+// a JWS-shaped subject never reaches the resolver.
+//
+// It is deliberately NOT rate limited. The allowlist is the control: the only
+// callers are trusted askers, in practice a proxy. A per-caller limit there
+// bounds only guessing, which is hopeless against a random credential at any
+// rate, and not the real harm of a leaked introspector credential -- resolving
+// a *stolen* credential to its owner takes one call. What it did do was harm:
+// the asker calls on behalf of everyone who presents a bearer, so a per-caller
+// budget is one budget for every user's login, drainable by unauthenticated
+// junk credentials. Throttling untrusted traffic belongs where it arrives -- at
+// the asker, per client -- and a throttled answer is never
+// introspection_refused, which a caller may cache as definitive.
 //
 // issue_grant mints a credential for the *calling* user, so it is not an oracle
-// about anybody else. It therefore needs no allowlist and no rate limit, and
-// its rejections are deliberately *actionable*: a console that cannot tell
-// "your login is too old" from "no" cannot know to re-prompt.
+// about anybody else. It therefore needs no allowlist, and its rejections are
+// deliberately *actionable*: a console that cannot tell "your login is too old"
+// from "no" cannot know to re-prompt.
 //
 // Errors carry a stable ErrorKind. That is load-bearing rather than decorative:
 // these used to be a bespoke HTTP route whose callers classified
@@ -82,10 +93,6 @@ const MaxTokenBytes = 4096
 // than pedantry.
 const DefaultTokenTTLSeconds = 300
 
-// DefaultIntrospectRateLimit is the per-caller, per-second introspection
-// ceiling applied when a deployment names none.
-const DefaultIntrospectRateLimit = 20
-
 // DefaultMaxAuthAge is how recently a caller must have authenticated to mint a
 // grant, when a deployment names no ceiling of its own.
 const DefaultMaxAuthAge = 900 * time.Second
@@ -109,9 +116,11 @@ var identityJWSShaped = regexp.MustCompile(`\A[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A
 // The ErrorKind strings are the wire contract, not an implementation detail.
 // ---------------------------------------------------------------------------
 
-// IntrospectionRefusedError reports that the caller may not introspect.
+// IntrospectionRefusedError reports that the caller may not introspect -- it is
+// not on the allowlist. Never a throttle.
 //
-// Definitive: a caller may cache this. Authentication is not the same
+// Definitive: a caller may cache this, which is exactly why nothing transient
+// may ever be reported as it. Authentication is not the same
 // capability as introspection -- a deployment where any valid credential may
 // introspect lets any user test guesses of any other user's credential at
 // unlimited rate, and resolve a stolen one to its owner.
@@ -243,63 +252,6 @@ func (e *IdentityUnavailableError) RetryAfterSeconds() int {
 		return e.RetryAfter
 	}
 	return defaultIdentityRetryAfter
-}
-
-// ---------------------------------------------------------------------------
-// Rate limiting
-// ---------------------------------------------------------------------------
-
-// RateLimiter is a fixed-window request limiter, keyed by caller.
-//
-// Present because introspection is a credential-to-identity oracle even when
-// correctly restricted: an allowlisted caller whose own credential leaks can
-// still test guesses. Rate limiting does not close that, it bounds it.
-//
-// Fixed-window rather than a token bucket: a window admits at most twice the
-// rate across a boundary, which is a rounding error here, and the state is one
-// integer per caller rather than a float that has to be aged.
-//
-// Safe for concurrent use: every server transport dispatches calls from more
-// than one goroutine, so a limiter that raced would admit more than its ceiling
-// under exactly the load it exists to bound.
-type RateLimiter struct {
-	mu          sync.Mutex
-	perWindow   int
-	window      time.Duration
-	windowStart time.Time
-	counts      map[string]int
-}
-
-// NewRateLimiter builds a limiter admitting perWindow requests per window.
-func NewRateLimiter(perWindow int, window time.Duration) *RateLimiter {
-	return &RateLimiter{
-		perWindow: perWindow,
-		window:    window,
-		counts:    make(map[string]int),
-	}
-}
-
-// Allow reports whether key may make a request in the current window.
-func (l *RateLimiter) Allow(key string) bool {
-	return l.allowAt(key, time.Now())
-}
-
-// allowAt is [RateLimiter.Allow] with the clock supplied, so a test can pin
-// window behaviour without sleeping.
-func (l *RateLimiter) allowAt(key string, now time.Time) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if now.Sub(l.windowStart) >= l.window {
-		// Whole-map reset rather than per-key ageing: an attacker cycling keys
-		// cannot grow the map beyond one window's worth.
-		clear(l.counts)
-		l.windowStart = now
-	}
-	if l.counts[key] >= l.perWindow {
-		return false
-	}
-	l.counts[key]++
-	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -537,9 +489,6 @@ type IdentityConfig struct {
 	// IntrospectPrincipals may call introspect_token. Required whenever
 	// ResolveToken is supplied; there is no permissive default.
 	IntrospectPrincipals []string
-	// IntrospectRateLimit is introspections allowed per caller per second.
-	// Zero means [DefaultIntrospectRateLimit].
-	IntrospectRateLimit int
 	// MaxAuthAge is how recently a caller must have authenticated to mint a
 	// grant. Zero means [DefaultMaxAuthAge].
 	MaxAuthAge time.Duration
@@ -549,7 +498,7 @@ type IdentityConfig struct {
 // hooks.
 //
 // The framework owns the guards and owns none of the policy. It decides who may
-// ask, how often, and what shape of credential is refused outright; the worker
+// ask and what shape of credential is refused outright; the worker
 // decides what a credential resolves to and whether a grant is minted. That
 // split is deliberate -- the guards are the part that is identical in every
 // deployment and catastrophic to get wrong, and the policy is the part that is
@@ -561,7 +510,6 @@ type IdentityImpl struct {
 	resolveToken TokenResolver
 	mintGrant    GrantMinter
 	principals   map[string]bool
-	limiter      *RateLimiter
 	maxAuthAge   time.Duration
 }
 
@@ -579,11 +527,6 @@ func NewIdentity(cfg IdentityConfig) (*IdentityImpl, error) {
 	if impl.maxAuthAge <= 0 {
 		impl.maxAuthAge = DefaultMaxAuthAge
 	}
-	rate := cfg.IntrospectRateLimit
-	if rate <= 0 {
-		rate = DefaultIntrospectRateLimit
-	}
-	impl.limiter = NewRateLimiter(rate, time.Second)
 	if cfg.ResolveToken != nil {
 		allowed, err := NormalisePrincipals(cfg.IntrospectPrincipals)
 		if err != nil {
@@ -618,11 +561,13 @@ func (i *IdentityImpl) OfferedMethods() []string {
 // IntrospectToken resolves token, after checking the caller may ask.
 //
 // The guard ORDER here is load-bearing and must not be reordered for tidiness.
-// Authorization and rate limiting come before anything looks at the subject
-// credential -- before the length check, before the JWS check -- so an
-// unauthorized caller learns nothing about it, including how long looking at it
-// took. A caller off the allowlist presenting an over-long or JWS-shaped token
-// must still get introspection_refused, never token_unresolved.
+// Authorization comes before anything looks at the subject credential --
+// before the length check, before the JWS check -- so an unauthorized caller
+// learns nothing about it, including how long looking at it took. A caller off
+// the allowlist presenting an over-long or JWS-shaped token must still get
+// introspection_refused, never token_unresolved.
+//
+// There is no rate limit between the two, by design: see this file's header.
 func (i *IdentityImpl) IntrospectToken(token string, ctx *CallContext) (TokenIdentity, error) {
 	if i.resolveToken == nil {
 		// The belt to registration's braces: the method is not hosted when the
@@ -634,12 +579,8 @@ func (i *IdentityImpl) IntrospectToken(token string, ctx *CallContext) (TokenIde
 	if ctx != nil && ctx.Auth != nil {
 		auth = ctx.Auth
 	}
-	caller, err := CheckIntrospector(auth, i.principals)
-	if err != nil {
+	if _, err := CheckIntrospector(auth, i.principals); err != nil {
 		return TokenIdentity{}, err
-	}
-	if !i.limiter.Allow(caller) {
-		return TokenIdentity{}, &IntrospectionRefusedError{Detail: "introspection rate limit exceeded"}
 	}
 	if err := RejectJWSShaped(token); err != nil {
 		return TokenIdentity{}, err

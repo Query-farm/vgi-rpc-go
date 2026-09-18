@@ -148,13 +148,6 @@ type HttpServer struct {
 	// See SetProxyProofRequired in proof.go.
 	proxyProofRequired bool
 
-	// Token introspection (HTTP-only, opt-in). nil unless
-	// EnableTokenIntrospection was called — its presence is what "enabled"
-	// means. The route is registered either way, so a worker without it still
-	// answers definitively rather than letting a caller spin. See
-	// introspect_token.go.
-	introspect *tokenIntrospection
-
 	// extraProxyAuthHeaders are operator-declared proxy-injected headers a
 	// custom AuthenticateFunc depends on — the escape hatch for
 	// authenticators the framework cannot introspect. See
@@ -350,11 +343,6 @@ func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool)
 	if h.proxyProofRequired {
 		w.Header().Set(ProofRequiredHeader, "true")
 	}
-	// Absent rather than "false" when off, so a proxy can preflight on the
-	// header's presence alone.
-	if h.introspect != nil {
-		w.Header().Set(IntrospectEnabledHeader, "true")
-	}
 	h.addStickyCapabilityHeaders(w)
 	if isOptions {
 		w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", capabilityCacheMaxAge))
@@ -422,9 +410,6 @@ func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, r *http.Request, isOp
 		if h.proxyProofRequired {
 			expose = append(expose, ProofRequiredHeader)
 		}
-		if h.introspect != nil {
-			expose = append(expose, IntrospectEnabledHeader)
-		}
 		// A browser client that cannot read these is back to guessing the
 		// rejection from the body, so they must be exposed cross-origin.
 		expose = append(expose, HeaderAuthReason)
@@ -459,11 +444,6 @@ func (h *HttpServer) initRoutes() {
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{protocol}/{method}/init", h.prefix), h.handleStreamInit)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{protocol}/{method}/exchange", h.prefix), h.handleStreamExchange)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/__upload_url__/init", h.prefix), h.handleUploadURLInit)
-	// Always routed, but only ever an oracle once EnableTokenIntrospection has
-	// supplied a resolver. The disabled arm holds nothing and looks nothing
-	// up; it exists so a caller gets a definitive 404 instead of the 415 the
-	// generic reserved route below would answer a JSON body with.
-	h.mux.HandleFunc(fmt.Sprintf("POST %s%s", h.prefix, IntrospectEndpoint), h.handleIntrospectToken)
 	h.mux.HandleFunc(fmt.Sprintf("POST %s/{protocol}/{method}", h.prefix), h.handleUnary)
 	// RPC endpoints are POST-only. Without this, Go's mux answers 405 for any
 	// two-segment GET that matches the wildcard route, including paths that
@@ -1107,14 +1087,6 @@ func redactedPeerPolicyError(err error) error {
 		return NewAuthFailure(reason, "peer authentication policy rejected evidence")
 	}
 	return fmt.Errorf("peer authentication policy failed")
-}
-
-func (h *HttpServer) authenticate(w http.ResponseWriter, r *http.Request) *AuthContext {
-	identity := h.authenticateIdentity(w, r)
-	if identity == nil {
-		return nil
-	}
-	return identity.auth
 }
 
 // ServeHTTP implements http.Handler.

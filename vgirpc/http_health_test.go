@@ -82,7 +82,7 @@ func TestHeadHealthMatchesGet(t *testing.T) {
 // which Go's enhanced ServeMux routing — used here via go.mod's Go 1.26 —
 // anchors to a full path segment rather than a substring), and every RPC
 // handler (handleUnary, handleStreamInit, handleStreamExchange) calls
-// h.authenticate() as its first statement regardless of the method name.
+// h.authenticateIdentity() as its first statement regardless of the method name.
 // This test proves a POST to a path that merely STARTS WITH "/health"
 // (but isn't the health route) is dispatched as an ordinary RPC call and
 // still requires authentication — i.e. the vulnerability class does not
@@ -106,7 +106,7 @@ func TestRpcMethodNamedLikeHealthDoesNotBypassAuth(t *testing.T) {
 	}
 
 	// The exact health route itself is still the deliberate, documented
-	// exemption (it never calls h.authenticate() at all).
+	// exemption (it never calls h.authenticateIdentity() at all).
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)

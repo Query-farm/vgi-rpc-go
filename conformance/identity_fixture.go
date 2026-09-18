@@ -77,13 +77,10 @@ const (
 // documented default, in seconds.
 const IdentityMaxAuthAge = 900
 
-// IdentityIntrospectRateLimit is deliberately far above the default 20. Nearly
-// every case in the group is an introspection, and a production-tuned limiter
-// would fire mid-group with every resulting failure reading as the wrong guard.
-// The limiter is not asserted by the shared group; it is covered port-locally
-// (see TestIntrospectionIsRateLimited), where its refusal is distinguishable by
-// message and so cannot be tested vacuously.
-const IdentityIntrospectRateLimit = 100000
+// There is no introspection rate limit to configure: introspection is not rate
+// limited (the shared TestIntrospectionIsNotThrottled pins that). The fixture
+// used to set one to 100000 so a production-tuned limiter could not fire
+// mid-group; it went with the limiter.
 
 // What the resolver answers.
 const (
@@ -256,7 +253,6 @@ const (
 func IdentityConfigFor(mode IdentityMode) (vgirpc.IdentityConfig, bool) {
 	cfg := vgirpc.IdentityConfig{
 		IntrospectPrincipals: []string{IdentityIntrospectorPrincipal},
-		IntrospectRateLimit:  IdentityIntrospectRateLimit,
 		MaxAuthAge:           IdentityMaxAuthAge * time.Second,
 	}
 	switch mode {

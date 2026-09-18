@@ -184,7 +184,6 @@ def _translate_http_args(args: tuple[str, ...]) -> list[str]:
             "--no-compression",
             "--no-call-state-cache",
             "--sticky-auth",
-            "--introspect",
             "--fail-serve-start-once",
             "--reject-localhost-redirects",
         ):
@@ -422,19 +421,6 @@ def conformance_http_cors_port(conformance_fake_storage: str) -> Iterator[int]:
         "--cors-origin",
         "https://conformance.example",
     )
-
-
-@pytest.fixture(scope="session")
-def conformance_http_introspect_port() -> Iterator[int]:
-    """Start a Go HTTP worker with token introspection enabled.
-
-    Backs the shared ``TestTokenIntrospection`` group.  It needs its own
-    worker because the endpoint resolves nothing unless explicitly enabled --
-    which the ungated ``TestTokenIntrospectionOffMode`` asserts against the
-    default worker.  The introspector principal, subject credential and JWS
-    trap token are fixed by the suite; the worker configures exactly those.
-    """
-    yield from _start_http_worker("--http", "--introspect")
 
 
 @pytest.fixture(scope="session")
