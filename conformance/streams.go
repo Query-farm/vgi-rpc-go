@@ -6,7 +6,9 @@ package conformance
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
@@ -32,6 +34,7 @@ func init() {
 	vgirpc.RegisterStateType(&failOnExchangeNState{})
 	vgirpc.RegisterStateType(&dynamicProducerState{})
 	vgirpc.RegisterStateType(&zeroColumnExchangeState{})
+	vgirpc.RegisterStateType(&inputMetadataExchangeState{})
 	vgirpc.RegisterStateType(&cancellableProducerState{})
 	vgirpc.RegisterStateType(&cancellableExchangeState{})
 	vgirpc.RegisterStateType(&sessionCounterProducerState{})
@@ -565,6 +568,42 @@ type zeroColumnExchangeState struct {
 func (s *zeroColumnExchangeState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
 	s.CallCount++
 	return out.EmitArrays([]arrow.Array{}, 0)
+}
+
+// inputMetadataExchangeState reports, per input, the metadata Exchange was
+// handed (callCtx.InputMetadata): `seen` is the value of
+// `vgi.conformance.input` (empty when absent) and `keys` every key present,
+// sorted and comma-joined (empty when there is no metadata at all). The two
+// together check both halves of the rule: the application's own metadata
+// arrives, and the transport's bookkeeping (the HTTP cursor and call token)
+// does not. Turns exists because gob refuses a state with no exported field.
+type inputMetadataExchangeState struct {
+	Turns int
+}
+
+var inputMetadataOutputSchema = arrow.NewSchema([]arrow.Field{
+	{Name: "seen", Type: arrow.BinaryTypes.String, Nullable: true},
+	{Name: "keys", Type: arrow.BinaryTypes.String, Nullable: true},
+}, nil)
+
+func (s *inputMetadataExchangeState) Exchange(_ context.Context, input arrow.RecordBatch, out *vgirpc.OutputCollector, callCtx *vgirpc.CallContext) error {
+	s.Turns++
+	md := callCtx.InputMetadata
+	seen, _ := md.GetValue("vgi.conformance.input")
+	keys := append([]string(nil), md.Keys()...)
+	sort.Strings(keys)
+	mem := memory.NewGoAllocator()
+	seenBuilder := array.NewStringBuilder(mem)
+	keysBuilder := array.NewStringBuilder(mem)
+	defer seenBuilder.Release()
+	defer keysBuilder.Release()
+	seenBuilder.Append(seen)
+	keysBuilder.Append(strings.Join(keys, ","))
+	seenArray := seenBuilder.NewArray()
+	keysArray := keysBuilder.NewArray()
+	defer seenArray.Release()
+	defer keysArray.Release()
+	return out.EmitArrays([]arrow.Array{seenArray, keysArray}, 1)
 }
 
 // --- Helper ---
