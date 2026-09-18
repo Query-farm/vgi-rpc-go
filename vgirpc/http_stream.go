@@ -306,8 +306,11 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 
 		// The producer's first turn folds into this /init request, so the init
 		// request's custom metadata is what the pipe transports would have
-		// delivered on the first tick batch.
-		finished, err := h.runProduceTurn(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, peerEvidence, transportMeta, callCtx.Cookies, callCtx.stickySink, requestMetadata(req))
+		// delivered on the first tick batch. Stripped of the transport's keys
+		// exactly as a continuation tick is: an honest client has no cursor to
+		// put on an /init body yet, so this is the rule stated once rather than
+		// left to depend on the client (the reference strips here too).
+		finished, err := h.runProduceTurn(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, peerEvidence, transportMeta, callCtx.Cookies, callCtx.stickySink, stripFrameworkTickMetadata(requestMetadata(req)))
 		handlerErr = err
 		if err == nil && !finished {
 			// The producer remains active — append a continuation token.
@@ -454,9 +457,9 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	// Extract state token and cancel signal from custom metadata BEFORE
 	// attempting any schema cast: cancel batches carry an empty schema that
 	// would fail the cast, but the server must observe them regardless.
-	// Keep the full metadata: it becomes CallContext.InputMetadata for the
-	// exchange handler (parity with the pipe transports; the cast below
-	// drops it from the batch).
+	// Keep the full metadata: less the transport's own keys, it is what the
+	// exchange handler is handed (parity with the pipe transports; see
+	// handleExchangeCall).
 	var tokenBytes []byte
 	var callTokenBytes []byte
 	var cancelled bool
@@ -492,16 +495,19 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 		resolvedInput = resolved
 		defer resolvedInput.Release()
 		inputBatch = resolvedInput
+		// resolvedMeta, and not the fetched batch's own metadata, is what a
+		// resolved input carries: the payload's keys with the reader's
+		// provenance stamp (vgi_rpc.location.source / .fetch_ms) merged on top
+		// (WIRE_PROTOCOL.md §12). This used to be re-read off the fetched batch
+		// right here, which kept the payload's keys and silently discarded the
+		// stamp, so a method could not tell a resolved input from one that was
+		// never externalized.
 		inputMeta = resolvedMeta
-		if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
-			meta := bwm.Metadata()
-			inputMeta = meta
-			if v, found := meta.GetValue(MetaStreamState); found {
-				tokenBytes = []byte(v)
-			}
-			if v, found := meta.GetValue(MetaCallState); found {
-				callTokenBytes = []byte(v)
-			}
+		if v, found := resolvedMeta.GetValue(MetaStreamState); found {
+			tokenBytes = []byte(v)
+		}
+		if v, found := resolvedMeta.GetValue(MetaCallState); found {
+			callTokenBytes = []byte(v)
 		}
 	}
 
@@ -732,6 +738,21 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	// Record input stats
 	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
 
+	// What this turn's input carried, less the transport's own keys. The pipe
+	// transports keep stream and call state in the connection and never on a
+	// batch, so without the strip an identical worker sees clean application
+	// metadata over subprocess and framework internals over HTTP -- and
+	// MetaStreamState is a sealed cursor that must not reach application code.
+	// Every other key passes, vgi_rpc.* included, as in the reference.
+	delivered := stripFrameworkTickMetadata(inputMeta)
+	// The batch itself is handed over carrying exactly that, too. Read off
+	// the request as-is it still held both tokens (and, resolved, the payload's
+	// keys without the provenance stamp), so a handler reading the batch's own
+	// metadata rather than InputMetadata saw a different, token-bearing set.
+	// On the pipe the two are the same thing; they have to be here as well.
+	handed := array.NewRecordBatchWithMetadata(inputBatch.Schema(), inputBatch.Columns(), inputBatch.NumRows(), delivered)
+	defer handed.Release()
+
 	out := newOutputCollector(schema, h.server.serverID, false)
 	budget := responseBudgetFromContext(ctx)
 	out.setBudgets(budget.Limit, budget.Preferred, h.maxExternalizedResponseBytes, h.server.externalConfig != nil)
@@ -749,15 +770,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		ResponseLimitBytes:     budget.Limit,
 		PreferredResponseBytes: budget.Preferred,
 		stickySink:             sink,
-		// Surface the request batch's custom metadata to the handler, matching
-		// the pipe transports (server_stream.go sets it from the input batch).
-		// The framework's own transport keys are stripped first, exactly as on
-		// the producer continuation turn: the pipe transports keep stream/call
-		// state in the connection and never on a batch, so without this an
-		// identical worker sees clean user metadata over subprocess and
-		// framework internals over HTTP. MetaStreamState in particular is a
-		// sealed cursor token that must not reach application code.
-		InputMetadata: stripFrameworkTickMetadata(inputMeta),
+		InputMetadata:          delivered,
 	}
 
 	var exchangeErr error
@@ -767,7 +780,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 				exchangeErr = &RpcError{Type: "RuntimeError", Message: fmt.Sprintf("%v", rv)}
 			}
 		}()
-		if err := state.Exchange(ctx, inputBatch, out, callCtx); err != nil {
+		if err := state.Exchange(ctx, handed, out, callCtx); err != nil {
 			exchangeErr = err
 		}
 	}()
@@ -1030,10 +1043,15 @@ var frameworkTickMetadataKeys = map[string]struct{}{
 }
 
 // stripFrameworkTickMetadata returns meta with the framework's transport keys
-// removed, preserving the relative order of the remaining keys.
+// removed, preserving the relative order of the remaining keys. meta itself is
+// returned when it carries none of them, so the common case costs no
+// allocation on the pipe transports, which run this on every turn.
 func stripFrameworkTickMetadata(meta arrow.Metadata) arrow.Metadata {
 	if meta.Len() == 0 {
 		return arrow.Metadata{}
+	}
+	if !hasFrameworkTickMetadata(meta) {
+		return meta
 	}
 	srcKeys := meta.Keys()
 	srcValues := meta.Values()
@@ -1050,6 +1068,17 @@ func stripFrameworkTickMetadata(meta arrow.Metadata) arrow.Metadata {
 		return arrow.Metadata{}
 	}
 	return arrow.NewMetadata(keys, values)
+}
+
+// hasFrameworkTickMetadata reports whether meta carries any of the
+// framework's transport keys.
+func hasFrameworkTickMetadata(meta arrow.Metadata) bool {
+	for _, k := range meta.Keys() {
+		if _, framework := frameworkTickMetadataKeys[k]; framework {
+			return true
+		}
+	}
+	return false
 }
 
 // runProduceTurn drives exactly one lock-step producer transition. Returns

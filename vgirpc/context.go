@@ -42,6 +42,13 @@ type CallContext struct {
 	// to the input batch that triggered this Produce/Exchange call. Zero-valued
 	// when the input batch has no metadata. Used to surface signals like
 	// DuckDB's dynamic filter ticks (`vgi_pushdown_filters`) to the handler.
+	//
+	// It is the same on every transport: that input's own metadata, every
+	// turn, less the transport's bookkeeping (MetaStreamState, MetaCallState,
+	// MetaCancel). An externalized input carries the fetched payload's
+	// metadata, never the pointer's, with the reader's provenance stamp
+	// (MetaLocationSource, MetaLocationFetchMs) merged on top. The input batch
+	// an exchange handler is given carries exactly this as its own metadata.
 	InputMetadata arrow.Metadata
 	// Cookies holds the incoming HTTP request cookies.  Empty for non-HTTP
 	// transports (pipe, subprocess, Unix socket).

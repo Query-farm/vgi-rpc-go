@@ -284,7 +284,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
 				inputMeta = bwm.Metadata()
 			}
-			resolvedBatch, _, resolveErr := ResolveExternalLocation(inputBatch, inputMeta, s.externalConfig)
+			resolvedBatch, resolvedMeta, resolveErr := ResolveExternalLocation(inputBatch, inputMeta, s.externalConfig)
 			if resolveErr != nil {
 				slog.Error("failed to resolve external input", "method", req.Method, "err", resolveErr)
 				streamErr = &RpcError{
@@ -296,9 +296,18 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				releaseInput()
 				break
 			} else if resolvedBatch != inputBatch {
+				// A resolved input carries resolvedMeta: the payload's own keys
+				// with the reader's provenance stamp (vgi_rpc.location.source /
+				// .fetch_ms) merged on top, WIRE_PROTOCOL.md §12. The fetched
+				// batch holds only the payload's, and InputMetadata is read off
+				// the batch below, so without this re-wrap the method got an
+				// input indistinguishable from one that was never externalized.
+				withMeta := array.NewRecordBatchWithMetadata(
+					resolvedBatch.Schema(), resolvedBatch.Columns(), resolvedBatch.NumRows(), resolvedMeta)
+				resolvedBatch.Release()
 				releaseInput()
-				inputBatch = resolvedBatch
-				ownedInput = resolvedBatch
+				inputBatch = withMeta
+				ownedInput = withMeta
 			}
 		}
 
@@ -342,7 +351,24 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			iterCtx.LogLevel = LogTrace
 		}
 		if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
-			iterCtx.InputMetadata = bwm.Metadata()
+			meta := bwm.Metadata()
+			// The transport's own keys never reach a method, on any transport.
+			// This one keeps stream state in the connection and never writes
+			// them, so an honest client never sends them here and this costs
+			// nothing; it states the HTTP rule once rather than leaving it to
+			// depend on which client wrote the batch -- or the payload an
+			// externalized input fetched, which an HTTP-shaped writer may have
+			// sealed its cursor into. The batch is re-wrapped so that it and
+			// InputMetadata still agree.
+			if hasFrameworkTickMetadata(meta) {
+				meta = stripFrameworkTickMetadata(meta)
+				stripped := array.NewRecordBatchWithMetadata(
+					inputBatch.Schema(), inputBatch.Columns(), inputBatch.NumRows(), meta)
+				releaseInput()
+				inputBatch = stripped
+				ownedInput = stripped
+			}
+			iterCtx.InputMetadata = meta
 		}
 
 		// Dispatch to state
