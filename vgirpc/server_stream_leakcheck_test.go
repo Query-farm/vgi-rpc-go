@@ -148,7 +148,7 @@ func TestHTTPProducerPanicReleasesCollectedBatch(t *testing.T) {
 	before := leakCheckAllocator().CurrentAlloc()
 	finished, err := h.runProduceTurn(
 		context.Background(), w, regressionSchema, &emitThenPanicProducer{}, info,
-		&CallStatistics{}, Anonymous(), nil, nil, nil, arrow.Metadata{},
+		&CallStatistics{}, Anonymous(), nil, nil, nil, nil, arrow.Metadata{},
 	)
 	if finished {
 		t.Fatal("panicking producer reported finished")

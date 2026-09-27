@@ -15,7 +15,7 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
 
-func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req *Request, info *methodInfo, stats *CallStatistics) (handlerErr, transportErr error) {
+func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req *Request, info *methodInfo, stats *CallStatistics, disableShm bool) (handlerErr, transportErr error) {
 	// Deserialize parameters
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
@@ -203,6 +203,13 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			break
 		}
 		inputBatch := inputReader.RecordBatch()
+		if disableShm && hasSharedMemoryMetadata(inputBatch) {
+			streamErr = networkSharedMemoryError()
+			transportErr = streamErr
+			s.logIPCWriteErr("stream-network-shm-error", req.Method,
+				writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.debugErrors))
+			break
+		}
 		// inputReader owns its current record until Next. Resolution and casting
 		// allocate replacement records which this iteration owns and must release
 		// before another input is read.
@@ -510,6 +517,11 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 
 	// Close output writer (sends EOS)
 	s.logIPCWriteErr("close", req.Method, outputWriter.Close())
+	if transportErr != nil {
+		// The caller closes this connection. Do not drain untrusted input after
+		// a transport failure or a network shared-memory protocol violation.
+		return streamErr, transportErr
+	}
 
 	// Drain remaining input so transport is clean for next request
 	for inputReader.Next() {

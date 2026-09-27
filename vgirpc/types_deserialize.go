@@ -64,6 +64,18 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 	if target.Kind() == reflect.Ptr {
 		target = target.Elem()
 	}
+	if batch.NumRows() != 1 {
+		// Empty parameter methods canonically send zero columns and zero rows.
+		// The normal declared-schema check below still validates their target.
+		empty := batch.NumRows() == 0 && batch.NumCols() == 0 && target.Kind() == reflect.Struct
+		if empty {
+			desc := describeStruct(target)
+			empty = desc.Err == nil && len(desc.Schema.Fields()) == 0
+		}
+		if !empty {
+			return reflect.Value{}, fmt.Errorf("parameter record must contain exactly one row, got %d", batch.NumRows())
+		}
+	}
 
 	// Handle wrapped request: if the batch has a single "request" column of type
 	// binary, the actual parameters are IPC-serialized inside it. Unwrap the

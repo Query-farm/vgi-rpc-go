@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -473,21 +472,5 @@ func tcpEndpointHost(endpoint string) string {
 // serveTcpConn runs the serve loop over a single AF_INET connection, mirroring
 // serveUnixConn but advertising the tcp transport kind to dispatch hooks.
 func (s *Server) serveTcpConn(ctx context.Context, conn net.Conn) {
-	if err := s.notifyTransport(TransportKindTcp, nil); err != nil {
-		return
-	}
-	// Per-connection shared-memory segment cache (see ServeWithContext).
-	shmConn := &shmConnState{}
-	defer shmConn.close()
-	for {
-		if err := ctx.Err(); err != nil {
-			return
-		}
-		if err := s.serveOne(ctx, conn, conn, shmConn); err != nil {
-			if err != io.EOF && !isTransportClosed(err) {
-				slog.Error("tcp serve loop error", "err", err)
-			}
-			return
-		}
-	}
+	s.ServeNetworkWithContext(ctx, conn, conn)
 }

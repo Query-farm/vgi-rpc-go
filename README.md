@@ -57,7 +57,7 @@ func main() {
 - **Stream headers** for metadata before the first data batch
 - **Client-directed logging** at configurable levels
 - **`context.Context` support** for cancellation and deadlines
-- **HTTP transport** with signed state tokens, zstd/gzip request decompression, and negotiated response compression (on by default at zstd level 1; tune or disable via `SetCompressionLevel`)
+- **HTTP transport** with signed state tokens, zstd/gzip request decompression, and negotiated response compression (on by default at zstd level 1; tune or disable via `SetCompressionLevel`). Compression reuses at most four idle encoders per codec and level; active responses each own an encoder, and completed encoders retain no response writer.
 - **Native HTTP client** for unary, producer, and exact-schema exchange calls
 - **Iroh clients** for stateful `iroh://` Arrow mux and HTTP-semantics
   `httpi://` through explicit native/community providers (no helper process or
@@ -87,10 +87,18 @@ vgirpc.DynamicStreamWithHeader[P](server, name, headerSchema, handler)
 server.RunStdio()                          // stdin/stdout
 server.Serve(reader, writer)               // any io.Reader/Writer
 server.ServeWithContext(ctx, reader, writer) // with context
+server.ServeNetworkWithContext(ctx, reader, writer) // network adapter; shared memory disabled
 
 httpServer := vgirpc.NewHttpServer(server) // HTTP
 http.ListenAndServe(":8080", httpServer)
 ```
+
+`Serve` and `ServeWithContext` preserve the local pipe/Unix shared-memory
+side channel. Custom TCP, TLS, and Iroh adapters must use
+`ServeNetworkWithContext`, including adapters that reach a trusted bridge through
+a Unix socket. Network serving advertises `shm=false` and terminates connections
+that send shared-memory metadata. Adapters remain responsible for authentication,
+message limits, deadlines, and closing the transport when its context is canceled.
 
 ## Struct Tags
 
