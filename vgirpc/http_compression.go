@@ -417,49 +417,72 @@ func (cw *compressResponseWriter) finish() {
 // a full deflate state. Paying that on every response is the single largest
 // per-request allocation when compression is enabled.
 //
-// klauspost's Encoder is not goroutine-safe, which is exactly what sync.Pool
-// plus Reset(w) is for: each request checks out an encoder for the duration
-// of the write and returns it on Close. Response bodies are fully buffered
+// Each request checks out an encoder for the duration of the write and returns
+// it on Close. A bounded shared pool is intentional: sync.Pool keeps private
+// entries per scheduler P, so a sequential connection moving between Ps can
+// allocate and retain many multi-megabyte encoders. GC also drops those entries
+// and starts that allocation cycle again. Shared idle entries keep reuse stable
+// across scheduler migration and bound retention after concurrent bursts.
+// Response bodies are fully buffered
 // before compression, so encoder concurrency is pinned to 1 — extra worker
 // goroutines buy nothing here and make each pooled encoder far more
 // expensive to hold.
-var codecWriterPools sync.Map // codecPoolKey -> *sync.Pool
+var codecWriterPools sync.Map // codecPoolKey -> *codecWriterPool
+
+const maxIdleCodecWriters = 4
+
+type codecWriterPool struct {
+	idle      chan io.WriteCloser
+	newWriter func() (io.WriteCloser, error)
+}
+
+func (p *codecWriterPool) get() (io.WriteCloser, error) {
+	select {
+	case writer := <-p.idle:
+		return writer, nil
+	default:
+		return p.newWriter()
+	}
+}
+
+func (p *codecWriterPool) put(writer io.WriteCloser) {
+	select {
+	case p.idle <- writer:
+	default:
+		// The caller already closed the writer. Drop excess idle working
+		// memory instead of retaining the peak request concurrency forever.
+	}
+}
 
 type codecPoolKey struct {
 	encoding string
 	level    int
 }
 
-func codecPool(key codecPoolKey) *sync.Pool {
+func codecPool(key codecPoolKey) *codecWriterPool {
 	if p, ok := codecWriterPools.Load(key); ok {
-		return p.(*sync.Pool)
+		return p.(*codecWriterPool)
 	}
-	p := &sync.Pool{New: func() any {
+	p := &codecWriterPool{idle: make(chan io.WriteCloser, maxIdleCodecWriters), newWriter: func() (io.WriteCloser, error) {
 		switch key.encoding {
 		case "zstd":
-			enc, err := zstd.NewWriter(nil,
+			return zstd.NewWriter(nil,
 				zstd.WithEncoderLevel(zstd.EncoderLevel(key.level)),
 				zstd.WithEncoderConcurrency(1))
-			if err != nil {
-				return err
-			}
-			return enc
 		default: // gzip
-			w, err := gzip.NewWriterLevel(nil, key.level)
-			if err != nil {
-				return err
-			}
-			return w
+			return gzip.NewWriterLevel(nil, key.level)
 		}
 	}}
 	actual, _ := codecWriterPools.LoadOrStore(key, p)
-	return actual.(*sync.Pool)
+	return actual.(*codecWriterPool)
 }
 
 // pooledCodecWriter returns its codec writer to the pool on Close.
 type pooledCodecWriter struct {
 	io.WriteCloser
-	pool *sync.Pool
+	pool      *codecWriterPool
+	closeOnce sync.Once
+	closeErr  error
 	// resetNil returns the writer to a state that holds no reference to the
 	// request's ResponseWriter, so a pooled entry cannot pin a finished
 	// request's memory.
@@ -467,10 +490,14 @@ type pooledCodecWriter struct {
 }
 
 func (p *pooledCodecWriter) Close() error {
-	err := p.WriteCloser.Close()
-	p.resetNil()
-	p.pool.Put(p.WriteCloser)
-	return err
+	p.closeOnce.Do(func() {
+		p.closeErr = p.WriteCloser.Close()
+		p.resetNil()
+		if p.closeErr == nil {
+			p.pool.put(p.WriteCloser)
+		}
+	})
+	return p.closeErr
 }
 
 // gzipLevelFor clamps the zstd-shaped level into gzip's 1–9 domain rather
@@ -500,8 +527,8 @@ func newCompressWriter(encoding string, w io.Writer, zstdLevel int) (io.WriteClo
 	}
 
 	pool := codecPool(key)
-	got := pool.Get()
-	if err, isErr := got.(error); isErr {
+	got, err := pool.get()
+	if err != nil {
 		return nil, err
 	}
 

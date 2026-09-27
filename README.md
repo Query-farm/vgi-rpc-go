@@ -57,7 +57,7 @@ func main() {
 - **Stream headers** for metadata before the first data batch
 - **Client-directed logging** at configurable levels
 - **`context.Context` support** for cancellation and deadlines
-- **HTTP transport** with signed state tokens, zstd/gzip request decompression, and negotiated response compression (on by default at zstd level 1; tune or disable via `SetCompressionLevel`)
+- **HTTP transport** with signed state tokens, zstd/gzip request decompression, and negotiated response compression (on by default at zstd level 1; tune or disable via `SetCompressionLevel`). Compression reuses at most four idle encoders per codec and level; active responses each own an encoder, and completed encoders retain no response writer.
 - **Native HTTP client** for unary, producer, and exact-schema exchange calls
 - **Iroh clients** for stateful `iroh://` Arrow mux and HTTP-semantics
   `httpi://` through explicit native/community providers (no helper process or
