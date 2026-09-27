@@ -288,6 +288,9 @@ func RegisterMethods(server *vgirpc.Server) {
 	emptySchema := arrow.NewSchema([]arrow.Field{}, nil)
 	vgirpc.Exchange(server, "exchange_zero_columns", emptySchema, emptySchema, exchangeZeroColumns)
 
+	// Report the custom metadata each exchange input batch was handed with.
+	vgirpc.Exchange(server, "exchange_input_metadata", inputMetadataOutputSchema, scaleInputSchema, exchangeInputMetadata)
+
 	// Exchange streams with headers
 	vgirpc.ExchangeWithHeader(server, "exchange_with_header", scaleOutputSchema, scaleInputSchema, headerSchema, exchangeWithHeader)
 
@@ -440,6 +443,7 @@ type exchangeErrorOnNthParams struct {
 type exchangeErrorOnInitParams struct{}
 type exchangeCastCompatibleParams struct{}
 type exchangeZeroColumnsParams struct{}
+type exchangeInputMetadataParams struct{}
 type exchangeWithHeaderParams struct {
 	Factor float64 `vgirpc:"factor"`
 }
@@ -887,6 +891,16 @@ func exchangeZeroColumns(_ context.Context, ctx *vgirpc.CallContext, _ exchangeZ
 		OutputSchema: emptySchema,
 		InputSchema:  emptySchema,
 		State:        &zeroColumnExchangeState{},
+	}, nil
+}
+
+// exchangeInputMetadata reports the custom metadata each exchange input batch
+// was handed with.
+func exchangeInputMetadata(_ context.Context, ctx *vgirpc.CallContext, _ exchangeInputMetadataParams) (*vgirpc.StreamResult, error) {
+	return &vgirpc.StreamResult{
+		OutputSchema: inputMetadataOutputSchema,
+		InputSchema:  scaleInputSchema,
+		State:        &inputMetadataExchangeState{},
 	}, nil
 }
 
