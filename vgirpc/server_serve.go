@@ -27,9 +27,10 @@ import (
 // is advertised and reuses it for the rest of the connection, closing it when
 // the serve loop ends. A no-op on connections that never use shm.
 type shmConnState struct {
-	seg  *ShmSegment
-	name string
-	size int
+	seg      *ShmSegment
+	name     string
+	size     int
+	disabled bool
 }
 
 // ensure attaches the segment advertised in reqMeta (if any) or returns the
@@ -37,6 +38,9 @@ type shmConnState struct {
 // this connection yet (the caller treats a pointer batch with no segment as a
 // negotiation mismatch).
 func (c *shmConnState) ensure(reqMeta map[string]string) *ShmSegment {
+	if c.disabled {
+		return nil
+	}
 	name, hasName := reqMeta[MetaShmSegmentName]
 	sizeStr, hasSize := reqMeta[MetaShmSegmentSize]
 	if !hasName || !hasSize {
@@ -114,8 +118,24 @@ func (s *Server) Serve(r io.Reader, w io.Writer) {
 // transport error occurs. A blocking read on r cannot be interrupted by ctx alone —
 // callers wanting prompt shutdown should also close r (or its underlying file
 // descriptor) when cancelling the context.
+// This entrypoint permits local shared-memory attachment. Network adapters must
+// use ServeNetworkWithContext, even when a trusted bridge uses a local socket.
 func (s *Server) ServeWithContext(ctx context.Context, r io.Reader, w io.Writer) {
-	if err := s.notifyTransport(TransportKindPipe, nil); err != nil {
+	s.serveWithContext(ctx, r, w, TransportKindPipe, false)
+}
+
+// ServeNetworkWithContext serves raw Arrow IPC over a network adapter's
+// reader/writer pair. It advertises TCP transport semantics and disables shared
+// memory, rejecting both segment advertisements and pointer continuations before
+// attachment or dispatch. Verified connection identities installed with
+// WithConnectionIdentity are preserved. The adapter owns authentication, wire
+// size limits, deadlines, and closing the underlying reader on cancellation.
+func (s *Server) ServeNetworkWithContext(ctx context.Context, r io.Reader, w io.Writer) {
+	s.serveWithContext(ctx, r, w, TransportKindTcp, true)
+}
+
+func (s *Server) serveWithContext(ctx context.Context, r io.Reader, w io.Writer, kind TransportKind, disableShm bool) {
+	if err := s.notifyTransport(kind, nil); err != nil {
 		// Hook refused the binding; abort the serve. The error has
 		// already been logged inside notifyTransport.
 		return
@@ -123,7 +143,7 @@ func (s *Server) ServeWithContext(ctx context.Context, r io.Reader, w io.Writer)
 	// The shared-memory segment is advertised once (on init requests) and then
 	// referenced by offset on later data requests, so it is attached once and
 	// cached for the lifetime of this connection rather than per request.
-	shmConn := &shmConnState{}
+	shmConn := &shmConnState{disabled: disableShm}
 	defer shmConn.close()
 	for {
 		if err := ctx.Err(); err != nil {
@@ -161,6 +181,14 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 	// Resolve paths may replace req.Batch. Defer through the field so the
 	// final owner is released rather than capturing the original pointer now.
 	defer func() { req.Batch.Release() }()
+	if shmConn.disabled && hasSharedMemoryMetadata(req.Batch) {
+		rpcErr := networkSharedMemoryError()
+		s.logIPCWriteErr("error-response", req.Method,
+			writeErrorResponse(w, arrow.NewSchema(nil, nil), rpcErr, s.serverID, req.RequestID, s.debugErrors))
+		// Terminate instead of interpreting a possible streaming continuation as
+		// another request or draining attacker-controlled input indefinitely.
+		return rpcErr
+	}
 
 	// Attach (or reuse) the shared-memory segment for this connection. The
 	// client advertises (segment_name, segment_size) once on init requests and
@@ -237,7 +265,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 
 	// Handle __transport_options__ transport capability negotiation
 	if req.Method == "__transport_options__" {
-		return s.serveTransportOptions(w)
+		return s.serveTransportOptions(w, !shmConn.disabled)
 	}
 
 	// Resolve (protocol, method). Method names may collide across protocols, so
@@ -337,7 +365,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 	case MethodUnary:
 		handlerErr, transportErr = s.serveUnary(ctx, w, req, info, stats)
 	case MethodProducer, MethodExchange, MethodDynamic:
-		handlerErr, transportErr = s.serveStream(ctx, r, w, req, info, stats)
+		handlerErr, transportErr = s.serveStream(ctx, r, w, req, info, stats, shmConn.disabled)
 	default:
 		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, info.ResultSchema,
 			fmt.Errorf("method type %d not yet implemented", info.Type),
@@ -404,10 +432,10 @@ func (s *Server) writeStreamHeader(w io.Writer, header ArrowSerializable, logs [
 // client discovers whether the shared-memory side-channel may be used. The
 // worker's capabilities ride as response metadata under vgi_rpc.transport.*;
 // the response batch is empty. shm is offered only when this build supports it.
-func (s *Server) serveTransportOptions(w io.Writer) error {
+func (s *Server) serveTransportOptions(w io.Writer, allowShm bool) error {
 	emptySchema := arrow.NewSchema(nil, nil)
 	shmVal := "false"
-	if shmSupported {
+	if shmSupported && allowShm {
 		shmVal = "true"
 	}
 	keys := []string{MetaTransportShm, MetaRequestVersion}
@@ -425,6 +453,28 @@ func (s *Server) serveTransportOptions(w io.Writer) error {
 	defer writer.Close()
 
 	return writer.Write(rec)
+}
+
+// Reserve the whole namespace so partial or future pointer metadata cannot
+// bypass network isolation. Check schema metadata as well as batch metadata;
+// the guard must not depend on the local platform's SHM implementation.
+func hasSharedMemoryMetadata(batch arrow.RecordBatch) bool {
+	metadata := []arrow.Metadata{batch.Schema().Metadata()}
+	if annotated, ok := batch.(arrow.RecordBatchWithMetadata); ok {
+		metadata = append(metadata, annotated.Metadata())
+	}
+	for _, values := range metadata {
+		for _, key := range values.Keys() {
+			if strings.HasPrefix(key, "vgi_rpc.shm_") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func networkSharedMemoryError() *RpcError {
+	return &RpcError{Type: "ProtocolError", Message: "shared memory is disabled on network transports"}
 }
 
 // isTransportClosed returns true for errors that indicate the transport was closed normally.

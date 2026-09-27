@@ -198,7 +198,7 @@ func DynamicStreamWithHeader[P any](s *Server, name string,
 		ResultSchema:  arrow.NewSchema(nil, nil),
 		Handler:       reflect.ValueOf(handler),
 		ParamDefaults: extractDefaults(paramsType),
-		HasHeader:     true,
+		HasHeader:     headerSchema != nil,
 		HeaderSchema:  headerSchema,
 	}
 }
