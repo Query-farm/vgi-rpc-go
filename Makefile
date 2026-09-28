@@ -39,10 +39,10 @@ VGI_RPC_SPEC ?= vgi-rpc[http,cli,external]>=0.20.0
 VGI_RPC_PYTHON_REPO ?= $(wildcard $(HOME)/Development/vgi-rpc-python)
 
 # Extras and pins mirror .github/workflows/ci.yml: the conformance extra
-# carries jsonschema for access-record validation, and httpx2 is pinned to the
-# last release whose zstd decoder actually decodes.
+# carries jsonschema for access-record validation, and httpx2 is pinned to a
+# release that satisfies the Python reference's security minimum.
 VGI_RPC_REF_EXTRAS := [http,cli,external,conformance]
-VGI_RPC_TEST_DEPS := pytest pytest-timeout httpx2==2.9.1
+VGI_RPC_TEST_DEPS := pytest pytest-timeout httpx2==2.13.1
 
 # Bootstrap only when PYTHON came from this file — never when the caller
 # supplied their own interpreter.
