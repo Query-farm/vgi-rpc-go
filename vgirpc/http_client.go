@@ -833,7 +833,7 @@ func (c *HttpClient) encodeRequestBody(body []byte) ([]byte, string, error) {
 		return body, "", nil
 	}
 	var buf bytes.Buffer
-	writer, err := newCompressWriter("zstd", &buf, c.compressionLevel)
+	writer, err := newCompressWriter("zstd", &buf, c.compressionLevel, int64(len(body)))
 	if err != nil {
 		return nil, "", fmt.Errorf("vgirpc: compress request body: %w", err)
 	}

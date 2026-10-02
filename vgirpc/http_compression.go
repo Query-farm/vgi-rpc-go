@@ -398,7 +398,7 @@ func (cw *compressResponseWriter) finish() {
 	}
 	cw.ResponseWriter.Header().Set(encodingHeader, cw.encoding)
 	cw.ResponseWriter.WriteHeader(cw.statusCode)
-	writer, err := newCompressWriter(cw.encoding, cw.ResponseWriter, cw.encoderLevel)
+	writer, err := newCompressWriter(cw.encoding, cw.ResponseWriter, cw.encoderLevel, int64(cw.buf.Len()))
 	if err != nil {
 		slog.Debug("http: codec writer init failed", "encoding", cw.encoding, "err", err)
 		return
@@ -515,7 +515,12 @@ func gzipLevelFor(zstdLevel int) int {
 // newCompressWriter checks out a streaming compressor for the chosen
 // encoding. Caller writes the buffered body into the returned WriteCloser
 // and must Close it to flush trailing bytes and release it back to the pool.
-func newCompressWriter(encoding string, w io.Writer, zstdLevel int) (io.WriteCloser, error) {
+// size is the uncompressed length when known (bodies are fully buffered), or
+// -1. A zstd frame then declares a window no larger than the body: without it
+// the encoder declares its default window (4-8 MiB), and a peer whose decoder
+// caps the window at its smaller response limit -- vgi-rpc-rust bounds it by
+// the advertised max response bytes -- refuses every body over one block.
+func newCompressWriter(encoding string, w io.Writer, zstdLevel int, size int64) (io.WriteCloser, error) {
 	var key codecPoolKey
 	switch encoding {
 	case "zstd":
@@ -534,7 +539,7 @@ func newCompressWriter(encoding string, w io.Writer, zstdLevel int) (io.WriteClo
 
 	switch enc := got.(type) {
 	case *zstd.Encoder:
-		enc.Reset(w)
+		enc.ResetContentSize(w, size)
 		return &pooledCodecWriter{WriteCloser: enc, pool: pool, resetNil: func() { enc.Reset(nil) }}, nil
 	case *gzip.Writer:
 		enc.Reset(w)

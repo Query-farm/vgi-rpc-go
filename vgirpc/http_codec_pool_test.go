@@ -77,7 +77,7 @@ func codecDestinationReference(t *testing.T, encoding string) weak.Pointer[codec
 	t.Helper()
 	destination := &codecDestination{}
 	reference := weak.Make(destination)
-	writer, e := newCompressWriter(encoding, destination, DefaultCompressionLevel)
+	writer, e := newCompressWriter(encoding, destination, DefaultCompressionLevel, -1)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -138,7 +138,7 @@ func TestCodecPoolConcurrentRoundTrip(t *testing.T) {
 				workers.Go(func() {
 					for range 10 {
 						var output bytes.Buffer
-						writer, e := newCompressWriter(encoding, &output, DefaultCompressionLevel)
+						writer, e := newCompressWriter(encoding, &output, DefaultCompressionLevel, -1)
 						if e != nil {
 							t.Error(e)
 							return
