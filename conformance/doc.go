@@ -9,7 +9,9 @@
 // client-directed logging, stream headers, and bidirectional exchange.
 //
 // The only entry point intended for external use is [RegisterMethods],
-// which registers all conformance methods on a [vgirpc.Server]. The
+// which registers all conformance methods on a [vgirpc.Server], plus
+// [SetExternalStorage], which hands a worker's external storage to the
+// published_string method. The
 // domain types [Status], [Point], [BoundingBox], [AllTypes], and
 // [ConformanceHeader] are exported because they serve as examples of
 // [vgirpc.ArrowSerializable] implementations.

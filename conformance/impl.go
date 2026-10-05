@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
@@ -24,6 +25,10 @@ type echoStringParams struct {
 }
 type echoBytesParams struct {
 	Data []byte `vgirpc:"data"`
+}
+type publishedStringParams struct {
+	Value         string `vgirpc:"value"`
+	IncludeSHA256 bool   `vgirpc:"include_sha256"`
 }
 type oversizedUnaryParams struct {
 	TargetBytes int64 `vgirpc:"target_bytes"`
@@ -187,6 +192,7 @@ func RegisterMethods(server *vgirpc.Server) {
 	vgirpc.Unary(server, "echo_string", echoString)
 	vgirpc.Unary(server, "echo_bytes", echoBytes)
 	vgirpc.Unary(server, "oversized_unary", oversizedUnary)
+	vgirpc.Unary(server, "published_string", publishedString)
 	vgirpc.Unary(server, "echo_int", echoInt)
 	vgirpc.Unary(server, "echo_float", echoFloat)
 	vgirpc.Unary(server, "echo_bool", echoBool)
@@ -498,6 +504,62 @@ func oversizedUnary(_ context.Context, ctx *vgirpc.CallContext, p oversizedUnary
 	}
 	return make([]byte, p.TargetBytes), nil
 }
+
+// publishedKey is the publish-once cache key for published_string.
+type publishedKey struct {
+	value         string
+	includeSHA256 bool
+}
+
+// published holds the worker's own external storage and compression, which
+// published_string publishes through, and the refs it has published.
+var published struct {
+	mu          sync.Mutex
+	storage     vgirpc.ExternalStorage
+	compression *vgirpc.Compression
+	refs        map[publishedKey]vgirpc.ExternalRef
+}
+
+// SetExternalStorage hands the worker's external storage backend and
+// configured compression to the published_string method. A worker that
+// configures external storage must call it alongside
+// [vgirpc.Server.SetExternalLocation]; without it published_string fails
+// with "published_string requires external storage". Passing a nil storage
+// clears it. The publish-once cache is reset either way.
+func SetExternalStorage(storage vgirpc.ExternalStorage, compression *vgirpc.Compression) {
+	published.mu.Lock()
+	defer published.mu.Unlock()
+	published.storage = storage
+	published.compression = compression
+	published.refs = nil
+}
+
+// publishedString answers with a cached, publish-once ExternalRef: the first
+// call for a (value, include_sha256) pair publishes {result: [value]} through
+// the worker's storage and compression; every call answers with that ref, so
+// the response is always a pointer batch whatever the threshold.
+func publishedString(_ context.Context, ctx *vgirpc.CallContext, p publishedStringParams) (string, error) {
+	published.mu.Lock()
+	defer published.mu.Unlock()
+	if published.storage == nil {
+		return "", &vgirpc.RpcError{Type: "RuntimeError", Message: "published_string requires external storage"}
+	}
+	key := publishedKey{value: p.Value, includeSHA256: p.IncludeSHA256}
+	ref, ok := published.refs[key]
+	if !ok {
+		var err error
+		ref, err = vgirpc.PublishExternalResult(p.Value, published.storage, published.compression, p.IncludeSHA256)
+		if err != nil {
+			return "", err
+		}
+		if published.refs == nil {
+			published.refs = make(map[publishedKey]vgirpc.ExternalRef)
+		}
+		published.refs[key] = ref
+	}
+	return "", ctx.RespondWithExternalRef(ref)
+}
+
 func echoInt(_ context.Context, ctx *vgirpc.CallContext, p echoIntParams) (int64, error) {
 	return p.Value, nil
 }

@@ -65,6 +65,9 @@ func main() {
   addresses, and relay-free operation flow through `IrohClientOptions`
 - **Raw Unix/TCP socket transports** (`Server.RunUnix` / `Server.RunTcp`) speaking the lean Arrow-IPC framing for co-located workers. `RunTcp` defaults to unencrypted loopback for compatibility; `RunTcpWithOptions` can require PROXY v2 and direct mTLS X.509-SVID evidence.
 - **ArrowSerializable** interface for complex nested types
+- **External storage** for large results, plus **pre-published results**: publish a
+  rarely-changing unary result once (`PublishExternal`) and answer later calls with
+  the same pointer (`CallContext.RespondWithExternalRef`)
 - **OpenTelemetry support** via optional `vgirpc/otel` module (tracing + metrics)
 
 ## API Overview
@@ -370,6 +373,46 @@ func handler(ctx context.Context, callCtx *vgirpc.CallContext, p MyParams) (stri
 ```
 
 Built-in auth factories: `BearerAuthenticate`, `BearerAuthenticateStatic`, `MtlsAuthenticate`, `MtlsAuthenticateFingerprint`, `MtlsAuthenticateSubject`, `MtlsAuthenticateXfcc`, `ChainAuthenticate`, and JWT via the `vgirpc/jwtauth` package. When no `SetAuthenticate` callback is registered, all requests receive `vgirpc.Anonymous()`. The stdio transport always uses `Anonymous()`. See [docs/authentication.md](docs/authentication.md) for full details.
+
+## Pre-published results (`ExternalRef`)
+
+With external storage configured (`Server.SetExternalLocation`), a result over
+the threshold is serialized, optionally zstd-compressed, uploaded, and replaced
+on the wire by a zero-row pointer batch carrying `vgi_rpc.location` (and
+`vgi_rpc.location.sha256`) -- on every call. A result that is large and changes
+rarely (a worker's whole catalog, say) can instead be **published once** and
+the same pointer handed back on later calls, with no serialization or upload:
+
+```go
+// Once, e.g. per catalog version. PublishExternalResult builds the 1-row
+// result batch the dispatcher would build for a string result, serializes it
+// exactly as the per-call externalizer does, hashes the raw bytes, compresses
+// with the given settings, and uploads it once. PublishExternal takes a
+// prebuilt arrow.RecordBatch instead.
+ref, err := vgirpc.PublishExternalResult(catalogJSON, storage, cfg.Compression, true)
+
+// Every call: answer with the ref instead of the value.
+vgirpc.Unary(server, "catalog", func(_ context.Context, call *vgirpc.CallContext, _ catalogParams) (string, error) {
+    return "", call.RespondWithExternalRef(ref)
+})
+```
+
+The dispatcher writes the ref's pointer batch directly, on every transport,
+whether or not the server has storage configured and regardless of the
+threshold (a ref is never inlined or sent through shared memory). It is not
+counted toward `SetMaxExternalizedResponseBytes`, since nothing is uploaded
+during the call. Clients need no change: they resolve it like any other
+pointer. Unary methods that return a value only -- on a void method or a stream
+`RespondWithExternalRef` returns an error. A handler error returned alongside
+it still wins.
+
+`vgirpc.NewExternalRef(url, sha256Hex)` builds a ref to an object published
+out of band; pass `""` (or `includeSHA256 = false` to `PublishExternal`) to omit
+`vgi_rpc.location.sha256`, which makes clients skip the content check. The
+caller owns caching the ref and the object's lifecycle: a long-lived ref must
+not point at an object under the short-TTL lifecycle rule used for per-call
+uploads, a pre-signed URL expires (re-sign or rebuild the ref), and a ref must
+only be returned to callers who are all entitled to the same content.
 
 ## Error Handling
 

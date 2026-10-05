@@ -155,6 +155,38 @@ type CallContext struct {
 | Method | Description |
 |---|---|
 | `ClientLog(level LogLevel, msg string, extras ...KV)` | Record a log message for the client |
+| `RespondWithExternalRef(ref ExternalRef) error` | Answer this unary call with a pre-published ref instead of the returned value (see [External Storage](#external-storage)) |
+
+## External Storage
+
+```go
+type ExternalStorage interface {
+    Upload(data []byte, schema *arrow.Schema, contentEncoding string) (string, error)
+}
+
+server.SetExternalLocation(vgirpc.DefaultExternalLocationConfig(storage))
+```
+
+### Pre-published results
+
+```go
+type ExternalRef struct { /* unexported: url, sha256 */ }
+
+func NewExternalRef(url, sha256Hex string) (ExternalRef, error)
+func PublishExternal(batch arrow.RecordBatch, storage ExternalStorage,
+    compression *Compression, includeSHA256 bool) (ExternalRef, error)
+func PublishExternalResult[R any](value R, storage ExternalStorage,
+    compression *Compression, includeSHA256 bool) (ExternalRef, error)
+```
+
+| Function / method | Description |
+|---|---|
+| `NewExternalRef(url, sha256Hex)` | Validated ref; `url` non-empty, `sha256Hex` 64 lowercase hex or `""` (no digest: clients skip the content check) |
+| `ExternalRef.URL()` / `SHA256()` | The ref's URL and digest (`""` when none) |
+| `ExternalRef.PointerBatch(schema)` | The zero-row pointer batch + metadata the dispatcher writes |
+| `PublishExternal(batch, ...)` | Serialize a 1-row result batch exactly as the per-call externalizer does, hash the raw bytes, compress, upload once, return the ref |
+| `PublishExternalResult(value, ...)` | `PublishExternal` for a Go value, building the result batch as `Unary` would for result type `R` |
+| `CallContext.RespondWithExternalRef(ref)` | Answer the current unary call with the ref's pointer batch: no build, serialization or upload; never inlined; not counted toward the externalized-response cap |
 
 ## RpcError
 

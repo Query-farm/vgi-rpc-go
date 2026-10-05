@@ -187,6 +187,8 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		Implementation:         h.server.implementation,
 		ResponseLimitBytes:     responseBudgetFromContext(r.Context()).Limit,
 		PreferredResponseBytes: responseBudgetFromContext(r.Context()).Preferred,
+		// A ref can only answer a unary call that returns a value.
+		externalRefAllowed: info.ResultType != nil,
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
@@ -270,6 +272,29 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		// deserialization, unknown method, unsupported encoding) keep
 		// their 4xx statuses; they go through writeHttpError above.
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
+		return
+	}
+
+	// A pre-published ref: write its pointer batch as-is. No result batch to
+	// build or validate and nothing to upload, so the externalized-response
+	// pre-flight and the forced-externalization rescue do not apply; the wire
+	// body budget still sees the (tiny) pointer.
+	if callCtx.externalRef != nil {
+		pointer := externalRefResultBatch(info.ResultSchema, callCtx.externalRef)
+		defer pointer.Release()
+		stats.RecordOutput(pointer.NumRows(), batchBufferSize(pointer))
+		if err := WriteUnaryResponse(&buf, info.ResultSchema, logs, pointer, h.server.serverID, req.RequestID); err != nil {
+			h.logIPCWriteErr("unary-response", info.Name, err)
+			handlerErr = err
+		}
+		budget := responseBudgetFromContext(r.Context())
+		if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), 0,
+			budget.Limit, h.maxExternalizedResponseBytes); capErr != nil {
+			handlerErr = capErr
+			h.writeUnaryCapError(w, info, req.RequestID, nil, capErr)
+			return
+		}
+		h.writeArrow(w, http.StatusOK, buf.Bytes())
 		return
 	}
 

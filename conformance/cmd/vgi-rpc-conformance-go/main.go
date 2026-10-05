@@ -367,6 +367,8 @@ func main() {
 				cfg.Compression = &vgirpc.Compression{Algorithm: "zstd", Level: 3}
 			}
 			server.SetExternalLocation(cfg)
+			// published_string publishes through the worker's own storage + compression.
+			conformance.SetExternalStorage(fakeStorage, cfg.Compression)
 		}
 		if strictMode && strictFakeStorageURL != "" {
 			fakeStorage = conformance.NewFakeStorage(strictFakeStorageURL)
@@ -377,6 +379,7 @@ func main() {
 				cfg.ExternalizeThresholdBytes = externalizeThreshold
 			}
 			server.SetExternalLocation(cfg)
+			conformance.SetExternalStorage(fakeStorage, cfg.Compression)
 		}
 
 		var otelFile *os.File
@@ -786,7 +789,8 @@ func configureByteStreamStorage(server *vgirpc.Server) {
 	if storageURL == "" {
 		return
 	}
-	cfg := vgirpc.DefaultExternalLocationConfig(conformance.NewFakeStorage(storageURL))
+	storage := conformance.NewFakeStorage(storageURL)
+	cfg := vgirpc.DefaultExternalLocationConfig(storage)
 	cfg.URLValidator = conformance.AllowAllValidator
 	// One byte by default, per the comment above. An explicit
 	// --externalize-threshold still wins: accepting a flag and ignoring it is
@@ -802,4 +806,6 @@ func configureByteStreamStorage(server *vgirpc.Server) {
 		cfg.ExternalizeThresholdBytes = v
 	}
 	server.SetExternalLocation(cfg)
+	// published_string publishes through the worker's own storage + compression.
+	conformance.SetExternalStorage(storage, cfg.Compression)
 }

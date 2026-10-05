@@ -81,6 +81,12 @@ type CallContext struct {
 	logs              []LogMessage
 	responseCookies   []CookieSpec
 	cookieSinkEnabled bool
+	// externalRef is the pre-published ref the handler answered with via
+	// RespondWithExternalRef; nil when it returned its value normally.
+	externalRef *ExternalRef
+	// externalRefAllowed is set by the unary dispatchers for methods that
+	// return a value -- the only calls a ref can answer.
+	externalRefAllowed bool
 }
 
 // ClientLog records a log message that will be sent to the client.

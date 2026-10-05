@@ -44,6 +44,8 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 		TransportMetadata: req.Metadata,
 		Kind:              s.TransportKind(),
 		Implementation:    s.implementation,
+		// A ref can only answer a unary call that returns a value.
+		externalRefAllowed: info.ResultType != nil,
 	}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace // default: allow all, client filters
@@ -98,6 +100,18 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 		s.logIPCWriteErr("error-batch", req.Method, writeErrorBatch(ipcW, info.ResultSchema, callErr, s.serverID, req.RequestID, s.debugErrors))
 		s.logIPCWriteErr("close", req.Method, ipcW.Close())
 		return callErr, nil
+	}
+
+	// A pre-published ref: write its pointer batch as-is. Nothing to build,
+	// validate, serialize or upload, and never inline or through shared
+	// memory -- a ref always travels as a pointer.
+	if callCtx.externalRef != nil {
+		pointer := externalRefResultBatch(info.ResultSchema, callCtx.externalRef)
+		defer pointer.Release()
+		if stats != nil {
+			stats.RecordOutput(pointer.NumRows(), batchBufferSize(pointer))
+		}
+		return nil, WriteUnaryResponse(w, info.ResultSchema, logs, pointer, s.serverID, req.RequestID)
 	}
 
 	// Handle void result

@@ -339,20 +339,47 @@ func externalizeBatchCtxMode(
 	}
 	rawBytes := int64(len(ipcData))
 
-	// Compute SHA-256 of raw IPC bytes (before compression)
+	locationURL, sha256Hex, err := uploadIPCBytes(ctx, ipcData, batch.Schema(), config.Storage, config.Compression)
+	if err != nil {
+		return batch, meta, 0, err
+	}
+
+	// Create pointer batch with SHA-256 checksum
+	pointerBatch, pointerMeta := MakeExternalLocationBatch(batch.Schema(), locationURL, sha256Hex)
+	return pointerBatch, pointerMeta, rawBytes, nil
+}
+
+// uploadIPCBytes hashes, optionally compresses, and uploads one complete
+// serialized IPC stream, returning the storage URL and the lowercase hex
+// SHA-256 of the raw (pre-compression) bytes.
+//
+// It is the single choke point shared by every server-side upload -- the
+// per-call externalizer above and [PublishExternal] -- so the bytes a pointer
+// names are always produced the same way: same digest, same codec handling,
+// same contentEncoding handed to [ExternalStorage.Upload]. Mirrors the
+// reference's _upload_ipc_bytes.
+func uploadIPCBytes(
+	ctx context.Context,
+	ipcData []byte,
+	schema *arrow.Schema,
+	storage ExternalStorage,
+	compression *Compression,
+) (string, string, error) {
+	// SHA-256 of the raw IPC bytes (before compression), for end-to-end
+	// verification by the resolver.
 	hash := sha256.Sum256(ipcData)
 	sha256Hex := hex.EncodeToString(hash[:])
 
 	// Optionally compress
 	contentEncoding := ""
-	if config.Compression != nil && config.Compression.Algorithm == "zstd" {
+	if compression != nil && compression.Algorithm == "zstd" {
 		level := zstd.SpeedDefault
-		if config.Compression.Level > 0 {
-			level = zstd.EncoderLevel(config.Compression.Level)
+		if compression.Level > 0 {
+			level = zstd.EncoderLevel(compression.Level)
 		}
 		encoder, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(level))
 		if err != nil {
-			return batch, meta, 0, fmt.Errorf("creating zstd encoder: %w", err)
+			return "", "", fmt.Errorf("creating zstd encoder: %w", err)
 		}
 		ipcData = encoder.EncodeAll(ipcData, nil)
 		encoder.Close()
@@ -362,20 +389,16 @@ func externalizeBatchCtxMode(
 	// Counted here rather than at the call sites: this is the one function
 	// every externalised payload passes through, so the total cannot drift
 	// from reality when someone adds a new upload path. Externalised bytes
-	// never appear in the HTTP body — only a pointer batch does — so they
+	// never appear in the HTTP body -- only a pointer batch does -- so they
 	// are invisible to transport-level accounting and are frequently the
 	// largest of the three byte figures.
 	countExternalizedBytes(ctx, int64(len(ipcData)))
 
-	// Upload
-	locationURL, err := config.Storage.Upload(ipcData, batch.Schema(), contentEncoding)
+	locationURL, err := storage.Upload(ipcData, schema, contentEncoding)
 	if err != nil {
-		return batch, meta, 0, fmt.Errorf("uploading to external storage: %w", err)
+		return "", "", fmt.Errorf("uploading to external storage: %w", err)
 	}
-
-	// Create pointer batch with SHA-256 checksum
-	pointerBatch, pointerMeta := MakeExternalLocationBatch(batch.Schema(), locationURL, sha256Hex)
-	return pointerBatch, pointerMeta, rawBytes, nil
+	return locationURL, sha256Hex, nil
 }
 
 // ---------------------------------------------------------------------------
