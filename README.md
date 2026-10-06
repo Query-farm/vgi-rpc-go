@@ -444,6 +444,31 @@ Use `errors.Is(err, vgirpc.ErrRpc)` to check whether any error in a chain is an 
 | `VersionError` | Protocol version mismatch |
 | `SerializationError` | Failed to serialize result |
 
+## Hosting several protocols
+
+A server hosts its primary protocol plus any number of additional application
+protocols, fixed when it is built and the same on every transport. Define one
+the way you define the primary, then add it:
+
+```go
+reports := vgirpc.NewProtocol("acme.Reports.v1")
+vgirpc.Unary(reports, "status", reportStatus)
+
+server := vgirpc.NewServer()
+server.SetServiceName("acme.App.v1")
+// ... register the primary's methods ...
+if err := server.AddProtocol(reports); err != nil {
+	log.Fatal(err)
+}
+```
+
+Requests route on the pair (protocol, method), so method names may repeat
+across protocols, and each protocol is versioned and hashed on its own.
+`vgi_rpc.Reflection.v1` lists application protocols in registration order, the
+primary first. A name under the reserved `vgi_rpc.` prefix, a repeated name, and
+a call after the server has started serving are refused. There is no API for
+hosting part of a protocol: a capability that may be absent is its own protocol.
+
 ## Introspection
 
 Introspection is `vgi_rpc.Reflection.v1`, a protocol co-hosted alongside the

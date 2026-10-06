@@ -33,6 +33,7 @@ func(ctx context.Context, callCtx *CallContext, params P) (*StreamResult, error)
 
 ```go
 func NewServer() *Server
+func NewProtocol(name string) *Server // an additional protocol, for Server.AddProtocol
 ```
 
 | Method | Description |
@@ -41,6 +42,8 @@ func NewServer() *Server
 | `SetServiceName(name string)` | Set a logical service name used by observability hooks |
 | `ServiceName() string` | Returns the logical service name |
 | `SetDispatchHook(hook DispatchHook)` | Register a hook called around each RPC dispatch |
+| `AddProtocol(protocol *Server) error` | Host an additional application protocol (built with `NewProtocol`) on every transport; call before serving; refused once the server has served |
+| `SetIncludeTracebacks(enabled bool)` | Tracebacks are on by default on every transport; `false` turns them off server-wide |
 | `RunStdio()` | Run the server loop on stdin/stdout |
 | `Serve(r io.Reader, w io.Writer)` | Run the server on any reader/writer pair |
 | `ServeWithContext(ctx context.Context, r io.Reader, w io.Writer)` | Run the server with a context for cancellation |
@@ -196,6 +199,9 @@ type RpcError struct {
     Message   string
     Traceback string
     RequestID string
+    Kind      string           // vgi_rpc.error_kind, "" when absent
+    Code      string           // vgi_rpc.error_code, "" when the server sent none
+    Details   []map[string]any // vgi_rpc.error_details as received
 }
 ```
 
@@ -203,6 +209,13 @@ type RpcError struct {
 |---|---|
 | `Error() string` | Returns error string |
 | `Is(target error) bool` | Supports `errors.Is` |
+| `ErrorCode() Code` | The code; `CodeUnknown` when absent or unrecognised |
+| `IsRetryable() bool` | `UNAVAILABLE`, or `RESOURCE_EXHAUSTED` with `RetryInfo` |
+| `TypedDetails() []ErrorDetail` | Catalog details, unknown types skipped |
+| `RetryInfo()`, `ErrorInfo()`, `BadRequest()`, `PreconditionFailure()`, `QuotaFailure()`, `ResourceInfo()`, `Help()`, `LocalizedMessage()` | One catalog detail and whether it was present |
+
+Servers raise `*StatusError{Code, Kind, Message, Details}`; see the
+[error handling guide](guide/errors.md).
 
 **Sentinel:** `ErrRpc` — use with `errors.Is(err, vgirpc.ErrRpc)`
 
@@ -331,6 +344,9 @@ const (
 | `MetaLogMessage` | `vgi_rpc.log_message` |
 | `MetaLogExtra` | `vgi_rpc.log_extra` |
 | `MetaServerID` | `vgi_rpc.server_id` |
+| `MetaErrorCode` | `vgi_rpc.error_code` |
+| `MetaErrorKind` | `vgi_rpc.error_kind` |
+| `MetaErrorDetails` | `vgi_rpc.error_details` |
 | `MetaStreamState` | `vgi_rpc.stream_state#b64` |
 | `MetaShmOffset` | `vgi_rpc.shm_offset` |
 | `MetaShmLength` | `vgi_rpc.shm_length` |

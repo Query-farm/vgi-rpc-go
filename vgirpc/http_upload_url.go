@@ -144,7 +144,7 @@ func (h *HttpServer) handleUploadURLInit(w http.ResponseWriter, r *http.Request)
 	if capErr := enforceResponseBudgets(UploadURLMethod, int64(buf.Len()), 0, budget.Limit, 0); capErr != nil {
 		buf.Reset()
 		h.logIPCWriteErr("upload-url-cap-error", UploadURLMethod,
-			writeErrorResponse(&buf, UploadURLResponseSchema, capErr, h.server.serverID, "", h.server.debugErrors))
+			writeErrorResponse(&buf, UploadURLResponseSchema, capErr, h.server.serverID, "", h.server.tracebacks()))
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return
 	}

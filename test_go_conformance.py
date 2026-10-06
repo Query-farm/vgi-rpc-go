@@ -1101,6 +1101,107 @@ def conformance_conn(
     return factory
 
 
+@pytest.fixture(scope="session")
+def conformance_protocol_connector(
+    request: pytest.FixtureRequest,
+    go_transport: SubprocessTransport,
+) -> Callable[..., contextlib.AbstractContextManager[Any]]:
+    """Bind a proxy to *any* protocol on the worker a ``conformance_conn`` transport reaches.
+
+    The runner contract in the reference's ``MULTI_PROTOCOL_HOSTING.md`` §4:
+    ``connector(transport, protocol, on_log=None)``, where *transport* is the
+    ``conformance_conn`` parameter id and the proxy talks to the SAME worker
+    that transport reaches, routing on *protocol*'s wire name -- which is what
+    lets one test hold a primary and a ``conformance.Secondary.v1`` proxy and
+    see one method name resolve to two bindings.
+
+    Under ``ROLE=client`` the proxy is the Go client, through a driver bound to
+    *protocol*; the driver's ``connect`` op already carries the routing key.
+    """
+
+    def _target(transport: str) -> tuple[str, Any]:
+        if transport == "http":
+            return "http", f"http://127.0.0.1:{request.getfixturevalue('go_http_port')}"
+        if transport == "http_externalize_always":
+            port = request.getfixturevalue("conformance_http_externalize_always_port")
+            return "http", f"http://127.0.0.1:{port}"
+        if transport == "unix":
+            return "unix", request.getfixturevalue("go_unix_path")
+        if transport == "tcp":
+            host, port = request.getfixturevalue("go_tcp_addr")
+            return "tcp", f"{host}:{port}"
+        raise AssertionError(f"transport {transport!r} has no client in this port")
+
+    def connect(
+        transport: str,
+        protocol: type,
+        on_log: Callable[[Message], None] | None = None,
+    ) -> contextlib.AbstractContextManager[Any]:
+        if ROLE == "client":
+            from vgi_rpc.conformance.client_driver import ClientDriver
+            from vgi_rpc.external import ExternalLocationConfig
+
+            from go_client_proxy import DRIVER
+
+            kind, target = _target(transport)
+            external = (
+                ExternalLocationConfig(url_validator=None) if transport == "http_externalize_always" else None
+            )
+
+            @contextlib.contextmanager
+            def _driven() -> Iterator[Any]:
+                proxy = ClientDriver(DRIVER.command, service=protocol, env=DRIVER.env, cwd=DRIVER.cwd).connect(
+                    kind, target, on_log, external_config=external
+                )
+                try:
+                    yield proxy
+                finally:
+                    proxy.close()
+
+            return _driven()
+        if transport in ("pipe", "shm"):
+            # A fresh stdio worker: a pipe can only reach a worker it spawns.
+
+            @contextlib.contextmanager
+            def _pipe() -> Iterator[_RpcProxy]:
+                pipe = SubprocessTransport(_pipe_worker_cmd())
+                try:
+                    yield _RpcProxy(protocol, pipe, on_log)
+                finally:
+                    pipe.close()
+
+            return _pipe()
+        if transport == "subprocess":
+
+            @contextlib.contextmanager
+            def _shared() -> Iterator[_RpcProxy]:
+                yield _RpcProxy(protocol, go_transport, on_log)
+
+            return _shared()
+        if transport == "unix":
+            return unix_connect(protocol, request.getfixturevalue("go_unix_path"), on_log=on_log)
+        if transport == "tcp":
+            host, port = request.getfixturevalue("go_tcp_addr")
+            return tcp_connect(protocol, host, port, on_log=on_log)
+        if transport == "http_externalize_always":
+            from vgi_rpc.external import ExternalLocationConfig
+
+            port = request.getfixturevalue("conformance_http_externalize_always_port")
+            return http_connect(
+                protocol,
+                f"http://127.0.0.1:{port}",
+                on_log=on_log,
+                external_location=ExternalLocationConfig(url_validator=None),
+            )
+        if transport == "http":
+            return http_connect(
+                protocol, f"http://127.0.0.1:{request.getfixturevalue('go_http_port')}", on_log=on_log
+            )
+        raise ValueError(f"no conformance transport named {transport!r}")
+
+    return connect
+
+
 @pytest.fixture(params=_ALL_RAW_TRANSPORTS)
 def conformance_raw_conn(
     request: pytest.FixtureRequest,

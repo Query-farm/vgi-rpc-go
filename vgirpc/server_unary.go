@@ -21,7 +21,7 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 	params, err := deserializeParams(req.Batch, info.ParamsType)
 	if err != nil {
 		handlerErr = &RpcError{Type: "TypeError", Message: fmt.Sprintf("parameter deserialization: %v", err)}
-		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID, s.debugErrors))
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID, s.tracebacks()))
 		return handlerErr, nil
 	}
 
@@ -97,7 +97,7 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 		for _, logMsg := range logs {
 			s.logIPCWriteErr("log-batch", req.Method, writeLogBatch(ipcW, info.ResultSchema, logMsg, s.serverID, req.RequestID))
 		}
-		s.logIPCWriteErr("error-batch", req.Method, writeErrorBatch(ipcW, info.ResultSchema, callErr, s.serverID, req.RequestID, s.debugErrors))
+		s.logIPCWriteErr("error-batch", req.Method, writeErrorBatch(ipcW, info.ResultSchema, callErr, s.serverID, req.RequestID, s.tracebacks()))
 		s.logIPCWriteErr("close", req.Method, ipcW.Close())
 		return callErr, nil
 	}
@@ -123,7 +123,7 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 	resultBatch, err := serializeResult(info.ResultSchema, resultVal.Interface())
 	if err != nil {
 		handlerErr = &RpcError{Type: "SerializationError", Message: fmt.Sprintf("result serialization: %v", err)}
-		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID, s.debugErrors))
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, info.ResultSchema, handlerErr, s.serverID, req.RequestID, s.tracebacks()))
 		return handlerErr, nil
 	}
 	// Use a closure so the final owner is released. A deferred method call

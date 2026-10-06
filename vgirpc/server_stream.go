@@ -24,7 +24,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			Message: fmt.Sprintf("parameter deserialization: %v", err),
 		}
 		emptySchema := arrow.NewSchema(nil, nil)
-		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, emptySchema, handlerErr, s.serverID, req.RequestID, s.debugErrors))
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, emptySchema, handlerErr, s.serverID, req.RequestID, s.tracebacks()))
 		return handlerErr, nil
 	}
 
@@ -82,7 +82,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		if outputSchema == nil {
 			outputSchema = arrow.NewSchema(nil, nil)
 		}
-		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, callErr, s.serverID, req.RequestID, s.debugErrors))
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, callErr, s.serverID, req.RequestID, s.tracebacks()))
 
 		// Drain the client's input (ticks / exchange batches).
 		// The client writes before reading, so this won't deadlock.
@@ -95,7 +95,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		if outputSchema == nil {
 			outputSchema = arrow.NewSchema(nil, nil)
 		}
-		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, callErr, s.serverID, req.RequestID, s.debugErrors))
+		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, callErr, s.serverID, req.RequestID, s.tracebacks()))
 		drainInputStream(r)
 		return callErr, nil
 	}
@@ -116,7 +116,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 				Type:    "RuntimeError",
 				Message: fmt.Sprintf("dynamic stream state %T does not implement ProducerState or ExchangeState", state),
 			}
-			s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
+			s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.tracebacks()))
 			drainInputStream(r)
 			return stateErr, nil
 		}
@@ -128,7 +128,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					Type:    "RuntimeError",
 					Message: fmt.Sprintf("stream state %T does not implement ProducerState", state),
 				}
-				s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
+				s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.tracebacks()))
 				drainInputStream(r)
 				return stateErr, nil
 			}
@@ -138,7 +138,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					Type:    "RuntimeError",
 					Message: fmt.Sprintf("stream state %T does not implement ExchangeState", state),
 				}
-				s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.debugErrors))
+				s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, outputSchema, stateErr, s.serverID, req.RequestID, s.tracebacks()))
 				drainInputStream(r)
 				return stateErr, nil
 			}
@@ -207,7 +207,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			streamErr = networkSharedMemoryError()
 			transportErr = streamErr
 			s.logIPCWriteErr("stream-network-shm-error", req.Method,
-				writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.debugErrors))
+				writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.tracebacks()))
 			break
 		}
 		// inputReader owns its current record until Next. Resolution and casting
@@ -275,7 +275,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					Message: fmt.Sprintf("shm resolve failed: %v", rerr),
 				}
 				s.logIPCWriteErr("stream-shm-resolve-error", req.Method,
-					writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.debugErrors))
+					writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.tracebacks()))
 				break
 			}
 			inputBatch = resolved
@@ -299,7 +299,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 					Message: fmt.Sprintf("external input resolve failed: %v", resolveErr),
 				}
 				s.logIPCWriteErr("stream-external-resolve-error", req.Method,
-					writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.debugErrors))
+					writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.tracebacks()))
 				releaseInput()
 				break
 			} else if resolvedBatch != inputBatch {
@@ -323,7 +323,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			castBatch, castErr := castRecordBatch(inputBatch, inputSchema)
 			if castErr != nil {
 				streamErr = castErr
-				s.logIPCWriteErr("cast-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, castErr, s.serverID, req.RequestID, s.debugErrors))
+				s.logIPCWriteErr("cast-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, castErr, s.serverID, req.RequestID, s.tracebacks()))
 				releaseInput()
 				break
 			}
@@ -400,7 +400,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		}()
 
 		if streamErr != nil {
-			s.logIPCWriteErr("stream-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.debugErrors))
+			s.logIPCWriteErr("stream-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, streamErr, s.serverID, req.RequestID, s.tracebacks()))
 			out.releaseBatches()
 			releaseInput()
 			break
@@ -410,7 +410,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 		// by ignoring the second Emit error and then ending the stream.
 		if err := out.validate(); err != nil {
 			streamErr = err
-			s.logIPCWriteErr("validate-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, err, s.serverID, req.RequestID, s.debugErrors))
+			s.logIPCWriteErr("validate-error-batch", req.Method, writeErrorBatch(outputWriter, outputSchema, err, s.serverID, req.RequestID, s.tracebacks()))
 			out.releaseBatches()
 			releaseInput()
 			break

@@ -1362,6 +1362,8 @@ func stripClientControlMetadata(metadata map[string]string) {
 		MetaShmSource,
 		MetaServerID,
 		MetaErrorKind,
+		MetaErrorCode,
+		MetaErrorDetails,
 		MetaLogMessage,
 		MetaLogExtra,
 	} {
@@ -1369,22 +1371,59 @@ func stripClientControlMetadata(metadata map[string]string) {
 	}
 }
 
+// rpcErrorFromMetadata decodes an EXCEPTION batch into the client's error.
+//
+// The one decode point every client path funnels through -- HTTP unary,
+// stream init and exchange, raw unix/TCP, and an externalized error batch --
+// which is why the error model is read here and nowhere else. Each of the three
+// layers comes from its top-level key first and from the log_extra mirror when
+// the key is absent; absent from both, code and kind are "" and details empty.
+// The code is relayed verbatim: "" (the server sent none) and "UNKNOWN" are
+// different answers. Nothing here retries.
 func rpcErrorFromMetadata(metadata map[string]string) *RpcError {
 	err := &RpcError{
 		Type:      "Exception",
 		Message:   metadata[MetaLogMessage],
 		RequestID: metadata[MetaRequestID],
-		Kind:      metadata[MetaErrorKind],
 	}
 	var extra struct {
-		ExceptionType string `json:"exception_type"`
-		Traceback     string `json:"traceback"`
+		ExceptionType string            `json:"exception_type"`
+		Traceback     string            `json:"traceback"`
+		ErrorCode     any               `json:"error_code"`
+		ErrorKind     any               `json:"error_kind"`
+		ErrorDetails  []json.RawMessage `json:"error_details"`
 	}
-	if json.Unmarshal([]byte(metadata[MetaLogExtra]), &extra) == nil {
-		if extra.ExceptionType != "" {
-			err.Type = extra.ExceptionType
+	extraOK := json.Unmarshal([]byte(metadata[MetaLogExtra]), &extra) == nil
+	if !extraOK {
+		// A malformed mirror (say, error_details not an array) must not cost
+		// the fields that did decode.
+		var loose map[string]json.RawMessage
+		if json.Unmarshal([]byte(metadata[MetaLogExtra]), &loose) == nil {
+			_ = json.Unmarshal(loose["exception_type"], &extra.ExceptionType)
+			_ = json.Unmarshal(loose["traceback"], &extra.Traceback)
+			_ = json.Unmarshal(loose["error_code"], &extra.ErrorCode)
+			_ = json.Unmarshal(loose["error_kind"], &extra.ErrorKind)
 		}
-		err.Traceback = extra.Traceback
+	}
+	if extra.ExceptionType != "" {
+		err.Type = extra.ExceptionType
+	}
+	err.Traceback = extra.Traceback
+
+	if code, ok := metadata[MetaErrorCode]; ok {
+		err.Code = code
+	} else if code, ok := extra.ErrorCode.(string); ok {
+		err.Code = code
+	}
+	if kind, ok := metadata[MetaErrorKind]; ok {
+		err.Kind = kind
+	} else if kind, ok := extra.ErrorKind.(string); ok {
+		err.Kind = kind
+	}
+	if raw, ok := metadata[MetaErrorDetails]; ok {
+		err.Details = decodeErrorDetails(raw)
+	} else {
+		err.Details = objectElements(extra.ErrorDetails)
 	}
 	return err
 }

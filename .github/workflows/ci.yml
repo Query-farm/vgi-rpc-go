@@ -262,6 +262,16 @@ jobs:
         # cache, so the budget is generous rather than tight.
         run: timeout 900 ./scripts/cross-port-check.sh
 
+      # A listing sorted by name passes every port-suite test, because
+      # ConformanceService sorts before conformance.Secondary.v1 in ASCII. The
+      # reference requires each port to run its hosted-protocols group against a
+      # worker registered in an order no sort produces (MULTI_PROTOCOL_HOSTING.md
+      # §4), on stdio, unix and HTTP.
+      - name: Hosted-protocols group, registration order no sort produces
+        env:
+          PYTHON: python
+        run: timeout 300 ./scripts/hosted-reverse.sh
+
       - name: Merge coverage profiles
         run: go tool covdata textfmt -i=_covdata -o=coverage-go.txt
 

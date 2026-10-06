@@ -225,23 +225,38 @@ func (d *driver) drainLogs() []any {
 
 // errorJSON renders a call error for the ok:true channel.
 //
-// error_type is asserted verbatim by tests, so a peer's class name is relayed
+// error_type, error_code, error_kind and error_details are asserted verbatim
+// by tests; error_type so a peer's class name is relayed
 // as-is and never translated into a Go type name. A failure the client library
 // raised itself -- a refused connection, a capped body -- is still a call
 // error, not a driver failure, and gets TransportError.
 func errorJSON(err error) map[string]any {
 	var rpcErr *vgirpc.RpcError
 	if errors.As(err, &rpcErr) {
+		// The error model comes from the client library's own error object,
+		// never from re-reading the batch, and is relayed verbatim: a missing
+		// code stays "" rather than defaulting to UNKNOWN, because "the server
+		// sent none" and "the server sent UNKNOWN" are different answers.
+		details := make([]any, 0, len(rpcErr.Details))
+		for _, d := range rpcErr.Details {
+			details = append(details, d)
+		}
 		return map[string]any{
 			"error_type":    rpcErr.Type,
 			"error_message": rpcErr.Message,
 			"traceback":     rpcErr.Traceback,
+			"error_code":    rpcErr.Code,
+			"error_kind":    rpcErr.Kind,
+			"error_details": details,
 		}
 	}
 	return map[string]any{
 		"error_type":    "TransportError",
 		"error_message": err.Error(),
 		"traceback":     "",
+		"error_code":    "",
+		"error_kind":    "",
+		"error_details": []any{},
 	}
 }
 

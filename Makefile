@@ -55,7 +55,7 @@ endif
 .PHONY: build lint go-test test coverage leakcheck race docs docs-verify venv clean \
 	conformance-worker conformance-worker-cover benchmark-worker \
 	ci staticcheck-install conformance-runner conformance-access-log cross-port \
-	conformance-client-driver test-client test-client-python
+	conformance-client-driver test-client test-client-python hosted-reverse
 
 # --- Build -----------------------------------------------------------------
 
@@ -245,6 +245,16 @@ ci: build staticcheck-install $(PYTHON_BOOTSTRAP)
 	$(MAKE) conformance-runner
 	$(MAKE) conformance-access-log
 	$(MAKE) cross-port
+	$(MAKE) hosted-reverse
+
+# --- Registration order ------------------------------------------------------
+# The reference's hosted-protocols group against `conformance-worker
+# --hosted-reverse`, whose protocols are registered in an order no sort
+# produces. The only check that sees a listing sorted by name; see
+# scripts/hosted-reverse.sh.
+
+hosted-reverse: conformance-worker $(PYTHON_BOOTSTRAP)
+	PYTHON="$(PYTHON)" $(CURDIR)/scripts/hosted-reverse.sh
 
 # --- Coverage --------------------------------------------------------------
 

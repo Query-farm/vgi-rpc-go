@@ -234,11 +234,18 @@ func writeStateTokenBatch(w *ipc.Writer, schema *arrow.Schema, token []byte, cal
 }
 
 // writeErrorBatch writes a zero-row batch with EXCEPTION-level metadata.
-func writeErrorBatch(w *ipc.Writer, schema *arrow.Schema, err error, serverID, requestID string, debug bool) error {
-	extraJSON := buildErrorExtra(err, debug)
+//
+// Carries the error model (WIRE_PROTOCOL.md §8): vgi_rpc.error_code always,
+// vgi_rpc.error_kind when the error declares one, vgi_rpc.error_details when it
+// declares any that pass the catalog rules and fit the 4 KiB cap -- all three
+// mirrored in log_extra. includeTraceback decides whether log_extra carries the
+// stack trace; see [Server.SetIncludeTracebacks].
+func writeErrorBatch(w *ipc.Writer, schema *arrow.Schema, err error, serverID, requestID string, includeTraceback bool) error {
+	model := errorModelOf(err)
+	extraJSON := buildErrorExtra(err, model, includeTraceback)
 
-	keys := []string{MetaLogLevel, MetaLogMessage, MetaLogExtra}
-	vals := []string{string(LogException), err.Error(), extraJSON}
+	keys := []string{MetaLogLevel, MetaLogMessage, MetaLogExtra, MetaErrorCode}
+	vals := []string{string(LogException), err.Error(), extraJSON, string(model.code)}
 
 	if serverID != "" {
 		keys = append(keys, MetaServerID)
@@ -248,11 +255,13 @@ func writeErrorBatch(w *ipc.Writer, schema *arrow.Schema, err error, serverID, r
 		keys = append(keys, MetaRequestID)
 		vals = append(vals, requestID)
 	}
-	if carrier, ok := err.(errorKindCarrier); ok {
-		if kind := carrier.ErrorKind(); kind != "" {
-			keys = append(keys, MetaErrorKind)
-			vals = append(vals, kind)
-		}
+	if model.kind != "" {
+		keys = append(keys, MetaErrorKind)
+		vals = append(vals, model.kind)
+	}
+	if model.details != nil {
+		keys = append(keys, MetaErrorDetails)
+		vals = append(vals, string(model.details))
 	}
 
 	meta := arrow.NewMetadata(keys, vals)

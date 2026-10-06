@@ -107,9 +107,17 @@ type Server struct {
 	// extraBindings holds protocols beyond the primary. The primary's methods
 	// stay in `methods` so every existing registration path is untouched; it is
 	// projected into a binding on demand by bindings().
-	extraBindings  map[string]*protocolBinding
-	dispatchHook   DispatchHook
-	debugErrors    bool
+	extraBindings map[string]*protocolBinding
+	// extraOrder is extraBindings' keys in registration order, which is the
+	// order reflection lists application protocols in (WIRE_PROTOCOL.md §3.1).
+	extraOrder   []string
+	dispatchHook DispatchHook
+	// omitTracebacks is the operator's switch turning tracebacks off on every
+	// transport; false (the default) includes them everywhere.
+	omitTracebacks bool
+	// sealed is set when the server first serves anything, on any transport;
+	// from then on the hosted protocol set is fixed (WIRE_PROTOCOL.md §3.1).
+	sealed         atomic.Bool
 	externalConfig *ExternalLocationConfig
 	implementation any
 
@@ -224,6 +232,9 @@ func (s *Server) TransportCapabilities() map[string]bool {
 // transient hook failure leaves transportKind unset and the next request
 // re-fires the hook rather than silently skipping it.
 func (s *Server) notifyTransport(kind TransportKind, capabilities map[string]bool) error {
+	// Seal before anything else -- including a serve-start hook that refuses
+	// the binding -- so "the server has started serving" is never undone.
+	s.sealed.Store(true)
 	// Serialize the check/hook/commit transaction. The state mutex cannot be
 	// held while the hook runs because hooks may inspect TransportKind(), which
 	// also takes that mutex. Without this separate gate, concurrent first HTTP
@@ -334,6 +345,7 @@ func gateVersion(
 ) *ProtocolVersionError {
 	if !present {
 		return &ProtocolVersionError{
+			Protocol: protocolName,
 			Message: "VGI client/worker protocol_version mismatch for protocol " + protocolName + ".\n" +
 				"  Client: <not declared>\n" +
 				"  Server: " + serverVersion + "\n" +
@@ -351,6 +363,7 @@ func gateVersion(
 	major, minor, _, err := parseSemver(clientVersion)
 	if err != nil {
 		return &ProtocolVersionError{
+			Protocol: protocolName,
 			Message: "VGI client/worker protocol_version mismatch for protocol " + protocolName + ".\n" +
 				"  Client: " + clientVersion + "\n" +
 				"  Server: " + serverVersion + "\n" +
@@ -371,6 +384,7 @@ func gateVersion(
 			"supporting protocol_version " + clientVersion + "."
 	}
 	return &ProtocolVersionError{
+		Protocol: protocolName,
 		Message: "VGI client/worker protocol_version mismatch for protocol " + protocolName + ".\n" +
 			"  Client: " + clientVersion + "\n" +
 			"  Server: " + serverVersion + "\n" +
@@ -378,13 +392,28 @@ func gateVersion(
 	}
 }
 
-// SetDebugErrors controls whether error responses include full stack traces
-// with file paths and function names. When false (the default), error responses
-// contain only the error type and message. Enable this for development or
-// internal services; disable it for public-facing deployments to avoid leaking
-// implementation details.
+// SetIncludeTracebacks decides whether EXCEPTION batches carry the remote
+// stack trace (log_extra traceback and frames).
+//
+// On by default, on every transport (WIRE_PROTOCOL.md §8): the DuckDB extension
+// puts the remote traceback into the error its user sees, and omitting it hid
+// chained causes. An operator who does not want stack traces to leave the
+// process turns them off here, for the whole server -- every transport it
+// answers on, never per transport. The exception type, message, code, kind and
+// details are sent either way.
+func (s *Server) SetIncludeTracebacks(enabled bool) {
+	s.omitTracebacks = !enabled
+}
+
+// SetDebugErrors is [Server.SetIncludeTracebacks] under its older name.
 func (s *Server) SetDebugErrors(enabled bool) {
-	s.debugErrors = enabled
+	s.SetIncludeTracebacks(enabled)
+}
+
+// tracebacks reports whether errors carry the traceback: always, unless the
+// operator turned them off.
+func (s *Server) tracebacks() bool {
+	return !s.omitTracebacks
 }
 
 // drainInputStream reads and discards any batches remaining on the input

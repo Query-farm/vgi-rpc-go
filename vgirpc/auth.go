@@ -92,6 +92,14 @@ func (e *AuthUnavailableError) Error() string {
 	return e.Detail
 }
 
+// ErrorCode returns UNAVAILABLE.
+func (e *AuthUnavailableError) ErrorCode() Code { return CodeUnavailable }
+
+// ErrorDetails returns the retry hint as RetryInfo.
+func (e *AuthUnavailableError) ErrorDetails() []ErrorDetail {
+	return []ErrorDetail{RetryInfo{RetryDelaySeconds: float64(e.retryAfterSeconds())}}
+}
+
 // retryAfterSeconds returns the advertised Retry-After, defaulted.
 func (e *AuthUnavailableError) retryAfterSeconds() int {
 	if e.RetryAfter > 0 {

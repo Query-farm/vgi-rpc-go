@@ -258,7 +258,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		for _, logMsg := range logs {
 			h.logIPCWriteErr("log-batch", info.Name, writeLogBatch(ipcW, info.ResultSchema, logMsg, h.server.serverID, req.RequestID))
 		}
-		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(ipcW, info.ResultSchema, callErr, h.server.serverID, req.RequestID, h.server.debugErrors))
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(ipcW, info.ResultSchema, callErr, h.server.serverID, req.RequestID, h.server.tracebacks()))
 		h.logIPCWriteErr("close", info.Name, ipcW.Close())
 		// The call reached the method and the method failed, so the
 		// failure is an application result, not a malformed request: it
@@ -405,7 +405,7 @@ func (h *HttpServer) writeUnaryCapError(w http.ResponseWriter, info *methodInfo,
 	for _, logMsg := range logs {
 		h.logIPCWriteErr("log-batch", info.Name, writeLogBatch(ipcW, info.ResultSchema, logMsg, h.server.serverID, requestID))
 	}
-	h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(ipcW, info.ResultSchema, capErr, h.server.serverID, requestID, h.server.debugErrors))
+	h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(ipcW, info.ResultSchema, capErr, h.server.serverID, requestID, h.server.tracebacks()))
 	h.logIPCWriteErr("close", info.Name, ipcW.Close())
 	h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 }

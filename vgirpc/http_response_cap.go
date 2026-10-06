@@ -96,6 +96,10 @@ type responseCapError struct{ msg string }
 func (e *responseCapError) Error() string     { return e.msg }
 func (e *responseCapError) ErrorType() string { return "ResponseTooLargeError" }
 
+// ErrorCode is RESOURCE_EXHAUSTED with no RetryInfo, so not retryable: the same
+// call against the same limits fails again.
+func (e *responseCapError) ErrorCode() Code { return CodeResourceExhausted }
+
 func newResponseCapError(method string, projected, capBytes int64) *responseCapError {
 	return &responseCapError{msg: fmt.Sprintf(
 		"HTTP body exceeds max_response_bytes (%d > %d) for method %q",

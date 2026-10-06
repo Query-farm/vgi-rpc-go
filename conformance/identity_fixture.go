@@ -98,6 +98,12 @@ const (
 	// reached: unknowable rather than unknown. A caller may negative-cache the
 	// second and must not cache the first.
 	identityTokenUnavailable = "conformance-unavailable-token"
+	// identityTokenAuthUnavailable makes the resolver return the TRANSPORT-AUTH
+	// unavailable error (*vgirpc.AuthUnavailableError), not the identity one,
+	// with a 7-second hint. The framework must translate it to
+	// identity_unavailable carrying RetryInfo 7; translating here would make
+	// the test pass while the rule stays unimplemented.
+	identityTokenAuthUnavailable = "conformance-auth-unavailable-token"
 	// identityTokenZeroTTL resolves with ttl_seconds = 0. A resolver naming
 	// zero is saying DO NOT CACHE THIS, and the tempting normalisation of <= 0
 	// up to the 300 default silently converts that into five minutes of
@@ -141,6 +147,15 @@ const (
 	// identityMinimalPurpose mints a grant built WITHOUT grant_id, so the
 	// field's documented default ("") is observable. Omitted, not passed as "".
 	identityMinimalPurpose = "conformance-minimal"
+	// identityAuthUnavailablePurpose makes the minter return the transport-auth
+	// unavailable error with a 7-second hint: the translation rule covers both
+	// hooks.
+	identityAuthUnavailablePurpose = "conformance-auth-unavailable"
+	// identityAuthUnavailableRetry is deliberately no port's default, so a
+	// port that translates but substitutes its own hint is caught.
+	identityAuthUnavailableRetry = 7
+	// identityUnavailableRetry is pinned rather than left to the default.
+	identityUnavailableRetry = 5
 )
 
 // IdentityAuthenticate derives the caller's identity from the two conformance
@@ -179,7 +194,13 @@ func IdentityAuthenticate(r *http.Request) (*vgirpc.AuthContext, error) {
 func IdentityResolveToken(credential string) (vgirpc.TokenIdentity, bool, error) {
 	switch credential {
 	case identityTokenUnavailable:
-		return vgirpc.TokenIdentity{}, false, vgirpc.NewIdentityUnavailable("conformance: mapping store unreachable")
+		return vgirpc.TokenIdentity{}, false, &vgirpc.IdentityUnavailableError{
+			Detail: "conformance: mapping store unreachable", RetryAfter: identityUnavailableRetry,
+		}
+	case identityTokenAuthUnavailable:
+		return vgirpc.TokenIdentity{}, false, &vgirpc.AuthUnavailableError{
+			Detail: "conformance: authority unreachable", RetryAfter: identityAuthUnavailableRetry,
+		}
 	case identityTokenUnknown:
 		return vgirpc.TokenIdentity{}, false, nil
 	case identityTokenZeroTTL:
@@ -216,6 +237,11 @@ func IdentityResolveToken(credential string) (vgirpc.TokenIdentity, bool, error)
 // unassertable.
 func IdentityMintGrant(principal, purpose string, scopes []string, ttlSeconds int64) (vgirpc.IssuedGrant, error) {
 	_ = ttlSeconds
+	if purpose == identityAuthUnavailablePurpose {
+		return vgirpc.IssuedGrant{}, &vgirpc.AuthUnavailableError{
+			Detail: "conformance: grant store unreachable", RetryAfter: identityAuthUnavailableRetry,
+		}
+	}
 	if purpose == identityRefusedPurpose {
 		return vgirpc.IssuedGrant{}, &vgirpc.GrantRefusedError{Detail: "conformance: this purpose is refused"}
 	}

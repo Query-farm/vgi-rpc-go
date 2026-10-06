@@ -218,13 +218,11 @@ func TestHTTPStreamTurnsAllNameTheOwningProtocol(t *testing.T) {
 		func(context.Context, *CallContext, struct{}) (*StreamResult, error) {
 			return &StreamResult{OutputSchema: nsCountSchema, InputSchema: nsCountSchema, State: &nsCountState{Remaining: 4}}, nil
 		})
-	hash, err := bindingHash("other.App.v1", sub.methods)
-	if err != nil {
+	if err := s.AddProtocol(sub); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddProtocol(&protocolBinding{
-		Name: "other.App.v1", Methods: sub.methods, Hash: hash, Impl: sub,
-	}, false); err != nil {
+	hash, err := bindingHash("other.App.v1", sub.methods)
+	if err != nil {
 		t.Fatal(err)
 	}
 

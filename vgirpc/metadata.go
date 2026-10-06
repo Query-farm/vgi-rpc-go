@@ -88,11 +88,17 @@ const (
 	// MetaLocationSHA256 carries a hex-encoded SHA-256 checksum of the raw
 	// (pre-compression) IPC bytes for integrity verification.
 	MetaLocationSHA256 = "vgi_rpc.location.sha256"
-	// MetaErrorKind carries a stable, machine-readable tag for the error
-	// category (e.g. "MethodNotImplementedError") so callers can match
-	// without substring-searching the human-readable message. Optional —
-	// absent for unclassified errors.
+	// MetaErrorKind carries the error's reason: a stable, machine-readable
+	// token (e.g. "method_not_implemented") so callers can match without
+	// substring-searching the human-readable message. Optional — absent for
+	// unclassified errors.
 	MetaErrorKind = "vgi_rpc.error_kind"
+	// MetaErrorCode carries the canonical code's name (e.g. "UNAVAILABLE") on
+	// every EXCEPTION batch -- "UNKNOWN" when unclassified. WIRE_PROTOCOL.md §8.
+	MetaErrorCode = "vgi_rpc.error_code"
+	// MetaErrorDetails carries a JSON array of typed details from the fixed
+	// catalog (vgi_rpc.RetryInfo, ...), at most 4 KiB, omitted whole when over.
+	MetaErrorDetails = "vgi_rpc.error_details"
 	// MetaProtocolVersion carries the application protocol surface version
 	// declared by the Protocol class on every request batch. Format:
 	// canonical semver MAJOR.MINOR.PATCH (see [semverRegex]). The server

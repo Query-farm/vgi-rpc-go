@@ -92,6 +92,11 @@ func rejectAll(r *http.Request) (*vgirpc.AuthContext, error) {
 	return nil, &vgirpc.RpcError{Type: "ValueError", Message: "auth required"}
 }
 
+// ping answers "pong"; the --hosted-reverse protocols need some method.
+func ping(context.Context, *vgirpc.CallContext, struct{}) (string, error) {
+	return "pong", nil
+}
+
 func main() {
 	defer func() {
 		if s := vgirpc.LeakCheckSummary(); s != "" {
@@ -99,11 +104,22 @@ func main() {
 		}
 	}()
 
+	// No SetIncludeTracebacks: the shared suite asserts the default
+	// (WIRE_PROTOCOL.md §8) -- tracebacks on every transport -- so the worker
+	// must not override it.
 	server := vgirpc.NewServer()
-	server.SetDebugErrors(true)
 	transportKindProbe := hasFlag(os.Args, "--transport-kind-probe")
+	// --hosted-reverse registers zeta.Primary.v1, conformance.Secondary.v1 and
+	// alpha.Extra.v1 in that order, which no sort produces. ConformanceService
+	// sorts before conformance.Secondary.v1 in ASCII, so the main worker cannot
+	// show a listing sorted by name instead of kept in registration order; the
+	// reference's hosted-protocols group pointed at this one can
+	// (MULTI_PROTOCOL_HOSTING.md §4, `make hosted-reverse`).
+	hostedReverse := hasFlag(os.Args, "--hosted-reverse")
 	if transportKindProbe {
 		server.SetServiceName("TransportKindProbe")
+	} else if hostedReverse {
+		server.SetServiceName("zeta.Primary.v1")
 	} else {
 		server.SetServiceName("ConformanceService")
 	}
@@ -121,9 +137,25 @@ func main() {
 	// request metadata key) — see ci.yml.
 	if transportKindProbe {
 		vgirpc.Unary(server, "report_transport_kind", reportTransportKind)
+	} else if hostedReverse {
+		vgirpc.Unary(server, "ping", ping)
+		alpha := vgirpc.NewProtocol("alpha.Extra.v1")
+		vgirpc.Unary(alpha, "ping", ping)
+		for _, p := range []*vgirpc.Server{conformance.NewSecondary(), alpha} {
+			if err := server.AddProtocol(p); err != nil {
+				fmt.Fprintf(os.Stderr, "hosting %s: %v\n", p.ServiceName(), err)
+				os.Exit(1)
+			}
+		}
 	} else {
 		server.SetProtocolVersion("2.0.0")
 		conformance.RegisterMethods(server)
+		// conformance.Secondary.v1, through the public hosting API rather than
+		// special-cased, so the API is what the shared suite exercises.
+		if err := server.AddProtocol(conformance.NewSecondary()); err != nil {
+			fmt.Fprintf(os.Stderr, "hosting %s: %v\n", conformance.SecondaryProtocolName, err)
+			os.Exit(1)
+		}
 	}
 
 	// Introspection is vgi_rpc.Reflection.v1, an ordinary co-hosted protocol,

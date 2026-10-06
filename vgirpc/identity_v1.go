@@ -6,6 +6,7 @@ package vgirpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -138,6 +139,9 @@ func (e *IntrospectionRefusedError) Error() string {
 // ErrorKind returns the stable machine-readable category.
 func (e *IntrospectionRefusedError) ErrorKind() string { return "introspection_refused" }
 
+// ErrorCode returns the canonical code this kind names (WIRE_PROTOCOL.md §16).
+func (e *IntrospectionRefusedError) ErrorCode() Code { return CodePermissionDenied }
+
 // ErrorType is the wire-stable exception class name, matching the reference
 // port so a cross-language client sees one name for one condition.
 func (e *IntrospectionRefusedError) ErrorType() string { return "IntrospectionRefusedError" }
@@ -160,6 +164,9 @@ func (e *TokenUnresolvedError) Error() string {
 
 // ErrorKind returns the stable machine-readable category.
 func (e *TokenUnresolvedError) ErrorKind() string { return "token_unresolved" }
+
+// ErrorCode returns the canonical code this kind names (WIRE_PROTOCOL.md §16).
+func (e *TokenUnresolvedError) ErrorCode() Code { return CodeNotFound }
 
 // ErrorType is the wire-stable exception class name.
 func (e *TokenUnresolvedError) ErrorType() string { return "TokenUnresolvedError" }
@@ -184,6 +191,9 @@ func (e *StaleAuthError) Error() string {
 // ErrorKind returns the stable machine-readable category.
 func (e *StaleAuthError) ErrorKind() string { return "stale_auth" }
 
+// ErrorCode returns the canonical code this kind names (WIRE_PROTOCOL.md §16).
+func (e *StaleAuthError) ErrorCode() Code { return CodeUnauthenticated }
+
 // ErrorType is the wire-stable exception class name.
 func (e *StaleAuthError) ErrorType() string { return "StaleAuthError" }
 
@@ -203,6 +213,9 @@ func (e *GrantRefusedError) Error() string {
 
 // ErrorKind returns the stable machine-readable category.
 func (e *GrantRefusedError) ErrorKind() string { return "grant_refused" }
+
+// ErrorCode returns the canonical code this kind names (WIRE_PROTOCOL.md §16).
+func (e *GrantRefusedError) ErrorCode() Code { return CodePermissionDenied }
 
 // ErrorType is the wire-stable exception class name.
 func (e *GrantRefusedError) ErrorType() string { return "GrantRefusedError" }
@@ -243,6 +256,9 @@ func (e *IdentityUnavailableError) Error() string {
 // ErrorKind returns the stable machine-readable category.
 func (e *IdentityUnavailableError) ErrorKind() string { return "identity_unavailable" }
 
+// ErrorCode returns the canonical code this kind names (WIRE_PROTOCOL.md §16).
+func (e *IdentityUnavailableError) ErrorCode() Code { return CodeUnavailable }
+
 // ErrorType is the wire-stable exception class name.
 func (e *IdentityUnavailableError) ErrorType() string { return "IdentityUnavailableError" }
 
@@ -252,6 +268,38 @@ func (e *IdentityUnavailableError) RetryAfterSeconds() int {
 		return e.RetryAfter
 	}
 	return defaultIdentityRetryAfter
+}
+
+// ErrorDetails returns the retry hint as RetryInfo, which this kind MUST carry
+// (WIRE_PROTOCOL.md §16). RetryAfter sat on this type in every port and reached
+// the wire in none, so a caller could tell the failure was transient but not
+// when to ask again.
+func (e *IdentityUnavailableError) ErrorDetails() []ErrorDetail {
+	return []ErrorDetail{RetryInfo{RetryDelaySeconds: float64(e.RetryAfterSeconds())}}
+}
+
+// identityUnavailableFrom translates the transport-auth "could not find out"
+// error raised by a resolve_token or mint_grant hook into identity_unavailable,
+// keeping its retry hint (WIRE_PROTOCOL.md §16).
+//
+// A hook usually calls the same backing store an authenticator does, so it
+// returns what an authenticator returns when that store is down: an
+// [*AuthUnavailableError]. Passed through, that reaches the wire with no kind,
+// and a caller can no longer tell an outage from a refusal -- the one
+// distinction this protocol's kinds exist to carry. The hint is kept, not
+// replaced with a default, because the store that is down is the one that
+// knows how long. Found with errors.As, so a wrapped one is translated too.
+// Any other error is returned unchanged.
+func identityUnavailableFrom(err error) error {
+	var authErr *AuthUnavailableError
+	if !errors.As(err, &authErr) {
+		return err
+	}
+	detail := authErr.Detail
+	if detail == "" {
+		detail = "identity lookup unavailable"
+	}
+	return &IdentityUnavailableError{Detail: detail, RetryAfter: authErr.retryAfterSeconds()}
 }
 
 // ---------------------------------------------------------------------------
@@ -588,9 +636,10 @@ func (i *IdentityImpl) IntrospectToken(token string, ctx *CallContext) (TokenIde
 
 	identity, ok, err := i.resolveToken(token)
 	if err != nil {
-		// "I could not find out" is not "it is bad". Propagated as-is so the
-		// transient/definitive distinction survives to the caller.
-		return TokenIdentity{}, err
+		// "I could not find out" is not "it is bad". Propagated so the
+		// transient/definitive distinction survives to the caller -- with the
+		// transport-auth unavailable error translated to identity_unavailable.
+		return TokenIdentity{}, identityUnavailableFrom(err)
 	}
 	if !ok {
 		// Uniform with malformed and expired: reporting which would confirm
@@ -620,7 +669,11 @@ func (i *IdentityImpl) IssueGrant(purpose string, scopes []string, ttlSeconds in
 	if _, err := CheckFreshness(auth, i.maxAuthAge); err != nil {
 		return IssuedGrant{}, err
 	}
-	return i.mintGrant(auth.Principal, purpose, scopes, ttlSeconds)
+	grant, err := i.mintGrant(auth.Principal, purpose, scopes, ttlSeconds)
+	if err != nil {
+		return IssuedGrant{}, identityUnavailableFrom(err)
+	}
+	return grant, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -671,7 +724,7 @@ func RegisterIdentity(s *Server, impl *IdentityImpl) error {
 	// Not version-exempt, unlike reflection: identity is not the protocol a
 	// version-mismatched client calls to learn what mismatched, so it has no
 	// claim on being reachable across a version gap.
-	return s.AddProtocol(&protocolBinding{
+	return s.addBinding(&protocolBinding{
 		Name:    IdentityProtocolName,
 		Methods: sub.methods,
 		Hash:    hash,

@@ -184,6 +184,12 @@ func (h *AccessLogHook) OnDispatchEnd(ctx context.Context, token HookToken, info
 	if errMsg != "" {
 		record["error_message"] = errMsg
 	}
+	if err != nil {
+		// The code is what an operator alerts on ("page on UNAVAILABLE"), so
+		// every error record carries it -- UNKNOWN when unclassified -- and no
+		// success record does.
+		record["error_code"] = string(ErrorCodeOf(err))
+	}
 	if h.serverVersion != "" {
 		record["server_version"] = h.serverVersion
 	}

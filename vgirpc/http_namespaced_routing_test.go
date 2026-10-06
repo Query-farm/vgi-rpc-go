@@ -354,8 +354,8 @@ func TestUnknownProtocolIs404AndDistinctFromUnknownMethod(t *testing.T) {
 	}
 	// Same status, different kind -- which is the whole point: a client probing
 	// for an optional method reads the kind, not the status line.
-	if kind := nsErrorKind(t, rec.Body.Bytes()); kind != "MethodNotImplementedError" {
-		t.Fatalf("unknown method error_kind = %q, want MethodNotImplementedError", kind)
+	if kind := nsErrorKind(t, rec.Body.Bytes()); kind != "method_not_implemented" {
+		t.Fatalf("unknown method error_kind = %q, want method_not_implemented", kind)
 	}
 }
 
@@ -392,8 +392,8 @@ func TestReservedRoutesStayFlatAndAreNotACatchAll(t *testing.T) {
 		t.Fatalf("%s status = %d, want 404 -- it is retired: %s",
 			retiredDescribeMethod, rec.Code, rec.Body.String())
 	}
-	if kind := nsErrorKind(t, rec.Body.Bytes()); kind != "MethodNotImplementedError" {
-		t.Fatalf("error_kind = %q, want MethodNotImplementedError", kind)
+	if kind := nsErrorKind(t, rec.Body.Bytes()); kind != "method_not_implemented" {
+		t.Fatalf("error_kind = %q, want method_not_implemented", kind)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/echo", bytes.NewReader(describeBody))
@@ -469,7 +469,7 @@ func TestCrossProtocolContinuationIsRejectedAsAnInvalidToken(t *testing.T) {
 		func(context.Context, *CallContext, struct{}) (*StreamResult, error) {
 			return &StreamResult{OutputSchema: nsCountSchema, InputSchema: nsCountSchema, State: &nsCountState{Remaining: 4}}, nil
 		})
-	if err := s.AddProtocol(&protocolBinding{Name: "other.App.v1", Methods: sub.methods, Impl: sub}, false); err != nil {
+	if err := s.AddProtocol(sub); err != nil {
 		t.Fatal(err)
 	}
 	h := NewHttpServer(s)

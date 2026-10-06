@@ -185,13 +185,16 @@ func RegisterReflection(s *Server) error {
 		return err
 	}
 	binding.Hash = hash
-	return s.AddProtocol(binding, true)
+	return s.addBinding(binding, true)
 }
 
 // listProtocols answers the cheap question: what is here, and has it changed.
 func (s *Server) listProtocols() ProtocolListDesc {
 	all := s.bindings()
-	names := sortedKeys(all)
+	// Registration order, primary first (WIRE_PROTOCOL.md §3.1): a client's
+	// "describe this server" takes the first non-reserved protocol, so the
+	// order is contract, not presentation.
+	names := s.orderedBindingNames()
 	out := ProtocolListDesc{
 		ServerID:       s.serverID,
 		RequestVersion: ProtocolVersion,
@@ -203,7 +206,10 @@ func (s *Server) listProtocols() ProtocolListDesc {
 			Protocol:        b.Name,
 			ProtocolVersion: b.Version,
 			ProtocolHash:    b.Hash,
-			Features:        []string{},
+			// Reserved, and emitted empty in this version (WIRE_PROTOCOL.md
+			// §14): the protocol is the unit of optionality, so a capability
+			// that may be absent is its own protocol rather than a token here.
+			Features: []string{},
 		})
 	}
 	return out

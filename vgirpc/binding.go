@@ -108,6 +108,9 @@ func (e *ProtocolNotSpecifiedError) Error() string {
 // ErrorKind returns the stable machine-readable category.
 func (e *ProtocolNotSpecifiedError) ErrorKind() string { return "protocol_not_specified" }
 
+// ErrorCode returns INVALID_ARGUMENT.
+func (e *ProtocolNotSpecifiedError) ErrorCode() Code { return CodeInvalidArgument }
+
 // ProtocolNotSupportedError reports a protocol this server does not host.
 //
 // Also the answer for an incompatible major version, since the major is part of
@@ -128,6 +131,9 @@ func (e *ProtocolNotSupportedError) Error() string {
 
 // ErrorKind returns the stable machine-readable category.
 func (e *ProtocolNotSupportedError) ErrorKind() string { return "protocol_not_supported" }
+
+// ErrorCode returns UNIMPLEMENTED, gRPC's answer for an unhosted service too.
+func (e *ProtocolNotSupportedError) ErrorCode() Code { return CodeUnimplemented }
 
 // bindings returns every protocol this server hosts, primary first.
 //
@@ -192,11 +198,81 @@ func (s *Server) primaryProtocolName() string {
 	return "Service"
 }
 
-// AddProtocol hosts an additional protocol alongside the primary.
+// NewProtocol starts the definition of an application protocol named name, to
+// be hosted beside a server's primary with [Server.AddProtocol].
 //
-// allowReserved is for the framework's own protocols only; an application
-// passing true would be able to shadow reflection.
-func (s *Server) AddProtocol(b *protocolBinding, allowReserved bool) error {
+// A protocol is defined exactly the way a server's primary is: register its
+// methods on the returned value with [Unary], [UnaryVoid], [Producer],
+// [Exchange] and friends, and declare a version with
+// [Server.SetProtocolVersion] if it has one. The handlers are the
+// implementation, so the definition is the (protocol, implementation) pair.
+func NewProtocol(name string) *Server {
+	p := NewServer()
+	p.SetServiceName(name)
+	return p
+}
+
+// AddProtocol hosts protocol -- built with [NewProtocol] (or [NewServer] and
+// [Server.SetServiceName]) and its methods registered -- as an additional
+// application protocol beside s's primary (WIRE_PROTOCOL.md §3.1).
+//
+// Call it while building the server, before it serves anything: the hosted
+// set is fixed for the server's lifetime, so reflection output and every
+// protocol_hash stay stable for the process, and it is the same set on every
+// transport s is served on. The set is sealed when s first serves -- the first
+// request over HTTP, the start of a raw serve loop -- and a call after that
+// returns an error.
+//
+// Refused, too: a name that claims the reserved "vgi_rpc." prefix -- however
+// it was derived; an unnamed protocol is "Service", and is checked like any
+// other -- a name already hosted (the name is the routing key), and a
+// protocol that itself hosts extra protocols. Application protocols are
+// listed by vgi_rpc.Reflection.v1 in registration order, the primary first.
+//
+// Each protocol is versioned, gated and hashed on its own: a client of
+// protocol carries protocol's version, not the primary's.
+func (s *Server) AddProtocol(protocol *Server) error {
+	if protocol == nil {
+		return fmt.Errorf("vgirpc: AddProtocol requires a protocol built with NewProtocol")
+	}
+	if protocol == s {
+		return fmt.Errorf("vgirpc: a server cannot host itself as an additional protocol")
+	}
+	if len(protocol.extraBindings) > 0 {
+		return fmt.Errorf(
+			"vgirpc: protocol %q hosts protocols of its own; register each one on the serving server instead",
+			protocol.primaryProtocolName())
+	}
+	name := protocol.primaryProtocolName()
+	hash, err := bindingHash(name, protocol.methods)
+	if err != nil {
+		return err
+	}
+	impl := protocol.implementation
+	if impl == nil {
+		impl = protocol
+	}
+	return s.addBinding(&protocolBinding{
+		Name:         name,
+		Methods:      protocol.methods,
+		Version:      protocol.protocolVersion,
+		VersionParts: protocol.protocolVersionParts,
+		VersionSet:   protocol.protocolVersionSet,
+		Hash:         hash,
+		Impl:         impl,
+	}, false)
+}
+
+// addBinding hosts a binding beside the primary.
+//
+// allowReserved is for the framework's own protocols only (reflection,
+// identity); an application able to pass true could shadow reflection.
+func (s *Server) addBinding(b *protocolBinding, allowReserved bool) error {
+	if s.sealed.Load() {
+		return fmt.Errorf(
+			"vgirpc: cannot host protocol %q: the server is already serving, and the hosted set is fixed for its lifetime",
+			b.Name)
+	}
 	if err := ValidateProtocolName(b.Name, allowReserved); err != nil {
 		return err
 	}
@@ -216,7 +292,16 @@ func (s *Server) AddProtocol(b *protocolBinding, allowReserved bool) error {
 		)
 	}
 	s.extraBindings[b.Name] = b
+	s.extraOrder = append(s.extraOrder, b.Name)
 	return nil
+}
+
+// orderedBindingNames returns the hosted protocol names in registration order,
+// the primary first -- the order list_protocols reports.
+func (s *Server) orderedBindingNames() []string {
+	out := make([]string, 0, 1+len(s.extraOrder))
+	out = append(out, s.primaryProtocolName())
+	return append(out, s.extraOrder...)
 }
 
 // resolve maps one request's (protocol, method) pair to a method.
