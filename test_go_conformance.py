@@ -457,6 +457,19 @@ def conformance_http_identity_introspect_only_port() -> Iterator[int]:
 
 
 @pytest.fixture(scope="session")
+def conformance_http_grant_port() -> Iterator[int]:
+    """The sealed-grant worker (IDENTITY_CONFORMANCE_FIXTURE.md §10).
+
+    The fixture resolver and grant keys with no mint hook, so the framework
+    mints sealed grants and accepts them back as bearers, plus
+    ``conformance.Whoami.v1`` to read back how a bearer was authenticated.
+    Backs ``TestSealedGrants``, ``TestSealedGrantRejections``,
+    ``TestGrantPrefixRouting`` and ``TestResolveTokenBearer``.
+    """
+    yield from _start_http_worker("--http", "--identity", "grants")
+
+
+@pytest.fixture(scope="session")
 def conformance_http_cold_call_cache_port() -> Iterator[int]:
     """Start a Go HTTP server with the call-state cache disabled.
 

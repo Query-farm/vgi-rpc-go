@@ -4,6 +4,8 @@
 package conformance
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"time"
@@ -168,6 +170,12 @@ const (
 func IdentityAuthenticate(r *http.Request) (*vgirpc.AuthContext, error) {
 	principal := r.Header.Get(IdentityPrincipalHeader)
 	if principal == "" {
+		if r.Header.Get("Authorization") != "" {
+			// A bearer: not ours. Fall through to the identity bearer
+			// authenticators the HttpServer appends (sealed grants, then
+			// resolve_token) -- IDENTITY_CONFORMANCE_FIXTURE.md §10.
+			return nil, &vgirpc.RpcError{Type: "ValueError", Message: "no conformance principal header"}
+		}
 		// Not "anonymous but authenticated": the group tests fail-closed
 		// behaviour by omitting the header, and /health and the capability
 		// probe run before anything authenticates.
@@ -268,6 +276,11 @@ const (
 	IdentityModeOff IdentityMode = "off"
 	// IdentityModeBoth configures the resolve hook and the mint hook.
 	IdentityModeBoth IdentityMode = "both"
+	// IdentityModeGrants configures the resolve hook and the fixture's
+	// sealed-grant keys with NO mint hook, so the framework mints and accepts
+	// its own grants; the worker also hosts conformance.Whoami.v1
+	// (IDENTITY_CONFORMANCE_FIXTURE.md §10).
+	IdentityModeGrants IdentityMode = "grants"
 	// IdentityModeIntrospectOnly configures the resolve hook alone, so
 	// issue_grant is absent rather than hosted-and-refusing -- and the
 	// protocol hash narrows with it.
@@ -287,8 +300,77 @@ func IdentityConfigFor(mode IdentityMode) (vgirpc.IdentityConfig, bool) {
 		cfg.MintGrant = IdentityMintGrant
 	case IdentityModeIntrospectOnly:
 		cfg.ResolveToken = IdentityResolveToken
+	case IdentityModeGrants:
+		cfg.ResolveToken = IdentityResolveToken
+		cfg.GrantKeys = ConformanceGrantKeys()
 	default:
 		return vgirpc.IdentityConfig{}, false
 	}
 	return cfg, true
+}
+
+// The grant worker's sealed-grant keys (IDENTITY_CONFORMANCE_FIXTURE.md §10).
+// Published on purpose -- the suite mints with them to test this port's
+// verifier and decodes this port's grants to test its minter. Never use them
+// anywhere else.
+const (
+	// IdentityGrantAudience is bound into every fixture grant.
+	IdentityGrantAudience = "conformance"
+	// IdentityGrantMaxTTL caps a fixture grant's lifetime, in seconds.
+	IdentityGrantMaxTTL = 3600
+)
+
+func fixtureKey(start byte) []byte {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = start + byte(i)
+	}
+	return k
+}
+
+// ConformanceGrantKeys returns the grant worker's configuration: the current
+// key (0x10..0x2f) mints, it and the previous key (0x30..0x4f) verify.
+func ConformanceGrantKeys() *vgirpc.GrantKeys {
+	keys, err := vgirpc.NewGrantKeys([][]byte{fixtureKey(0x10), fixtureKey(0x30)}, IdentityGrantAudience, IdentityGrantMaxTTL)
+	if err != nil {
+		panic(err)
+	}
+	return keys
+}
+
+// WhoamiProtocolName is the probe protocol the grant worker hosts.
+const WhoamiProtocolName = "conformance.Whoami.v1"
+
+// WhoamiProtocolHash is its pinned canonical digest.
+const WhoamiProtocolHash = "a280333ba72432020e162cab388a78355969a30aa74f0665ad9d2932d7a10b8f"
+
+// NewWhoami builds conformance.Whoami.v1: whoami() returns the caller's
+// AuthContext as compact JSON with sorted keys,
+// {"authenticated","claims","domain","principal"}, so a test can read back how
+// a bearer was authenticated.
+func NewWhoami() *vgirpc.Server {
+	p := vgirpc.NewProtocol(WhoamiProtocolName)
+	vgirpc.Unary(p, "whoami", func(_ context.Context, cc *vgirpc.CallContext, _ struct{}) (string, error) {
+		auth := vgirpc.Anonymous()
+		if cc != nil && cc.Auth != nil {
+			auth = cc.Auth
+		}
+		claims := auth.Claims
+		if claims == nil {
+			claims = map[string]any{}
+		}
+		// encoding/json sorts map keys and the struct is declared in sorted
+		// order, so the output is the canonical compact form.
+		out, err := json.Marshal(struct {
+			Authenticated bool           `json:"authenticated"`
+			Claims        map[string]any `json:"claims"`
+			Domain        string         `json:"domain"`
+			Principal     string         `json:"principal"`
+		}{auth.Authenticated, claims, auth.Domain, auth.Principal})
+		if err != nil {
+			return "", err
+		}
+		return string(out), nil
+	})
+	return p
 }

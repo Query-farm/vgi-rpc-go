@@ -94,6 +94,14 @@ type HttpServer struct {
 	rehydrateFunc    RehydrateFunc    // called after unpacking state tokens
 	authenticateFunc AuthenticateFunc // optional auth callback; nil = anonymous
 
+	// identityBearerOff opts out of composing the identity bearer
+	// authenticators (SetIdentityBearer). identityAuth is the composed
+	// authenticator, built once, on InitIdentityBearer or the first request.
+	identityBearerOff bool
+	identityAuthOnce  sync.Once
+	identityAuth      AuthenticateFunc
+	identityAuthErr   error
+
 	// OAuth Protected Resource Metadata (RFC 9728)
 	oauthMetadata     *OAuthResourceMetadata
 	oauthMetadataJSON []byte // pre-rendered JSON
@@ -666,6 +674,45 @@ func (h *HttpServer) SetAuthenticate(fn AuthenticateFunc) {
 	h.authenticateFunc = fn
 }
 
+// SetIdentityBearer turns the automatic acceptance of identity credentials
+// as bearers on (the default) or off.
+//
+// When the server hosts vgi_rpc.Identity.v1 with grant keys or a resolve_token
+// hook, the HTTP server appends [GrantAuthenticate] and
+// [ResolveTokenAuthenticate] after the [AuthenticateFunc] it was given
+// (WIRE_PROTOCOL.md §16). Turn that off to compose the chain yourself -- which
+// is required when authentication depends on proxy-injected evidence (see
+// [ErrIdentityBearerBesideProxyGate]). Call before serving.
+func (h *HttpServer) SetIdentityBearer(enabled bool) {
+	h.identityBearerOff = !enabled
+}
+
+// InitIdentityBearer composes the authenticate chain now and reports a
+// configuration the server must refuse to start with. It runs on the first
+// request otherwise, failing every request closed (500) on that error; call it
+// after configuring authentication so a misconfigured worker does not start.
+func (h *HttpServer) InitIdentityBearer() error {
+	_, err := h.effectiveAuthenticate()
+	return err
+}
+
+// effectiveAuthenticate is the configured AuthenticateFunc with the identity
+// bearer authenticators appended in the normative order: the deployment's,
+// then sealed grants, then resolve_token.
+func (h *HttpServer) effectiveAuthenticate() (AuthenticateFunc, error) {
+	h.identityAuthOnce.Do(func() {
+		identity := h.server.identity
+		if h.identityBearerOff || identity == nil {
+			h.identityAuth = h.authenticateFunc
+			return
+		}
+		proxyDependent := h.authenticateFunc != nil && len(h.proxyAuthHeaders()) > 0
+		h.identityAuth, h.identityAuthErr = ComposeIdentityAuthenticate(
+			h.authenticateFunc, identity.GrantKeys(), identity.ResolveTokenHook(), proxyDependent)
+	})
+	return h.identityAuth, h.identityAuthErr
+}
+
 // SetPeerIdentityProviders installs transport identity evidence adapters.
 // The slice is copied; providers must be safe for concurrent requests.
 func (h *HttpServer) SetPeerIdentityProviders(providers ...PeerIdentityProvider) {
@@ -856,8 +903,14 @@ type requestIdentity struct {
 func (h *HttpServer) authenticateIdentity(w http.ResponseWriter, r *http.Request) *requestIdentity {
 	auth := Anonymous()
 	var missingCredential error
-	if h.authenticateFunc != nil {
-		resolved, err := h.authenticateFunc(r)
+	authenticate, composeErr := h.effectiveAuthenticate()
+	if composeErr != nil {
+		slog.Error("vgirpc: identity bearer composition refused; failing closed", "err", composeErr)
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return nil
+	}
+	if authenticate != nil {
+		resolved, err := authenticate(r)
 		if err != nil {
 			var failure *AuthFailure
 			if h.peerAuthenticationPolicy != nil && errors.As(err, &failure) && failure.Reason == AuthReasonMissingCredential {

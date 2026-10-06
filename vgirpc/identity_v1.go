@@ -540,6 +540,11 @@ type IdentityConfig struct {
 	// MaxAuthAge is how recently a caller must have authenticated to mint a
 	// grant. Zero means [DefaultMaxAuthAge].
 	MaxAuthAge time.Duration
+	// GrantKeys turns on sealed grants (grants.go). With MintGrant nil the
+	// framework mints sealed grants itself, so issue_grant is hosted; and an
+	// [HttpServer] hosting this identity accepts its own grants back as
+	// bearer credentials. Nil changes nothing. See [GrantKeysFromEnv].
+	GrantKeys *GrantKeys
 }
 
 // IdentityImpl applies this file's guards, then delegates to worker-supplied
@@ -559,7 +564,14 @@ type IdentityImpl struct {
 	mintGrant    GrantMinter
 	principals   map[string]bool
 	maxAuthAge   time.Duration
+	grantKeys    *GrantKeys
 }
+
+// GrantKeys returns the sealed-grant configuration, or nil when grants are off.
+func (i *IdentityImpl) GrantKeys() *GrantKeys { return i.grantKeys }
+
+// ResolveTokenHook returns the worker's resolve_token hook, or nil.
+func (i *IdentityImpl) ResolveTokenHook() TokenResolver { return i.resolveToken }
 
 // NewIdentity builds the implementation, validating the configuration.
 //
@@ -571,6 +583,12 @@ func NewIdentity(cfg IdentityConfig) (*IdentityImpl, error) {
 		resolveToken: cfg.ResolveToken,
 		mintGrant:    cfg.MintGrant,
 		maxAuthAge:   cfg.MaxAuthAge,
+		grantKeys:    cfg.GrantKeys,
+	}
+	if impl.mintGrant == nil && cfg.GrantKeys != nil {
+		// Grants on and no hook of the worker's own: the framework mints
+		// sealed grants, which an HttpServer then accepts back as bearers.
+		impl.mintGrant = SealedMintGrant(cfg.GrantKeys)
 	}
 	if impl.maxAuthAge <= 0 {
 		impl.maxAuthAge = DefaultMaxAuthAge
@@ -701,6 +719,9 @@ func RegisterIdentity(s *Server, impl *IdentityImpl) error {
 	if len(offered) == 0 {
 		return nil
 	}
+	// Remembered so an HttpServer over s can accept the identity's
+	// credentials as bearers (sealed grants, resolve_token).
+	s.identity = impl
 
 	sub := NewServer()
 	sub.SetServiceName(IdentityProtocolName)

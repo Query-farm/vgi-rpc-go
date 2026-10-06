@@ -125,7 +125,7 @@ Override `PYTHON` to use an interpreter you manage yourself. Supplying it on the
 PYTHON=/path/to/python make test
 ```
 
-`VGI_RPC_SPEC` overrides the PyPI fallback requirement (default `vgi-rpc[http,cli,external]>=0.20.0`).
+`VGI_RPC_SPEC` overrides the PyPI fallback requirement (default `vgi-rpc[http,cli,external,conformance]>=0.49.0`).
 
 ## Testing Policy
 

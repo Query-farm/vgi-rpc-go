@@ -188,7 +188,24 @@ func main() {
 	if identityMode == "" {
 		identityMode = conformance.IdentityModeOff
 	}
-	if identityCfg, wanted := conformance.IdentityConfigFor(identityMode); wanted {
+	// Sealed-grant keys from --grant-key (repeatable, first mints) or
+	// VGI_RPC_GRANT_KEYS, as every deployment configures them. A malformed key
+	// stops the worker here. --identity grants pins the fixture keys instead.
+	envGrantKeys, err := vgirpc.GrantKeysFromValues(findFlagValues(os.Args, "--grant-key"),
+		os.Getenv(vgirpc.GrantKeysEnv), os.Getenv(vgirpc.GrantAudienceEnv), os.Getenv(vgirpc.GrantMaxTTLEnv))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "grant keys: %v\n", err)
+		os.Exit(1)
+	}
+	identityCfg, wanted := conformance.IdentityConfigFor(identityMode)
+	if envGrantKeys != nil && identityCfg.GrantKeys == nil {
+		if !wanted && identityMode == conformance.IdentityModeOff {
+			// Keys alone host issue_grant, minting sealed grants.
+			identityCfg, wanted = vgirpc.IdentityConfig{MaxAuthAge: conformance.IdentityMaxAuthAge * time.Second}, true
+		}
+		identityCfg.GrantKeys = envGrantKeys
+	}
+	if wanted {
 		impl, err := vgirpc.NewIdentity(identityCfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "building identity: %v\n", err)
@@ -198,8 +215,15 @@ func main() {
 			fmt.Fprintf(os.Stderr, "registering identity: %v\n", err)
 			os.Exit(1)
 		}
+		if identityMode == conformance.IdentityModeGrants {
+			// conformance.Whoami.v1 reports how a bearer was authenticated.
+			if err := server.AddProtocol(conformance.NewWhoami()); err != nil {
+				fmt.Fprintf(os.Stderr, "hosting %s: %v\n", conformance.WhoamiProtocolName, err)
+				os.Exit(1)
+			}
+		}
 	} else if identityMode != conformance.IdentityModeOff {
-		fmt.Fprintf(os.Stderr, "invalid --identity %q (want off, both or introspect-only)\n", identityMode)
+		fmt.Fprintf(os.Stderr, "invalid --identity %q (want off, both, introspect-only or grants)\n", identityMode)
 		os.Exit(1)
 	}
 
@@ -665,6 +689,12 @@ func main() {
 		if origin := findFlagValue(os.Args, "--cors-origin"); origin != "" {
 			httpServer.SetCorsOrigins(origin)
 		}
+		// Compose the identity bearer authenticators now, so a configuration
+		// the server must refuse fails at startup rather than per request.
+		if err := httpServer.InitIdentityBearer(); err != nil {
+			fmt.Fprintf(os.Stderr, "identity bearer: %v\n", err)
+			os.Exit(1)
+		}
 		listenAddr := "127.0.0.1:0"
 		if portFlag := findFlagValue(os.Args, "--port"); portFlag != "" {
 			listenAddr = "127.0.0.1:" + portFlag
@@ -776,6 +806,16 @@ func findFlagValue(args []string, name string) string {
 // value-taking flags are parsed by a loop that stops one short of the end
 // (it always reads args[i+1]), so a boolean flag has to be scanned for
 // separately to work in the final position.
+func findFlagValues(args []string, name string) []string {
+	var out []string
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == name {
+			out = append(out, args[i+1])
+		}
+	}
+	return out
+}
+
 func hasFlag(args []string, name string) bool {
 	for _, a := range args {
 		if a == name {

@@ -31,7 +31,7 @@ COVDIR := $(CURDIR)/_covdata
 #	PYTHON=/path/to/python make test
 VENV := $(CURDIR)/.venv
 PYTHON ?= $(VENV)/bin/python
-VGI_RPC_SPEC ?= vgi-rpc[http,cli,external]>=0.20.0
+VGI_RPC_SPEC ?= vgi-rpc[http,cli,external,conformance]>=0.49.0
 
 # The reference checkout, if one is present. `wildcard` rather than a bare
 # path so that an absent tree is empty rather than a pip error — a default

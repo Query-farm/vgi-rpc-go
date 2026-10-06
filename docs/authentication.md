@@ -208,6 +208,53 @@ operator states the posture explicitly; setting it enables and enforces nothing.
 The normative cross-language contract is
 [`docs/proxy-proof-spec.md`](https://github.com/Query-farm/vgi-rpc) in the vgi-rpc repository.
 
+## Accepting identity credentials as bearers
+
+When a server hosts `vgi_rpc.Identity.v1` (`RegisterIdentity`), its
+`HttpServer` also accepts that identity's credentials as ordinary bearers,
+appended after your own `AuthenticateFunc` in this order:
+
+1. your authenticator (JWT, static bearer, …);
+2. **sealed grants** — only a token starting `vgig1.` reaches the verifier, and
+   one that fails verification is a 401 that stops the chain;
+3. the worker's **`ResolveToken`** hook — unknown falls through (401 if nothing
+   accepts); `AuthUnavailableError` or `IdentityUnavailableError` is a 503 with
+   the hook's `Retry-After`. JWS-shaped, blank and over-long tokens never reach it.
+
+Sealed grants are opt-in. Configure keys and the framework mints them through
+`issue_grant` (unless you supply `MintGrant`) and accepts them back:
+
+```go
+keys, err := vgirpc.GrantKeysFromEnv() // VGI_RPC_GRANT_KEYS, _AUDIENCE, _MAX_TTL_SECONDS
+if err != nil {
+	log.Fatal(err) // a malformed key must stop the worker
+}
+impl, err := vgirpc.NewIdentity(vgirpc.IdentityConfig{GrantKeys: keys /* nil: grants off */})
+if err != nil {
+	log.Fatal(err)
+}
+if err := vgirpc.RegisterIdentity(server, impl); err != nil {
+	log.Fatal(err)
+}
+hs := vgirpc.NewHttpServer(server)
+hs.SetAuthenticate(myAuthenticate)
+if err := hs.InitIdentityBearer(); err != nil { // refuse to start on a bad composition
+	log.Fatal(err)
+}
+```
+
+`VGI_RPC_GRANT_KEYS` is a comma-separated list of standard-base64 32-byte keys;
+the first mints, all verify (rotate by adding the new key first). A grant
+authenticates as `Domain "grant"` with claims `grant_id`, `scopes`, `purpose`
+and **no `auth_time`**, so a grant can never mint another grant
+(`stale_auth`). Grants are not individually revocable: keep the max TTL short
+(default 7 days) and remove a key to revoke everything it minted.
+
+If your authenticator depends on proxy-injected evidence (`SetProxyAuthHeaders`,
+a required proxy proof), OR-ing these alternatives beside it would bypass that,
+so `InitIdentityBearer` refuses; compose the chain yourself and call
+`SetIdentityBearer(false)`.
+
 ## Mutual TLS (mTLS) Authentication
 
 vgi-rpc-go supports mTLS authentication for services behind TLS-terminating proxies. The proxy verifies client certificates and forwards certificate information as HTTP headers. vgi-rpc provides factories that extract identity from these headers.
