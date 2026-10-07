@@ -411,11 +411,10 @@ func TestAccessLogRecordsRequestShapeNotPayload(t *testing.T) {
 			t.Fatalf("record carries %s", forbidden)
 		}
 	}
-	// Transitional: the released 0.50.0 schema requires request_data on a
-	// unary record unless it is marked truncated. Remove with the marker once
-	// CI validates against vgi-rpc >= 0.50.1.
-	if got := records[0]["truncated"]; got != "payload_omitted" {
-		t.Fatalf("expected truncated=payload_omitted, got %#v", got)
+	// Nothing is omitted, so there is no truncation marker: the reference
+	// stopped emitting "payload_omitted" in vgi-rpc 0.50.1.
+	if got, present := records[0]["truncated"]; present {
+		t.Fatalf("unary record carries truncated=%#v", got)
 	}
 }
 

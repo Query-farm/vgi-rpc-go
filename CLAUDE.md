@@ -181,7 +181,7 @@ make conformance-worker
   --access-log /tmp/go-al.jsonl
 ```
 
-**No payload value reaches any log, at any level.** A record describes the request by `request_fields` (`[{name, type}]`) and `request_rows`, and HTTP state tokens (if ever logged) only by size (`request_state_bytes` / `response_state_bytes`). `request_data`, `request_state` and `response_state` are forbidden by the reference schema: the framework cannot know which parameters are secret, and a VGI `catalog_attach` carries API keys in its options. There is deliberately no opt-in (the old `AccessLogHook.SetDebug` is gone), and the reference rejects `--require-request-data`. `TestNoPayloadInLogsHTTP`/`TestNoPayloadInLogsPipe` hold this: a sentinel secret in a request argument and in stream state must not appear, raw or base64-encoded, in the access log or the slog output at its most verbose. Error messages that could quote decrypted state report only the error's type (`openToken`). Unary records still carry `truncated: "payload_omitted"`, only because the released 0.50.0 schema requires `request_data` on a unary record unless truncated; remove it once CI validates against vgi-rpc >= 0.50.1. CI runs exactly this command (`.github/workflows/ci.yml`, "Verify access log against the spec") — do not fall back to checking it by hand, which is how it drifted before.
+**No payload value reaches any log, at any level.** A record describes the request by `request_fields` (`[{name, type}]`) and `request_rows`, and HTTP state tokens (if ever logged) only by size (`request_state_bytes` / `response_state_bytes`). `request_data`, `request_state` and `response_state` are forbidden by the reference schema: the framework cannot know which parameters are secret, and a VGI `catalog_attach` carries API keys in its options. There is deliberately no opt-in (the old `AccessLogHook.SetDebug` is gone), and the reference rejects `--require-request-data`. `TestNoPayloadInLogsHTTP`/`TestNoPayloadInLogsPipe` hold this: a sentinel secret in a request argument and in stream state must not appear, raw or base64-encoded, in the access log or the slog output at its most verbose. Error messages that could quote decrypted state report only the error's type (`openToken`). Records carry no `truncated: "payload_omitted"` marker: nothing is omitted, and the reference stopped emitting it in 0.50.1. CI runs exactly this command (`.github/workflows/ci.yml`, "Verify access log against the spec") — do not fall back to checking it by hand, which is how it drifted before.
 
 `--cmd` only exercises the pipe path. The HTTP-only fields (`request_id`, `request_bytes`, `response_bytes`, `externalized_bytes`) need the worker started with `--http` / `--http-with-storage` and the runner pointed at it with `--url`.
 
@@ -244,7 +244,7 @@ server.SetDispatchHook(hook)
 
 `AccessLogHook` serializes writes through an internal mutex, so wrapping a non-thread-safe writer is safe. Records never carry request payloads (see "Access log" above), so record size does not grow with the request.
 
-This port enforces no per-record byte cap (rotation and truncation are the caller's, per the `lumberjack` pattern above), so it never emits `truncated: true`; its only `truncated` value is the transitional `"payload_omitted"` on unary records.
+This port enforces no per-record byte cap (rotation and truncation are the caller's, per the `lumberjack` pattern above), so it never emits `truncated` at all.
 
 ### Sentry integration
 

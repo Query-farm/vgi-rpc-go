@@ -205,13 +205,6 @@ func (h *AccessLogHook) OnDispatchEnd(ctx context.Context, token HookToken, info
 		}
 		record["request_fields"] = fields
 		record["request_rows"] = info.Request.Rows
-		if info.MethodType == DispatchMethodUnary {
-			// The released 0.50.0 access-log schema requires request_data on
-			// a unary record unless it is marked truncated; the current
-			// reference forbids request_data and accepts this marker as
-			// legacy. Remove once CI validates against vgi-rpc >= 0.50.1.
-			record["truncated"] = "payload_omitted"
-		}
 	}
 	if info.MethodType == DispatchMethodStream {
 		// Schema requires stream_id (32 lowercase hex chars) on every stream
