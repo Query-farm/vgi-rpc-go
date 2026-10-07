@@ -39,7 +39,7 @@ type DispatchInfo struct {
 	Auth              *AuthContext      // Auth context for this dispatch; never nil
 	RemoteAddr        string            // HTTP transport: remote IP:port. Empty otherwise.
 	HTTPStatus        int               // HTTP transport: response status; 0 when not applicable.
-	RequestData       []byte            // Self-contained Arrow IPC stream of the request batch (unary + stream init only).
+	Request           *RequestShape     // The request batch's shape -- names, types, rows; never values (unary + stream init only).
 	StreamID          string            // Stream lifecycle identifier (32-char lowercase hex); empty on unary.
 	Cancelled         bool              // True when a stream was cancelled by the client.
 	// Implementation is an optional caller-supplied reference to the service
@@ -49,6 +49,22 @@ type DispatchInfo struct {
 	// need to call other methods on the impl without holding their own
 	// reference. Zero wire impact — observability only.
 	Implementation any
+}
+
+// RequestShape describes a request batch without exposing any of its values:
+// what an observability hook may see of a request. A payload value never
+// reaches a hook through DispatchInfo, because hooks feed logs, and the
+// framework cannot know which parameters are secret.
+type RequestShape struct {
+	Fields []RequestField // One per request column, in order.
+	Rows   int64          // Row count of the request batch.
+}
+
+// RequestField is one request column's name and Arrow type (the Arrow
+// library's text rendering, e.g. "utf8", "list<item: int64, nullable>").
+type RequestField struct {
+	Name string
+	Type string
 }
 
 // CallStatistics holds per-call I/O counters matching the Python CallStatistics.
@@ -96,4 +112,13 @@ func batchBufferSize(batch arrow.RecordBatch) int64 {
 		}
 	}
 	return total
+}
+
+// requestShapeForHook is [RequestShapeOf] when a dispatch hook will consume it,
+// and nil otherwise, so a server without hooks does not pay for it per call.
+func (s *Server) requestShapeForHook(batch arrow.RecordBatch) *RequestShape {
+	if s.dispatchHook == nil {
+		return nil
+	}
+	return RequestShapeOf(batch)
 }

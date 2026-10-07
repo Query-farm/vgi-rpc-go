@@ -385,46 +385,37 @@ func TestNoClaimRedactionOptOut(t *testing.T) {
 	}
 }
 
-// --- truncation marker -----------------------------------------------------
+// --- request shape ----------------------------------------------------------
 
-// "payload_omitted" and true carried one meaning between them until they were
-// split. A consumer scanning for real data loss has to be able to filter the
-// common case out, so level-gated omission must never report itself as
-// size-driven shedding.
-func TestAccessLogPayloadOmissionIsNotTruncation(t *testing.T) {
+// A record describes the request by its shape -- names, types, rows -- and
+// never carries a payload: no request_data, and no size of a dropped one.
+func TestAccessLogRecordsRequestShapeNotPayload(t *testing.T) {
 	var buf bytes.Buffer
 	hook := NewAccessLogHook(&buf, "")
 	info := unaryInfo()
-	info.RequestData = []byte("not-really-arrow-but-non-empty")
+	info.Request = &RequestShape{
+		Fields: []RequestField{{Name: "name", Type: "utf8"}, {Name: "n", Type: "int64"}},
+		Rows:   1,
+	}
 	records := dispatchOnce(t, hook, &buf, info, nil)
 
+	fields, _ := records[0]["request_fields"].([]any)
+	if len(fields) != 2 || fields[0].(map[string]any)["name"] != "name" || fields[1].(map[string]any)["type"] != "int64" {
+		t.Fatalf("request_fields = %#v", records[0]["request_fields"])
+	}
+	if records[0]["request_rows"] != float64(1) {
+		t.Fatalf("request_rows = %#v", records[0]["request_rows"])
+	}
+	for _, forbidden := range []string{"request_data", "original_request_bytes", "request_state", "response_state"} {
+		if _, present := records[0][forbidden]; present {
+			t.Fatalf("record carries %s", forbidden)
+		}
+	}
+	// Transitional: the released 0.50.0 schema requires request_data on a
+	// unary record unless it is marked truncated. Remove with the marker once
+	// CI validates against vgi-rpc >= 0.50.1.
 	if got := records[0]["truncated"]; got != "payload_omitted" {
 		t.Fatalf("expected truncated=payload_omitted, got %#v", got)
-	}
-	if got := records[0]["truncated"]; got == true {
-		t.Fatal("level-gated omission reported itself as size-driven shedding")
-	}
-	if _, present := records[0]["request_data"]; present {
-		t.Fatal("request_data present at INFO level")
-	}
-	if records[0]["original_request_bytes"] == nil {
-		t.Fatal("original_request_bytes missing, so the dropped size is unknowable")
-	}
-}
-
-func TestAccessLogDebugCarriesPayloadAndNoMarker(t *testing.T) {
-	var buf bytes.Buffer
-	hook := NewAccessLogHook(&buf, "")
-	hook.SetDebug(true)
-	info := unaryInfo()
-	info.RequestData = []byte("payload")
-	records := dispatchOnce(t, hook, &buf, info, nil)
-
-	if records[0]["request_data"] == nil {
-		t.Fatal("debug mode dropped request_data")
-	}
-	if _, present := records[0]["truncated"]; present {
-		t.Fatalf("nothing was omitted, but the record is marked truncated=%v", records[0]["truncated"])
 	}
 }
 

@@ -227,9 +227,8 @@ conformance-runner: conformance-worker $(PYTHON_BOOTSTRAP)
 conformance-access-log: conformance-worker $(PYTHON_BOOTSTRAP)
 	rm -f $(ACCESS_LOG)
 	$(PYTHON_BIN)vgi-rpc-test \
-		--cmd "$(GO_CONFORMANCE_WORKER) --access-log $(ACCESS_LOG) --access-log-debug" \
+		--cmd "$(GO_CONFORMANCE_WORKER) --access-log $(ACCESS_LOG)" \
 		--access-log "$(ACCESS_LOG)" \
-		--require-request-data \
 		--filter '!large_payload.echo_binary_over_int32_max'
 	rm -f $(ACCESS_LOG)
 

@@ -197,20 +197,17 @@ jobs:
       # anyway — four people checked it by inspection and the rule was still
       # wrong. It runs here now so it cannot silently rot again.
       #
-      # --access-log-debug is not optional: at INFO the worker omits
-      # `request_data`, and a log that never carries the field trivially
-      # satisfies every rule that governs it, so the whole payload contract
-      # goes unchecked. --require-request-data makes that absence a failure.
+      # No record carries a payload value at any level: the request is
+      # described by request_fields/request_rows, never request_data, and
+      # there is no switch that turns payload logging back on. (Up to vgi-rpc
+      # 0.50.0 this step ran the worker with --access-log-debug and the
+      # runner with --require-request-data, which made every DEBUG log a
+      # store of whatever credentials callers passed. Both are gone.)
       #
       # The only --filter here is the >2 GiB payload, and it is an exclusion of
-      # size, not of coverage: at --access-log-debug the emitter base64s the
-      # whole re-serialized request batch into `request_data`, so this one test
-      # would write a single ~2.9 GB JSONL line and then ask Python to
-      # jsonschema-validate it. Measured factor: a 4 MiB payload already yields
-      # a 5,593,736-byte record (5,593,068 base64 chars), and it scales
-      # linearly. The test itself still runs — in the step above, where no
-      # access log is attached. This step's job is the log's *shape*, which a
-      # 4 MiB payload exercises exactly as well as a 2 GiB one.
+      # runtime, not of coverage: that test already runs in the step above,
+      # where no access log is attached. This step's job is the log's *shape*,
+      # which a 4 MiB payload exercises exactly as well as a 2 GiB one.
       #
       # Nothing else is filtered: the suite's zero-parameter methods (void*)
       # send an empty schema and no row, and they are the exact case a
@@ -219,9 +216,8 @@ jobs:
       - name: Verify access log against the spec
         run: |
           timeout 120 vgi-rpc-test \
-            --cmd "$PWD/conformance-worker --access-log $RUNNER_TEMP/access-log.jsonl --access-log-debug" \
+            --cmd "$PWD/conformance-worker --access-log $RUNNER_TEMP/access-log.jsonl" \
             --access-log "$RUNNER_TEMP/access-log.jsonl" \
-            --require-request-data \
             --filter '!large_payload.echo_binary_over_int32_max'
 
       # The reference's two cross-implementation drift checks, run against

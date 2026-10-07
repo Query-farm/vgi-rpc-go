@@ -4,10 +4,8 @@
 package vgirpc
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -16,7 +14,6 @@ import (
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
 
 // AccessLogHook is a [DispatchHook] that emits one JSON record per RPC call
@@ -37,7 +34,6 @@ type AccessLogHook struct {
 	mu            sync.Mutex
 	w             io.Writer
 	serverVersion string
-	debug         atomic.Bool
 	sampler       atomic.Pointer[accessLogSampler]
 	async         atomic.Pointer[asyncEmitter]
 }
@@ -46,28 +42,15 @@ type AccessLogHook struct {
 // serverVersion is reported in the optional “server_version“ field;
 // pass an empty string to omit it.
 //
-// By default the hook emits records at the equivalent of "INFO" level:
-// “request_data“ is replaced with “original_request_bytes“ plus
-// “truncated: "payload_omitted"“ because the full base64-encoded payload
-// typically dominates the record (8+ KiB per call) and most audit consumers
-// care about who/what/when rather than the raw bytes. Call
-// [AccessLogHook.SetDebug] to re-enable the full payload for replay/audit
-// workloads.
+// A record never carries a payload value, at any level: the request is
+// described by “request_fields“ (parameter names and Arrow types) and
+// “request_rows“, and its size by “request_bytes“. The framework cannot know
+// which parameters are secret -- a VGI catalog_attach carries API keys and
+// passwords in its options -- so a logged payload is a credential leak waiting
+// for someone to turn on verbose logging. There is deliberately no switch that
+// turns payload logging back on.
 func NewAccessLogHook(w io.Writer, serverVersion string) *AccessLogHook {
 	return &AccessLogHook{w: w, serverVersion: serverVersion}
-}
-
-// SetDebug toggles emission of the full base64-encoded request payload
-// in the “request_data“ field. When true, the record carries the
-// payload (suitable for replay/audit). When false (default), the
-// payload is omitted and the record is marked “truncated: "payload_omitted"“
-// with “original_request_bytes“ set so the access-log schema's
-// "unary requires request_data unless truncated" invariant still holds.
-//
-// Mirrors Python's “_access_logger.isEnabledFor(logging.DEBUG)“
-// gating introduced in vgi-rpc e7ee750.
-func (h *AccessLogHook) SetDebug(debug bool) {
-	h.debug.Store(debug)
 }
 
 // SetSampleRate keeps only the given fraction of successful calls, 0.0–1.0;
@@ -212,20 +195,21 @@ func (h *AccessLogHook) OnDispatchEnd(ctx context.Context, token HookToken, info
 	if info.HTTPStatus > 0 {
 		record["http_status"] = info.HTTPStatus
 	}
-	if len(info.RequestData) > 0 {
-		// Gate full base64 payload on DEBUG mode. At INFO this field is
-		// by far the heaviest in the record; audit consumers rarely need
-		// the bytes.
-		encoded := base64.StdEncoding.EncodeToString(info.RequestData)
-		if h.debug.Load() {
-			record["request_data"] = encoded
-		} else {
-			// "payload_omitted", not true: nothing was lost to a size cap
-			// here, the emitter simply is not logging payloads at this
-			// level. Sharing one marker made it fire on essentially every
-			// record and stop meaning anything to a consumer scanning for
-			// real data loss.
-			record["original_request_bytes"] = len(encoded)
+	if info.Request != nil {
+		// The request's shape, never its values: see NewAccessLogHook. No
+		// digest of the bytes either -- a hash of a payload whose other fields
+		// are known is a brute-force oracle for a short secret.
+		fields := make([]map[string]string, len(info.Request.Fields))
+		for i, f := range info.Request.Fields {
+			fields[i] = map[string]string{"name": f.Name, "type": f.Type}
+		}
+		record["request_fields"] = fields
+		record["request_rows"] = info.Request.Rows
+		if info.MethodType == DispatchMethodUnary {
+			// The released 0.50.0 access-log schema requires request_data on
+			// a unary record unless it is marked truncated; the current
+			// reference forbids request_data and accepts this marker as
+			// legacy. Remove once CI validates against vgi-rpc >= 0.50.1.
 			record["truncated"] = "payload_omitted"
 		}
 	}
@@ -310,24 +294,19 @@ func (h *AccessLogHook) writeRecord(record map[string]any) {
 	_, _ = h.w.Write(line)
 }
 
-// SerializeRequestBatch produces a self-contained Arrow IPC stream
-// (one schema message + one record batch message) suitable for the
-// access-log “request_data“ field.
-//
-// The returned bytes round-trip through any Arrow library's IPC stream
-// reader to a logically-equal RecordBatch, satisfying the access-log
-// spec's round-trip-equivalence requirement.
-func SerializeRequestBatch(batch arrow.RecordBatch) ([]byte, error) {
-	var buf bytes.Buffer
-	writer := ipc.NewWriter(&buf, ipc.WithSchema(batch.Schema()))
-	if err := writer.Write(batch); err != nil {
-		writer.Close()
-		return nil, err
+// RequestShapeOf describes a request batch without any of its values: each
+// column's name and Arrow type, and the row count. It is what observability
+// hooks get in [DispatchInfo.Request].
+func RequestShapeOf(batch arrow.RecordBatch) *RequestShape {
+	if batch == nil {
+		return nil
 	}
-	if err := writer.Close(); err != nil {
-		return nil, err
+	schema := batch.Schema()
+	fields := make([]RequestField, schema.NumFields())
+	for i, f := range schema.Fields() {
+		fields[i] = RequestField{Name: f.Name, Type: f.Type.String()}
 	}
-	return buf.Bytes(), nil
+	return &RequestShape{Fields: fields, Rows: batch.NumRows()}
 }
 
 // roundTo2Decimals rounds f to two decimal places. Defined here so the

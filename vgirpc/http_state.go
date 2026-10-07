@@ -465,7 +465,11 @@ func (h *HttpServer) openToken(version byte, token []byte, aad []byte, out inter
 	// because AEAD authentication has succeeded above — an attacker cannot
 	// reach the gob decoder without knowing the token key.
 	if err := gob.NewDecoder(bytes.NewReader(plaintext)).Decode(out); err != nil {
-		return fmt.Errorf("state token decode: %w", err)
+		// The error's type only: the plaintext here is decrypted stream state,
+		// which may hold anything the call was given, and a decoder's message
+		// can quote what it failed on. This error reaches the client and the
+		// access log's error_message.
+		return fmt.Errorf("state token decode failed (%T)", err)
 	}
 	return nil
 }

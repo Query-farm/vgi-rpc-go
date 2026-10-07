@@ -279,13 +279,13 @@ func main() {
 				os.Exit(1)
 			}
 		}
-		// At INFO the record carries no `request_data` at all, so every spec
-		// rule governing that field goes unexercised — the validator only
-		// checks it is well-formed *when present*. `vgi-rpc-test
-		// --require-request-data` turns that silence into a failure, and it
-		// needs a worker that can be asked for the payload.
+		// --access-log-debug used to make the record carry the whole request
+		// payload (request_data). No payload is logged at any level now, so
+		// the flag would do nothing; refuse it rather than accept a no-op a
+		// stale CI command could keep passing.
 		if hasFlag(os.Args, "--access-log-debug") {
-			hook.SetDebug(true)
+			fmt.Fprintln(os.Stderr, "--access-log-debug was removed: the access log never carries request payloads (request_data) at any level")
+			os.Exit(1)
 		}
 		if hasFlag(os.Args, "--access-log-async") {
 			queueSize := 0
