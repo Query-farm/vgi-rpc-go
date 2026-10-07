@@ -6,7 +6,9 @@ package vgirpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strings"
 
@@ -102,17 +104,14 @@ type reflectionCaller interface {
 		expected *arrow.Schema) (*ClientBatch, error)
 }
 
-// ListProtocols returns what the server hosts, without any protocol's methods.
-//
-// The cheap hop: a client that already knows a protocol hash can compare it
-// here and skip describe entirely.
-func (c *HttpClient) ListProtocols(ctx context.Context) (*ProtocolListDesc, error) {
-	return reflectionListProtocols(ctx, c)
+// ListProtocols is [ListProtocols] on this client's connection.
+func (c *HttpClient) ListProtocols(ctx context.Context) ([]HostedProtocol, error) {
+	return ListProtocols(ctx, c)
 }
 
-// DescribeProtocol returns the full description of one hosted protocol.
-func (c *HttpClient) DescribeProtocol(ctx context.Context, protocol string) (*ServiceDescriptionDesc, error) {
-	return reflectionDescribeProtocol(ctx, c, protocol)
+// DescribeProtocol is [DescribeProtocol] on this client's connection.
+func (c *HttpClient) DescribeProtocol(ctx context.Context, name string) (*ClientServiceDescription, error) {
+	return DescribeProtocol(ctx, c, name)
 }
 
 // Describe returns the server's application protocol, discovered rather than
@@ -123,17 +122,14 @@ func (c *HttpClient) Describe(ctx context.Context) (*ClientServiceDescription, e
 	return reflectionDescribe(ctx, c)
 }
 
-// ListProtocols returns what the server hosts, without any protocol's methods.
-//
-// The cheap hop: a client that already knows a protocol hash can compare it
-// here and skip describe entirely.
-func (client *TcpClient) ListProtocols(ctx context.Context) (*ProtocolListDesc, error) {
-	return reflectionListProtocols(ctx, client)
+// ListProtocols is [ListProtocols] on this client's connection.
+func (client *TcpClient) ListProtocols(ctx context.Context) ([]HostedProtocol, error) {
+	return ListProtocols(ctx, client)
 }
 
-// DescribeProtocol returns the full description of one hosted protocol.
-func (client *TcpClient) DescribeProtocol(ctx context.Context, protocol string) (*ServiceDescriptionDesc, error) {
-	return reflectionDescribeProtocol(ctx, client, protocol)
+// DescribeProtocol is [DescribeProtocol] on this client's connection.
+func (client *TcpClient) DescribeProtocol(ctx context.Context, name string) (*ClientServiceDescription, error) {
+	return DescribeProtocol(ctx, client, name)
 }
 
 // Describe returns the server's application protocol, discovered rather than
@@ -142,6 +138,203 @@ func (client *TcpClient) DescribeProtocol(ctx context.Context, protocol string) 
 // knows which of several protocols it wants.
 func (client *TcpClient) Describe(ctx context.Context) (*ClientServiceDescription, error) {
 	return reflectionDescribe(ctx, client)
+}
+
+// ReflectionTarget is a connection reflection can be asked over: any client
+// this package hands out -- *[HttpClient] (from [NewHttpClient] and
+// [NewIrohHTTPClient]) or *[TcpClient] (from [NewTcpClient], [NewUnixClient]
+// and [NewIrohClient]) -- bound to any protocol the server hosts.
+//
+// Sealed by an unexported method: what reflection needs is a unary call
+// addressed to a protocol other than the client's own, and that capability is
+// deliberately not public. Rebinding a held connection to another protocol is
+// an internal detail of these two functions, not an API.
+type ReflectionTarget interface {
+	reflectionCaller
+}
+
+// HostedProtocol is one protocol a server hosts, as vgi_rpc.Reflection.v1
+// lists it: the client-side view of the wire [ProtocolSummaryDesc].
+//
+// [ListProtocols] returns them in the server's order: application protocols in
+// registration order (the primary first), then the framework's own
+// (vgi_rpc.Reflection.v1, and vgi_rpc.Identity.v1 on an HTTP server that hosts
+// it). A value, not a handle: Features is a fresh slice per call.
+type HostedProtocol struct {
+	// Name is the protocol's wire name -- its routing key, carrying its major
+	// version, e.g. "vgi_rpc.Reflection.v1".
+	Name string
+	// Version is its declared semver, or "" when it declares none.
+	Version string
+	// Hash is the SHA-256 of its canonical description, as 64 lowercase hex
+	// characters. Equal hashes mean an identical wire surface in any port, so
+	// a caller holding a cached description for this hash can skip
+	// [DescribeProtocol].
+	Hash string
+	// Deprecated reports whether callers should migrate off this protocol.
+	Deprecated bool
+	// DeprecationMessage says what to migrate to; "" unless Deprecated.
+	DeprecationMessage string
+	// Features are the capability tokens the protocol announces; empty, never
+	// nil, when it announces none.
+	Features []string
+}
+
+// ReflectionNotSupportedError reports that the server does not host
+// vgi_rpc.Reflection.v1.
+//
+// Returned by [ListProtocols] and [DescribeProtocol] when the server answers
+// the reflection call with "not hosted" rather than with a listing: a server
+// that never called [RegisterReflection] (reflection is opt-in in this port,
+// as enable_describe is in the Python reference), or one that predates
+// reflection. Such a server still serves its own protocol, so this is a
+// statement about discovery, not about the connection -- the connection stays
+// usable.
+//
+// It embeds the server's own answer, so every field (Type, Message, Kind,
+// Code, Details, RequestID) is readable on it, and errors.As to *[RpcError]
+// still matches: code that already handles RpcError keeps working, while
+// errors.As to *ReflectionNotSupportedError branches on "cannot discover".
+type ReflectionNotSupportedError struct {
+	*RpcError
+}
+
+// Error names the condition and keeps the server's own answer.
+func (e *ReflectionNotSupportedError) Error() string {
+	return fmt.Sprintf("server does not host %s: %s", ReflectionProtocolName, e.RpcError.Error())
+}
+
+// Unwrap returns the server's answer, so errors.As reaches *RpcError.
+func (e *ReflectionNotSupportedError) Unwrap() error { return e.RpcError }
+
+// reflectionNotHostedKinds are the error_kind values meaning "this server does
+// not answer reflection".
+var reflectionNotHostedKinds = map[string]bool{
+	"protocol_not_supported": true,
+	"method_not_implemented": true,
+}
+
+// reflectionNotHostedTypes are the remote exception names for the same, from
+// servers that send no error kind.
+var reflectionNotHostedTypes = map[string]bool{
+	"ProtocolNotSupportedError": true,
+	"MethodNotImplementedError": true,
+}
+
+// classifyReflectionNotHosted turns a "not hosted" answer to list_protocols
+// into a [ReflectionNotSupportedError] and returns every other error as
+// itself.
+//
+// Only meaningful for list_protocols, which is always hosted when reflection
+// is: a "not supported" answer to it can only be about the protocol. (describe
+// answers protocol_not_supported for an unknown *argument*, which is why
+// [DescribeProtocol] lists first.)
+//
+// A current server without reflection answers protocol_not_supported; one
+// older than multi-protocol hosting ignores the protocol key and answers an
+// unknown method; both carry UNIMPLEMENTED when the server sends a code at
+// all. An HTTP server older than protocol-scoped routes answers a bare 404,
+// which this client reports as an [HTTPStatusError].
+func classifyReflectionNotHosted(err error) error {
+	if err == nil {
+		return nil
+	}
+	var already *ReflectionNotSupportedError
+	if errors.As(err, &already) {
+		return err
+	}
+	var rpcErr *RpcError
+	if errors.As(err, &rpcErr) {
+		if reflectionNotHostedKinds[rpcErr.Kind] || rpcErr.Code == string(CodeUnimplemented) ||
+			reflectionNotHostedTypes[rpcErr.Type] {
+			return &ReflectionNotSupportedError{RpcError: rpcErr}
+		}
+		return err
+	}
+	var status *HTTPStatusError
+	if errors.As(err, &status) && status.StatusCode == http.StatusNotFound {
+		return &ReflectionNotSupportedError{RpcError: &RpcError{
+			Type:      "HttpError",
+			Message:   status.Error(),
+			RequestID: status.RequestID,
+		}}
+	}
+	return err
+}
+
+// listProtocolsClassified is the list_protocols hop with "not hosted" mapped
+// to [ReflectionNotSupportedError]. Never an inferred listing: only the caller
+// knows which protocol it expected, so an empty or guessed answer would be a
+// lie told on the server's behalf.
+func listProtocolsClassified(ctx context.Context, caller reflectionCaller) (*ProtocolListDesc, error) {
+	list, err := reflectionListProtocols(ctx, caller)
+	if err != nil {
+		return nil, classifyReflectionNotHosted(err)
+	}
+	return list, nil
+}
+
+// ListProtocols lists the protocols a server hosts, over a connection the
+// caller already holds.
+//
+// One round trip -- vgi_rpc.Reflection.v1.list_protocols -- on target's own
+// connection; nothing new is opened and nothing is closed. Over HTTP the call
+// shares the client's net/http client, prefix, headers, auth and
+// response-budget settings; over TCP, Unix and Iroh it shares the client's one
+// stateful connection, which the server demultiplexes by each request's
+// protocol key. Do not call it while a stream holds that connection.
+//
+// The result is in the server's order: application protocols first, primary
+// leading, then the framework's own.
+//
+// A server that does not host reflection yields a *[ReflectionNotSupportedError]
+// and the connection remains usable; any other failure is returned as itself.
+func ListProtocols(ctx context.Context, target ReflectionTarget) ([]HostedProtocol, error) {
+	if target == nil || reflect.ValueOf(target).IsNil() {
+		return nil, errors.New("vgirpc: reflection target is nil")
+	}
+	list, err := listProtocolsClassified(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]HostedProtocol, 0, len(list.Protocols))
+	for _, summary := range list.Protocols {
+		out = append(out, HostedProtocol{
+			Name:               summary.Protocol,
+			Version:            summary.ProtocolVersion,
+			Hash:               summary.ProtocolHash,
+			Deprecated:         summary.Deprecated,
+			DeprecationMessage: summary.DeprecationMessage,
+			Features:           append([]string{}, summary.Features...),
+		})
+	}
+	return out, nil
+}
+
+// DescribeProtocol describes one hosted protocol, over a connection the caller
+// already holds.
+//
+// Two round trips on target's connection: list_protocols (for the server
+// identity the description carries, and to tell "no reflection" apart from
+// "no such protocol") then describe(name). The connection rules are those of
+// [ListProtocols].
+//
+// A server without reflection yields a *[ReflectionNotSupportedError]. A name
+// the server does not host is an ordinary *[RpcError] whose Kind is
+// "protocol_not_supported".
+func DescribeProtocol(ctx context.Context, target ReflectionTarget, name string) (*ClientServiceDescription, error) {
+	if target == nil || reflect.ValueOf(target).IsNil() {
+		return nil, errors.New("vgirpc: reflection target is nil")
+	}
+	list, err := listProtocolsClassified(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+	desc, err := reflectionDescribeProtocol(ctx, target, name)
+	if err != nil {
+		return nil, err
+	}
+	return clientDescription(list, desc), nil
 }
 
 // reflectionListProtocols performs the list_protocols hop.
@@ -172,7 +365,7 @@ func reflectionDescribeProtocol(ctx context.Context, caller reflectionCaller,
 // protocol has no methods", which is a different and much more alarming fact
 // than "there is no application protocol here to describe".
 func reflectionDescribe(ctx context.Context, caller reflectionCaller) (*ClientServiceDescription, error) {
-	list, err := reflectionListProtocols(ctx, caller)
+	list, err := listProtocolsClassified(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
@@ -196,6 +389,11 @@ func reflectionDescribe(ctx context.Context, caller reflectionCaller) (*ClientSe
 	if err != nil {
 		return nil, err
 	}
+	return clientDescription(list, desc), nil
+}
+
+// clientDescription joins the two hops into the client-facing description.
+func clientDescription(list *ProtocolListDesc, desc *ServiceDescriptionDesc) *ClientServiceDescription {
 	out := &ClientServiceDescription{
 		ProtocolName:    desc.Protocol,
 		ProtocolVersion: desc.ProtocolVersion,
@@ -230,7 +428,7 @@ func reflectionDescribe(ctx context.Context, caller reflectionCaller) (*ClientSe
 			DeprecationMessage: method.DeprecationMessage,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // reflectionUnary calls one reflection method and decodes its struct result

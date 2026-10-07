@@ -17,10 +17,57 @@ Two calls, both on that protocol:
   the second call entirely.
 - `describe(protocol)` — one protocol's full method list.
 
-```python
-from vgi_rpc.introspect import introspect
-info = introspect(transport)          # list_protocols, then describe
+Reflection is **opt-in**: a server that never calls `RegisterReflection` does
+not host it (the Python reference's `enable_describe` likewise defaults to
+false), and a client asking such a server gets `ReflectionNotSupportedError`.
+
+## Asking from a client
+
+`vgirpc.ListProtocols` and `vgirpc.DescribeProtocol` ask over a connection the
+caller already holds. The target is any client this package hands out —
+`*HttpClient` (`NewHttpClient`, `NewIrohHTTPClient`) or `*TcpClient`
+(`NewTcpClient`, `NewUnixClient`, `NewIrohClient`) — bound to *any* protocol
+the server hosts. The client's own connection is reused and never closed:
+over HTTP the calls share its `net/http` client, prefix, headers and auth;
+over TCP, Unix and Iroh they share its one stateful connection, which the
+server demultiplexes by each request's protocol key. Do not call them while a
+stream holds that connection.
+
+```go
+hosted, err := vgirpc.ListProtocols(ctx, client) // or client.ListProtocols(ctx)
+var noReflection *vgirpc.ReflectionNotSupportedError
+switch {
+case errors.As(err, &noReflection):
+	// The server does not host vgi_rpc.Reflection.v1. The client still works.
+case err != nil:
+	return err
+}
+for _, p := range hosted {
+	fmt.Println(p.Name, p.Version, p.Hash) // server order: primary first
+}
+
+desc, err := vgirpc.DescribeProtocol(ctx, client, "acme.App.v1")
 ```
+
+- `ListProtocols(ctx, target) ([]HostedProtocol, error)` — one round trip.
+  `HostedProtocol` is a value: `Name`, `Version`, `Hash`, `Deprecated`
+  (default `false`), `DeprecationMessage` (default `""`) and `Features`
+  (empty, never nil), in the server's order: application protocols in
+  registration order, primary first, then the framework's own.
+- `DescribeProtocol(ctx, target, name) (*ClientServiceDescription, error)` —
+  lists first, then describes, so "no reflection" and "no such protocol" stay
+  distinct. An unknown name is an ordinary `*RpcError` with
+  `Kind == "protocol_not_supported"`.
+- A server without reflection returns `*ReflectionNotSupportedError`. It embeds
+  the server's `*RpcError` (so `Kind`, `Code`, `Message`, `RequestID` and
+  `Details` are readable on it, and `errors.As` to `*RpcError` still matches)
+  and covers `protocol_not_supported`, `method_not_implemented`,
+  `UNIMPLEMENTED` and an older HTTP server's bare 404. No listing is ever
+  inferred, and the connection stays usable.
+
+The same calls exist as methods, `client.ListProtocols(ctx)` and
+`client.DescribeProtocol(ctx, name)`. `client.Describe(ctx)` describes the
+first application protocol without naming it.
 
 ## Response Contents
 

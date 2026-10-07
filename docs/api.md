@@ -72,6 +72,9 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 | `CallUnary(ctx, method, params, outputSchema)` | Invoke a unary RPC and return an owned `ClientBatch` |
 | `OpenProducer(ctx, method, params, schema)` | Initialize a producer stream |
 | `OpenExchange(ctx, method, params, schema)` | Initialize a typed exchange stream |
+| `ListProtocols(ctx)` | `vgirpc.ListProtocols` on this client's connection |
+| `DescribeProtocol(ctx, name)` | `vgirpc.DescribeProtocol` on this client's connection |
+| `Describe(ctx)` | Describe the first application protocol the server hosts |
 | `Close()` | Close client-owned idle HTTP connections; local and idempotent |
 
 `HttpClientStream.Next` receives the next producer batch,
@@ -92,6 +95,22 @@ client-directed log handler.
 transport for Tailscale userspace networking. It uses proxy-side target-name
 resolution, supports domain/IPv4/IPv6 targets, accepts only `NO AUTH`, and
 never falls back to direct TCP.
+
+## Reflection client
+
+```go
+func ListProtocols(ctx context.Context, target ReflectionTarget) ([]HostedProtocol, error)
+func DescribeProtocol(ctx context.Context, target ReflectionTarget, name string) (*ClientServiceDescription, error)
+```
+
+`ReflectionTarget` is any `*HttpClient` or `*TcpClient` (TCP, Unix, raw Iroh,
+HTTP-over-Iroh), bound to any protocol; its connection is reused and never
+closed. `HostedProtocol{Name, Version, Hash, Deprecated, DeprecationMessage,
+Features}` comes back in the server's order. A server that does not host
+`vgi_rpc.Reflection.v1` (reflection is opt-in via `RegisterReflection`) returns
+`*ReflectionNotSupportedError`, which embeds the server's `*RpcError`; an
+unknown protocol name is a plain `*RpcError` with kind
+`protocol_not_supported`. See [Introspection](guide/introspection.md).
 
 ## Stream Interfaces
 
