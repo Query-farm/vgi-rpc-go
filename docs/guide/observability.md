@@ -40,18 +40,18 @@ pass it to `SetDispatchHook`. Hooks start in order, each receiving the context
 the previous one returned, and end in reverse. A panic in one hook is logged
 and does not stop the others.
 
-`vgiotel.InstrumentServer` and `vgisentry.Instrument` install their hook with
-`SetDispatchHook`, which replaces. Call them first and add the rest
-afterwards. To run both of them, pick each hook up with `DispatchHook()`
-before the next call replaces it:
+`vgiotel.InstrumentServer` (from `vgirpc/otel` v0.20.0) and
+`vgisentry.Instrument` (from `vgirpc/sentry` v0.17.0) add their hook the same
+way, so the three combine in any order:
 
 ```go
-vgiotel.InstrumentServer(server, vgiotel.DefaultConfig())
-otelHook := server.DispatchHook()
-vgisentry.Instrument(server, nil)
-server.AddDispatchHook(otelHook)
 server.AddDispatchHook(accessLog)
+vgiotel.InstrumentServer(server, vgiotel.DefaultConfig())
+vgisentry.Instrument(server, nil)
 ```
+
+`SetDispatchHook` still replaces everything installed, so call it before the
+instrumenters, never after.
 
 ### DispatchInfo
 

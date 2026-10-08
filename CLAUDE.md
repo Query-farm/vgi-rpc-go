@@ -264,7 +264,8 @@ vgisentry.Instrument(server, nil) // default config
 Limitations vs Python:
 - No auto-attach on server construction — call `Instrument` explicitly.
 - No `record_params` / `tag_params` (per-call kwarg recording): vgi-rpc-go fires `OnDispatchStart` before parameter deserialisation, so the typed params struct isn't visible to the hook. The remaining surface (auth, claims, custom tags, error capture, transactions) is fully supported.
-- `Instrument` installs its hook with `SetDispatchHook`, so it replaces whatever was there. Core composes hooks with `Server.AddDispatchHook` / `MultiDispatchHook`: call `Instrument` first and add the others afterwards. The submodules (`otel`, `sentry`) pin a *published* core version, so they cannot switch to `AddDispatchHook` until a core release that has it.
+- `Instrument` (and `vgiotel.InstrumentServer`) add their hook with `Server.AddDispatchHook`, composing with an access log or each other via `MultiDispatchHook`. A later `SetDispatchHook` still replaces all of them.
+- The submodules pin a *published* core version (no `replace`), so a submodule can use new core API only after a core release that has it.
 
 ### Race-detector pass
 

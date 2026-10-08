@@ -64,7 +64,8 @@ func DefaultConfig() OtelConfig {
 }
 
 // InstrumentServer attaches OpenTelemetry instrumentation to a vgi-rpc server.
-// The hook is installed via [vgirpc.Server.SetDispatchHook].
+// The hook is added via [vgirpc.Server.AddDispatchHook], alongside any hook
+// already installed (an access log, Sentry) rather than in place of it.
 func InstrumentServer(server *vgirpc.Server, cfg OtelConfig) {
 	if cfg.TracerProvider == nil {
 		cfg.TracerProvider = otel.GetTracerProvider()
@@ -100,7 +101,7 @@ func InstrumentServer(server *vgirpc.Server, cfg OtelConfig) {
 		)
 	}
 
-	server.SetDispatchHook(hook)
+	server.AddDispatchHook(hook)
 }
 
 // TraceContext reports the W3C trace and span IDs of whatever span is current

@@ -144,18 +144,16 @@ func ShortHashN(value string, length int) string {
 // before server.Serve() — not thread-safe during dispatch. If cfg is
 // nil, DefaultConfig is used. Returns the same server for chaining.
 //
-// Unlike Python's instrument_server_sentry, this does NOT strip a
-// pre-existing Sentry hook: Instrument installs its hook with
-// SetDispatchHook, replacing whichever hook was previously installed. To
-// combine it with others (AccessLog, OTel), call Instrument first and then
-// add the rest with Server.AddDispatchHook, or build the set with
-// vgirpc.MultiDispatchHook.
+// The hook is added via Server.AddDispatchHook, alongside any hook already
+// installed (an access log, OTel) rather than in place of it. Unlike
+// Python's instrument_server_sentry, this does NOT strip a pre-existing
+// Sentry hook, so calling Instrument twice reports every error twice.
 func Instrument(server *vgirpc.Server, cfg *Config) *vgirpc.Server {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
 	hook := &dispatchHook{cfg: cfg, serviceName: server.ServiceName(), serverID: server.ServerID()}
-	server.SetDispatchHook(hook)
+	server.AddDispatchHook(hook)
 	return server
 }
 
