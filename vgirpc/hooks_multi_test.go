@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -18,7 +19,7 @@ type hookCtxKey string
 
 // recordingHook appends "start:<name>" / "end:<name>" to a shared log, stamps
 // its name into the context it returns, and checks that OnDispatchEnd gets
-// back the context and token it handed out.
+// back its own token and a context carrying the value its start set.
 type recordingHook struct {
 	t          *testing.T
 	name       string
@@ -151,5 +152,42 @@ func TestAddDispatchHookKeepsAccessLog(t *testing.T) {
 	}
 	if rb, ok := records[0]["response_bytes"].(float64); !ok || int(rb) != rec.Body.Len() {
 		t.Fatalf("response_bytes=%v, want %d", records[0]["response_bytes"], rec.Body.Len())
+	}
+}
+
+type spanCtxKey struct{}
+
+// spanHook stands in for the OTel hook: it opens a "span" by putting it in the
+// context it returns.
+type spanHook struct{}
+
+func (spanHook) OnDispatchStart(ctx context.Context, _ DispatchInfo) (context.Context, HookToken) {
+	return context.WithValue(ctx, spanCtxKey{}, "span"), nil
+}
+
+func (spanHook) OnDispatchEnd(context.Context, HookToken, DispatchInfo, *CallStatistics, error) {}
+
+// The access log reads trace_id/span_id from the context at OnDispatchEnd.
+// Added before the span-opening hook, it must still see that span: the order
+// hooks are added in must not decide whether records correlate with traces.
+func TestMultiDispatchHookAccessLogSeesLaterSpan(t *testing.T) {
+	t.Cleanup(func() { SetTraceContextProvider(nil) })
+	traceID := strings.Repeat("1", 32)
+	spanID := strings.Repeat("2", 16)
+	SetTraceContextProvider(func(ctx context.Context) (string, string) {
+		if ctx.Value(spanCtxKey{}) == nil {
+			return "", ""
+		}
+		return traceID, spanID
+	})
+
+	var buf bytes.Buffer
+	m := MultiDispatchHook(NewAccessLogHook(&buf, ""), spanHook{})
+	ctx, token := m.OnDispatchStart(context.Background(), unaryInfo())
+	m.OnDispatchEnd(ctx, token, unaryInfo(), nil, nil)
+	records := decodeRecords(t, &buf)
+
+	if records[0]["trace_id"] != traceID || records[0]["span_id"] != spanID {
+		t.Fatalf("access log added before the span hook lost trace correlation: %v", records[0])
 	}
 }

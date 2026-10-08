@@ -15,8 +15,10 @@ import (
 // OnDispatchStart runs the hooks in order, each receiving the context the
 // previous one returned, so a span opened by an earlier hook is current for a
 // later one. OnDispatchEnd runs them in reverse — first entered, last exited —
-// and hands each hook the context and token it returned itself, exactly as
-// the server does for a lone hook.
+// handing each hook its own token and the call's final context, the one every
+// hook contributed to. A hook that reads the context at the end (the access
+// log stamps trace_id/span_id there) therefore sees a span opened by a hook
+// added after it, and the order hooks are added in does not matter.
 //
 // A hook that panics is isolated: the panic is logged, the remaining hooks
 // still run, and a hook whose OnDispatchStart panicked does not get an
@@ -49,17 +51,15 @@ type multiDispatchHook struct {
 	hooks []DispatchHook
 }
 
-// multiHookToken records, per child hook, what its OnDispatchStart returned
-// and whether it returned at all.
+// multiHookToken records, per child hook, the token its OnDispatchStart
+// returned and whether it returned at all.
 type multiHookToken struct {
-	ctxs   []context.Context
 	tokens []HookToken
 	active []bool
 }
 
 func (m *multiDispatchHook) OnDispatchStart(ctx context.Context, info DispatchInfo) (context.Context, HookToken) {
 	tok := &multiHookToken{
-		ctxs:   make([]context.Context, len(m.hooks)),
 		tokens: make([]HookToken, len(m.hooks)),
 		active: make([]bool, len(m.hooks)),
 	}
@@ -74,7 +74,6 @@ func (m *multiDispatchHook) OnDispatchStart(ctx context.Context, info DispatchIn
 			if hookCtx != nil {
 				ctx = hookCtx
 			}
-			tok.ctxs[i] = ctx
 			tok.tokens[i] = hookToken
 			tok.active[i] = true
 		}()
@@ -82,7 +81,7 @@ func (m *multiDispatchHook) OnDispatchStart(ctx context.Context, info DispatchIn
 	return ctx, tok
 }
 
-func (m *multiDispatchHook) OnDispatchEnd(_ context.Context, token HookToken, info DispatchInfo, stats *CallStatistics, err error) {
+func (m *multiDispatchHook) OnDispatchEnd(ctx context.Context, token HookToken, info DispatchInfo, stats *CallStatistics, err error) {
 	tok, ok := token.(*multiHookToken)
 	if !ok {
 		return
@@ -97,7 +96,7 @@ func (m *multiDispatchHook) OnDispatchEnd(_ context.Context, token HookToken, in
 					slog.Error("dispatch hook end panic", "hook", i, "err", rv)
 				}
 			}()
-			m.hooks[i].OnDispatchEnd(tok.ctxs[i], tok.tokens[i], info, stats, err)
+			m.hooks[i].OnDispatchEnd(ctx, tok.tokens[i], info, stats, err)
 		}()
 	}
 }
