@@ -41,7 +41,9 @@ func NewProtocol(name string) *Server // an additional protocol, for Server.AddP
 | `SetServerID(id string)` | Set the server identifier included in response metadata |
 | `SetServiceName(name string)` | Set a logical service name used by observability hooks |
 | `ServiceName() string` | Returns the logical service name |
-| `SetDispatchHook(hook DispatchHook)` | Register a hook called around each RPC dispatch |
+| `SetDispatchHook(hook DispatchHook)` | Register a hook called around each RPC dispatch, replacing any installed one |
+| `AddDispatchHook(hook DispatchHook)` | Add a hook alongside those already installed (see `MultiDispatchHook`) |
+| `DispatchHook() DispatchHook` | Returns the installed hook, or nil |
 | `AddProtocol(protocol *Server) error` | Host an additional application protocol (built with `NewProtocol`) on every transport; call before serving; refused once the server has served |
 | `SetIncludeTracebacks(enabled bool)` | Tracebacks are on by default on every transport; `false` turns them off server-wide |
 | `RunStdio()` | Run the server loop on stdin/stdout |

@@ -272,6 +272,10 @@ Register a `DispatchHook` to observe every RPC call (tracing, metrics, logging):
 server.SetDispatchHook(myHook)
 ```
 
+`SetDispatchHook` replaces; `AddDispatchHook` runs a further hook alongside the
+installed one (an access log plus metrics, say). See
+[Combining hooks](docs/guide/observability.md#combining-hooks).
+
 ### OpenTelemetry
 
 The optional `vgirpc/otel` module provides a ready-made hook with W3C trace propagation, spans, and metrics:

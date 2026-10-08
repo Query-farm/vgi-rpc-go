@@ -184,9 +184,26 @@ func (s *Server) SetExternalLocation(config *ExternalLocationConfig) {
 	s.externalConfig = config
 }
 
-// SetDispatchHook registers a hook that is called around each RPC dispatch.
+// SetDispatchHook registers a hook that is called around each RPC dispatch,
+// replacing any hook already installed. To run several hooks, use
+// [Server.AddDispatchHook] or [MultiDispatchHook].
 func (s *Server) SetDispatchHook(hook DispatchHook) {
 	s.dispatchHook = hook
+}
+
+// AddDispatchHook installs hook alongside any already registered, rather than
+// replacing it as [Server.SetDispatchHook] does. Hooks start in the order they
+// were added and end in reverse; see [MultiDispatchHook]. Like
+// SetDispatchHook, call it before the server starts dispatching.
+func (s *Server) AddDispatchHook(hook DispatchHook) {
+	s.dispatchHook = MultiDispatchHook(s.dispatchHook, hook)
+}
+
+// DispatchHook returns the hook installed on the server, or nil if none is.
+// It lets a caller pick up a hook that an instrumentation package installed
+// with SetDispatchHook before something else replaces it.
+func (s *Server) DispatchHook() DispatchHook {
+	return s.dispatchHook
 }
 
 // SetServeStartHook registers a lifecycle callback fired once per process

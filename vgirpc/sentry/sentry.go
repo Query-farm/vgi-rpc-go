@@ -145,11 +145,11 @@ func ShortHashN(value string, length int) string {
 // nil, DefaultConfig is used. Returns the same server for chaining.
 //
 // Unlike Python's instrument_server_sentry, this does NOT strip a
-// pre-existing Sentry hook: vgi-rpc-go's Server holds at most one
-// DispatchHook (no composite chain in core), so Instrument replaces
-// whichever hook was previously installed via SetDispatchHook. If you
-// need a composite (AccessLog + Sentry + OTel), wrap them with a
-// caller-side multiplexing DispatchHook before calling SetDispatchHook.
+// pre-existing Sentry hook: Instrument installs its hook with
+// SetDispatchHook, replacing whichever hook was previously installed. To
+// combine it with others (AccessLog, OTel), call Instrument first and then
+// add the rest with Server.AddDispatchHook, or build the set with
+// vgirpc.MultiDispatchHook.
 func Instrument(server *vgirpc.Server, cfg *Config) *vgirpc.Server {
 	if cfg == nil {
 		cfg = DefaultConfig()
