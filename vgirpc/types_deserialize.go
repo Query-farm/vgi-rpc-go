@@ -157,6 +157,10 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 func setFieldFromArrow(field reflect.Value, fieldType reflect.Type, col arrow.Array, idx int, info tagInfo) error {
 	isPtr := fieldType.Kind() == reflect.Ptr
 	if isPtr {
+		if col.IsNull(idx) {
+			field.SetZero()
+			return nil
+		}
 		fieldType = fieldType.Elem()
 	}
 
@@ -454,10 +458,7 @@ func setMapField(field reflect.Value, fieldType reflect.Type, isPtr bool, mapArr
 	items := mapArr.Items()
 	length := int(end - start)
 
-	if isPtr {
-		fieldType = fieldType.Elem()
-	}
-
+	// setFieldFromArrow has already unwrapped a pointer field's type.
 	m := reflect.MakeMapWithSize(fieldType, length)
 	for j := 0; j < length; j++ {
 		k := reflect.New(fieldType.Key()).Elem()
