@@ -23,7 +23,7 @@ import (
 
 // Sealed grants: the framework's own issue_grant credential, and its verifier.
 //
-// vgi_rpc.Identity.v1's issue_grant mints a standing delegation that unattended
+// vgi_rpc.Identity.v2's issue_grant mints a standing delegation that unattended
 // automation later presents as an ordinary bearer. Until this file nothing
 // accepted one: the loop was open in every port. A sealed grant closes it with
 // no storage and no author code. When a deployment configures a grant key, the
@@ -484,6 +484,6 @@ func SealedMintGrant(keys *GrantKeys) GrantMinter {
 		if err != nil {
 			return IssuedGrant{}, &GrantRefusedError{Detail: err.Error()}
 		}
-		return IssuedGrant{Token: token, ExpiresAt: float64(claims.ExpiresAt), GrantID: claims.GrantID}, nil
+		return IssuedGrant{Token: token, ExpiresAt: time.Unix(claims.ExpiresAt, 0).UTC(), GrantID: claims.GrantID}, nil
 	}
 }

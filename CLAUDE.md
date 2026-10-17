@@ -77,7 +77,7 @@ the Python reference? It runs the reference's own two tools —
 `vgi_rpc.Reflection.v1` for every protocol it hosts and compares
 `protocol_hash` and then every field of every method against Python's; and
 `identity_consistency.py`, which greps this port's source for the
-`vgi_rpc.Identity.v1` constants and error kinds.
+`vgi_rpc.Identity.v2` constants and error kinds.
 
 They ran only by hand until they were wired into CI, and in one day of running
 them properly they found four ports describing `vgi_rpc.Reflection.v1` as

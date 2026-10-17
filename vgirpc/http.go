@@ -677,7 +677,7 @@ func (h *HttpServer) SetAuthenticate(fn AuthenticateFunc) {
 // SetIdentityBearer turns the automatic acceptance of identity credentials
 // as bearers on (the default) or off.
 //
-// When the server hosts vgi_rpc.Identity.v1 with grant keys or a resolve_token
+// When the server hosts vgi_rpc.Identity.v2 with grant keys or a resolve_token
 // hook, the HTTP server appends [GrantAuthenticate] and
 // [ResolveTokenAuthenticate] after the [AuthenticateFunc] it was given
 // (WIRE_PROTOCOL.md §16). Turn that off to compose the chain yourself -- which

@@ -232,7 +232,7 @@ jobs:
       # vgi_rpc.Reflection.v1 for every protocol it hosts, describes each, and
       # compares protocol_hash and then every field of every method against
       # Python's. identity_consistency greps this port's source for the
-      # Identity.v1 constants and error kinds.
+      # Identity.v2 constants and error kinds.
       #
       # This reuses the reference clone and install from the steps above
       # deliberately: a second job would clone and pip-install again, and — far

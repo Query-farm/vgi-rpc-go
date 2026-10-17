@@ -168,7 +168,7 @@ func main() {
 	}
 
 	// --identity {off,both,introspect-only} backs the shared
-	// vgi_rpc.Identity.v1 conformance group, which needs two workers built from
+	// vgi_rpc.Identity.v2 conformance group, which needs two workers built from
 	// one binary: one configuring both hooks and one configuring only the
 	// resolver, so that method-level narrowing -- an unconfigured hook makes its
 	// method absent rather than hosted-and-refusing, and shrinks the protocol

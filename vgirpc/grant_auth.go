@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// Bearer authenticators that close the vgi_rpc.Identity.v1 loop
+// Bearer authenticators that close the vgi_rpc.Identity.v2 loop
 // (WIRE_PROTOCOL.md §16, "Accepting identity credentials"):
 //
 //   - [GrantAuthenticate] accepts the framework's own sealed grants;
@@ -19,7 +19,7 @@ import (
 // [ComposeIdentityAuthenticate] puts them after the deployment's own
 // authenticator in the normative order -- the deployment's (JWT, static...),
 // then sealed grants (a cheap prefix check), then resolve_token -- and
-// [HttpServer] does so automatically when its server hosts Identity.v1 with
+// [HttpServer] does so automatically when its server hosts Identity.v2 with
 // grant keys or a resolver.
 //
 // Routing is by prefix and strict in both directions. A token without the

@@ -197,7 +197,7 @@ test-client-python: conformance-client-driver $(PYTHON_BOOTSTRAP)
 # The reference's two cross-implementation checks, run against this port. They
 # compare this port *to Python* — describe_diff over vgi_rpc.Reflection.v1
 # (protocol_hash first, then every field of every method), identity_consistency
-# over the Identity.v1 constants — so neither is expressible inside this
+# over the Identity.v2 constants — so neither is expressible inside this
 # repository alone, and until they were wired into CI they ran only when a
 # maintainer remembered to run them. That is how four ports came to describe
 # vgi_rpc.Reflection.v1 as having zero methods.

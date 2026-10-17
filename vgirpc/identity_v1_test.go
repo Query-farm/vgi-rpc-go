@@ -3,7 +3,7 @@
 
 package vgirpc
 
-// vgi_rpc.Identity.v1 -- resolving a credential, and minting a grant.
+// vgi_rpc.Identity.v2 -- resolving a credential, and minting a grant.
 //
 // The two methods are guarded very differently and the difference is the point,
 // so most of what is tested here is the *asymmetry*: introspection answers a
@@ -69,7 +69,7 @@ func idResolver(token string) (TokenIdentity, bool, error) {
 func idMinter(principal, _ string, _ []string, ttlSeconds int64) (IssuedGrant, error) {
 	return IssuedGrant{
 		Token:     "grant-for-" + principal,
-		ExpiresAt: float64(time.Now().Unix() + ttlSeconds),
+		ExpiresAt: time.Now().Add(time.Duration(ttlSeconds) * time.Second),
 		GrantID:   "g1",
 	}, nil
 }
@@ -257,9 +257,9 @@ func TestIdentityProtocolHashVectors(t *testing.T) {
 		cfg  IdentityConfig
 		want string
 	}{
-		{"both", both, "8317f2ad8e2476bb99e8b94800ab79b19a8cf0c6bdd6d66c2d82bd62ffbe69d5"},
-		{"introspect_token only", introspectOnly, "27b75bef22e4c70baab92a5188a473506b89055d2cb2b58cc187f6fe7a436385"},
-		{"issue_grant only", mintOnly, "c71b12f453310139b6b6a445378064661c52711d03ae1e4fba29b8f7976ef4d8"},
+		{"both", both, "145267755ff90d5c3313d79c7ff771306f2530626380d01cb0e57a951d0f9ec3"},
+		{"introspect_token only", introspectOnly, "4039fbf6db3e64ae234e0be605b977477150ace892f10b6c691920eaf925e7ac"},
+		{"issue_grant only", mintOnly, "4199df7403c9ca1a02c4c524b405a999eb1489614a1480873ffc23a0e5b0d312"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -290,7 +290,7 @@ func TestIdentityCanonicalPreimage(t *testing.T) {
 		`{"name":"scopes","nullable":false,"type":"list<item?:utf8>"},` +
 		`{"name":"ttl_seconds","nullable":false,"type":"int64"}],` +
 		`"result":[{"name":"result","nullable":false,"type":"binary"}],"type":"unary"}],` +
-		`"protocol":"vgi_rpc.Identity.v1"}`
+		`"protocol":"vgi_rpc.Identity.v2"}`
 	if string(preimage) != want {
 		t.Errorf("preimage =\n  %s\nwant\n  %s", preimage, want)
 	}
@@ -630,7 +630,7 @@ func TestIssuanceMintsForTheCaller(t *testing.T) {
 	if grant.Token != "grant-for-alice" {
 		t.Errorf("token = %q", grant.Token)
 	}
-	if grant.ExpiresAt <= float64(time.Now().Unix()) {
+	if !grant.ExpiresAt.After(time.Now()) {
 		t.Errorf("expires_at = %v, want a future timestamp", grant.ExpiresAt)
 	}
 }
@@ -887,7 +887,7 @@ func TestIdentityPayloadsRoundTripThroughTheResultColumn(t *testing.T) {
 		value any
 	}{
 		{"TokenIdentity", TokenIdentity{Principal: "bob", TokenName: "ci-key", TTLSeconds: 300}},
-		{"IssuedGrant", IssuedGrant{Token: "grant-for-alice", ExpiresAt: 1.7e9, GrantID: "g1"}},
+		{"IssuedGrant", IssuedGrant{Token: "grant-for-alice", ExpiresAt: time.Unix(1_700_000_000, 0).UTC(), GrantID: "g1"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -908,6 +908,43 @@ func TestIdentityPayloadsRoundTripThroughTheResultColumn(t *testing.T) {
 				t.Errorf("rows = %d, want 1", batch.NumRows())
 			}
 		})
+	}
+}
+
+// IssuedGrant.expires_at is timestamp[us, tz="UTC"], non-null, in
+// vgi_rpc.Identity.v2 (a float64 of Unix seconds in v1). The payload rides in
+// an opaque binary result column, so the protocol hash cannot see this type --
+// only the name change protects a v1 peer -- which is why the shape and the
+// microsecond round trip are pinned here instead.
+func TestIssuedGrantExpiresAtIsAUTCMicrosecondTimestamp(t *testing.T) {
+	schema, err := SchemaForStruct(reflect.TypeOf(IssuedGrant{}))
+	if err != nil {
+		t.Fatalf("IssuedGrant schema: %v", err)
+	}
+	idx := schema.FieldIndices("expires_at")
+	if len(idx) != 1 {
+		t.Fatalf("IssuedGrant schema %v has no single expires_at", schema)
+	}
+	field := schema.Field(idx[0])
+	want := &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}
+	if !arrow.TypeEqual(field.Type, want) || field.Nullable {
+		t.Fatalf("expires_at = %v (nullable=%v), want non-null %v", field.Type, field.Nullable, want)
+	}
+
+	// 2030-01-01T00:00:00Z plus a microsecond, so truncation to seconds shows.
+	at := time.UnixMicro(1893456000000001).UTC()
+	payload, err := serializeVgirpcStruct(IssuedGrant{Token: "t", ExpiresAt: at, GrantID: "g"})
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	batch := readOneBatch(t, payload)
+	defer batch.Release()
+	decoded, err := deserializeParams(batch, reflect.TypeOf(IssuedGrant{}))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := decoded.Interface().(IssuedGrant).ExpiresAt; !got.Equal(at) || got.Location() != time.UTC {
+		t.Errorf("expires_at round-tripped to %v, want %v in UTC", got, at)
 	}
 }
 
@@ -1108,7 +1145,7 @@ func resolveAnything(seen *[]string) TokenResolver {
 func mintAnything(seen *[]string) GrantMinter {
 	return func(principal, _ string, _ []string, _ int64) (IssuedGrant, error) {
 		*seen = append(*seen, principal)
-		return IssuedGrant{Token: "minted", ExpiresAt: 1, GrantID: "g"}, nil
+		return IssuedGrant{Token: "minted", ExpiresAt: time.Unix(1, 0).UTC(), GrantID: "g"}, nil
 	}
 }
 

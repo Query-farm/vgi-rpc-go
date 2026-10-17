@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// vgi_rpc.Identity.v1 -- resolving a credential, and minting a grant.
+// vgi_rpc.Identity.v2 -- resolving a credential, and minting a grant.
 //
 // Identity lives here, at the RPC layer, rather than in any application
 // protocol: a bearer token is not a VGI concept, the auth primitives it builds
@@ -67,7 +67,7 @@ import (
 //
 // Framework-owned, under the reserved vgi_rpc. prefix, so an application cannot
 // register something else under the name a proxy trusts for identity answers.
-const IdentityProtocolName = "vgi_rpc.Identity.v1"
+const IdentityProtocolName = "vgi_rpc.Identity.v2"
 
 // MaxTokenBytes caps a credential we will even attempt to resolve. Anything
 // longer is not a bearer token; refusing early keeps a resolver from being
@@ -471,17 +471,19 @@ func claimAsSeconds(raw any) (float64, bool) {
 // brokered from the IdP are all equally valid and equally invisible here).
 // Never parsed, never logged.
 //
-// ExpiresAt is the Unix timestamp after which the worker will stop honouring
-// the grant. Required *because* the framework cannot enforce it: the real
+// ExpiresAt is the instant after which the worker will stop honouring the
+// grant. On the wire it is timestamp[us, tz="UTC"], non-null (it was a float64
+// of Unix seconds in vgi_rpc.Identity.v1); sub-microsecond precision is
+// truncated. Required *because* the framework cannot enforce it: the real
 // lifetime lives inside the opaque token, so this is a declaration rather than
 // an enforcement. A worker that must state a lifetime has thought about one.
 //
 // GrantID is a correlation handle for the audit trail. Not a credential and not
 // secret -- it is what ties a mint record to later use.
 type IssuedGrant struct {
-	Token     string  `vgirpc:"token"`
-	ExpiresAt float64 `vgirpc:"expires_at"`
-	GrantID   string  `vgirpc:"grant_id,default="`
+	Token     string    `vgirpc:"token"`
+	ExpiresAt time.Time `vgirpc:"expires_at,timestamp_utc"`
+	GrantID   string    `vgirpc:"grant_id,default="`
 }
 
 // introspectTokenParams is the single parameter of introspect_token.
@@ -698,7 +700,7 @@ func (i *IdentityImpl) IssueGrant(purpose string, scopes []string, ttlSeconds in
 // Server wiring
 // ---------------------------------------------------------------------------
 
-// RegisterIdentity hosts vgi_rpc.Identity.v1 on s, narrowed to the methods the
+// RegisterIdentity hosts vgi_rpc.Identity.v2 on s, narrowed to the methods the
 // deployment configured.
 //
 // Call it AFTER [RegisterReflection] so identity appears in reflection's own

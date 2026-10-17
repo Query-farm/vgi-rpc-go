@@ -15,14 +15,14 @@ import (
 // that principal becomes the policy principal, the row-rule literal and the
 // bind parameter of every entitlement query. When the credential is opaque the
 // proxy holds no local copy of it, so it has to ask the worker, and it asks
-// through vgi_rpc.Identity.v1's introspect_token (identity_v1.go), which owns
+// through vgi_rpc.Identity.v2's introspect_token (identity_v1.go), which owns
 // every guard. This file holds only the types that method shares with the
 // worker-supplied resolver.
 //
 // The pre-0.46 HTTP JSON route, POST {prefix}/__introspect_token__, is retired
 // and not served, and neither is its VGI-Token-Introspection capability
 // header: a client learns whether a worker introspects from reflection
-// (vgi_rpc.Identity.v1 hosted, introspect_token in its description).
+// (vgi_rpc.Identity.v2 hosted, introspect_token in its description).
 //
 // What comes back is deliberately tiny: a principal, a display name for the
 // credential, and how long the answer may be cached. It never returns claims —
@@ -55,7 +55,7 @@ func TokenDigest(credential string) string {
 
 // TokenIdentity is the identity an opaque credential authenticates as.
 //
-// It is the result payload of vgi_rpc.Identity.v1's introspect_token, and the
+// It is the result payload of vgi_rpc.Identity.v2's introspect_token, and the
 // vgirpc tags are what pin its wire shape for the protocol: principal utf8 nn,
 // token_name utf8 nn defaulting to "", ttl_seconds int64 nn defaulting to 300.
 // Field DECLARATION ORDER is part of the schema and therefore of the protocol
@@ -80,7 +80,7 @@ type TokenIdentity struct {
 	// re-presenting the credential it is exactly that -- and therefore also the
 	// revocation lag.
 	//
-	// Zero means "do not cache", and vgi_rpc.Identity.v1 honours that
+	// Zero means "do not cache", and vgi_rpc.Identity.v2 honours that
 	// verbatim. Build one with [NewTokenIdentity] to get the documented default
 	// rather than the zero value.
 	TTLSeconds int `vgirpc:"ttl_seconds,default=300"`

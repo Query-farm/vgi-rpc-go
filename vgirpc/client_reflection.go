@@ -158,7 +158,7 @@ type ReflectionTarget interface {
 //
 // [ListProtocols] returns them in the server's order: application protocols in
 // registration order (the primary first), then the framework's own
-// (vgi_rpc.Reflection.v1, and vgi_rpc.Identity.v1 on an HTTP server that hosts
+// (vgi_rpc.Reflection.v1, and vgi_rpc.Identity.v2 on an HTTP server that hosts
 // it). A value, not a handle: Features is a fresh slice per call.
 type HostedProtocol struct {
 	// Name is the protocol's wire name -- its routing key, carrying its major

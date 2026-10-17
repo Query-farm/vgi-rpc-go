@@ -13,10 +13,10 @@ import (
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
 )
 
-// Fixed deployment policy for the shared vgi_rpc.Identity.v1 conformance
+// Fixed deployment policy for the shared vgi_rpc.Identity.v2 conformance
 // group, transcribed from IDENTITY_CONFORMANCE_FIXTURE.md §9.
 //
-// vgi_rpc.Identity.v1 is almost entirely guards, and every guard reads
+// vgi_rpc.Identity.v2 is almost entirely guards, and every guard reads
 // deployment policy: who may introspect, what a credential resolves to,
 // whether a grant is minted, how recently the caller authenticated. Against a
 // worker whose allowlist and hooks are unknown no cross-port assertion exists,
@@ -136,11 +136,6 @@ const (
 	// round trip is visible in the response. An empty list yields a token
 	// ending in the separator.
 	identityScopeSeparator = "|"
-	// identityGrantExpiresAt is fixed rather than now+ttl: a constant can be
-	// asserted exactly, which also pins the float64 round trip. expires_at is a
-	// declaration rather than an enforcement -- the real lifetime lives inside
-	// the opaque token -- so nothing is lost. 2030-01-01T00:00:00Z.
-	identityGrantExpiresAt = 1893456000.0
 	// identityGrantID is the correlation handle a full grant carries.
 	identityGrantID = "conformance-grant-id"
 	// identityRefusedPurpose is the purpose this policy declines, so
@@ -236,6 +231,13 @@ func IdentityResolveToken(credential string) (vgirpc.TokenIdentity, bool, error)
 		TTLSeconds: identitySubjectTTL,
 	}, true, nil
 }
+
+// identityGrantExpiresAt is fixed rather than now+ttl: a constant can be
+// asserted exactly, which also pins the timestamp[us, tz="UTC"] round trip.
+// expires_at is a declaration rather than an enforcement -- the real lifetime
+// lives inside the opaque token -- so nothing is lost.
+// 2030-01-01T00:00:00Z = 1893456000000000 microseconds.
+var identityGrantExpiresAt = time.UnixMicro(1893456000000000).UTC()
 
 // IdentityMintGrant mints a grant under the fixed conformance policy. It is a
 // pure function of its arguments.

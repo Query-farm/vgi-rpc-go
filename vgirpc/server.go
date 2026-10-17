@@ -112,7 +112,7 @@ type Server struct {
 	// order reflection lists application protocols in (WIRE_PROTOCOL.md §3.1).
 	extraOrder   []string
 	dispatchHook DispatchHook
-	// identity is the vgi_rpc.Identity.v1 implementation RegisterIdentity
+	// identity is the vgi_rpc.Identity.v2 implementation RegisterIdentity
 	// hosted, or nil; an HttpServer reads its grant keys and resolver to
 	// accept identity credentials as bearers.
 	identity *IdentityImpl
