@@ -31,7 +31,7 @@ import (
 // and accepts them back as bearer credentials on HTTP. When it does not,
 // nothing changes -- absent beats hosted-and-refusing.
 //
-// Normative: IDENTITY_V1_SPEC.md §9 and WIRE_PROTOCOL.md §16 in the reference.
+// Normative: IDENTITY_V2_SPEC.md §9 and WIRE_PROTOCOL.md §16 in the reference.
 // Every port mints and verifies byte-identically, pinned by
 // vgi_rpc/conformance/grant_token_vectors.json:
 //

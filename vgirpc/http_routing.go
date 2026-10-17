@@ -79,7 +79,7 @@ func (h *HttpServer) resolveHTTPRoute(r *http.Request, protocol, method string) 
 // before this runs, so absent is the single-carrier case rather than an error.
 // A worker that refuses it is not conformant however defensible the reasoning:
 // two ports reached the strict reading independently and one became unshippable
-// implementing it. IDENTITY_V1_SPEC.md §5c. The shared suite now pins both
+// implementing it. IDENTITY_V2_SPEC.md §5c. The shared suite now pins both
 // halves -- _adversarial_http.py's recovery probe requires a 200 here, and its
 // raw-transport counterpart requires the refusal there -- so neither can drift
 // into the other.

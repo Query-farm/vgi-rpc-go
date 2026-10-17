@@ -195,7 +195,7 @@ func TestPathAndMetadataProtocolMustAgree(t *testing.T) {
 
 // Accepted on HTTP, where the path segment already resolved the binding.
 //
-// This test asserted the opposite until IDENTITY_V1_SPEC.md §5c settled it, and
+// This test asserted the opposite until IDENTITY_V2_SPEC.md §5c settled it, and
 // the reversal is worth recording rather than quietly editing: "vgi_rpc.protocol
 // is required on every request" was the original brief, two ports implemented it
 // strictly, and one became unshippable -- the shared conformance harness's

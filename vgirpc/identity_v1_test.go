@@ -12,7 +12,7 @@ package vgirpc
 //
 // Ported from the reference suite in
 // vgi-rpc-python/tests/test_token_identity.py, plus the hash vectors and guard
-// order the port contract (IDENTITY_V1_SPEC.md) pins.
+// order the port contract (IDENTITY_V2_SPEC.md) pins.
 
 import (
 	"context"

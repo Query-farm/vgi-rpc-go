@@ -316,7 +316,7 @@ func (s *Server) orderedBindingNames() []string {
 // and this refusal is the whole of the rule. HTTP reaches this function with
 // the protocol read off the PATH, which is never empty once the route matched,
 // and the metadata field there is a second carrier whose absence is accepted:
-// see HttpServer.checkProtocolCarriage and IDENTITY_V1_SPEC.md §5c. Both halves
+// see HttpServer.checkProtocolCarriage and IDENTITY_V2_SPEC.md §5c. Both halves
 // are pinned by the shared conformance suite, so neither can drift into the
 // other.
 //
