@@ -16,6 +16,17 @@ make cross-port # compare this port to the Python reference (see below)
 make ci         # every gate in .github/workflows/ci.yml — run this before pushing
 ```
 
+The pytest conformance targets (`test`, `test-client`, `test-client-python`,
+`coverage`, `race`) run under pytest-xdist, one worker per core by default.
+`CONFORMANCE_WORKERS=8 make test` caps it; `CONFORMANCE_WORKERS=0 make test`
+runs serially. Every fixture binds ephemeral ports (the worker's
+`PORT:`/`TCP:`/`UNIX:` discovery lines), sockets come from `mkstemp` and access
+logs from `tmp_path_factory`, so xdist workers never share a server — keep it
+that way: a new fixture must not hardcode a port or a shared path. `leakcheck`
+stays serial (it needs `-s`, which xdist does not forward). An interpreter
+without `pytest-xdist` falls back to serial with a warning; `pytest-xdist` is in
+the bootstrap's `VGI_RPC_TEST_DEPS`, so delete an older `.venv` to pick it up.
+
 `make ci` exists because the other targets, run together, are still not the CI
 gate list. Four gates are reachable through no other make target —
 `staticcheck` at the version CI pins (`STATICCHECK_VERSION`, since releases add
@@ -116,7 +127,7 @@ To install by hand, matching what the bootstrap and CI do:
 
 ```bash
 pip install -e "/path/to/vgi-rpc-python[http,cli,external,conformance]" \
-    pytest pytest-timeout "httpx2==2.9.1"
+    pytest pytest-timeout pytest-xdist "httpx2==2.9.1"
 ```
 
 Override `PYTHON` to use an interpreter you manage yourself. Supplying it on the command line or in the environment skips the `.venv` bootstrap entirely:
