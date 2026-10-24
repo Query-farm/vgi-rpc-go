@@ -77,26 +77,23 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 		}
 	}
 
-	// Handle wrapped request: if the batch has a single "request" column of type
-	// binary, the actual parameters are IPC-serialized inside it. Unwrap the
-	// inner batch and use it for field mapping.
+	// A packed request is one complete IPC record, not the first record of an
+	// arbitrary stream. Validate its raw bound and framing before mapping fields.
 	if batch.NumCols() == 1 && batch.ColumnName(0) == "request" && batch.Column(0).DataType().ID() == arrow.BINARY {
-		if binCol, ok := batch.Column(0).(*array.Binary); ok && binCol.Len() > 0 && !binCol.IsNull(0) {
-			data := binCol.Value(0)
-			if len(data) > 0 {
-				innerReader, err := ipc.NewReader(bytes.NewReader(data))
-				if err != nil {
-					return reflect.Value{}, fmt.Errorf("unwrapping request IPC: %w", err)
-				}
-				defer innerReader.Release()
-				if innerReader.Next() {
-					innerBatch := innerReader.RecordBatch()
-					innerBatch.Retain()
-					defer innerBatch.Release()
-					return deserializeParams(innerBatch, target)
-				}
-			}
+		binCol := batch.Column(0).(*array.Binary)
+		if binCol.IsNull(0) {
+			return reflect.Value{}, fmt.Errorf("wrapped request must not be NULL")
 		}
+		maximum := 0
+		if reflect.PointerTo(target).Implements(wrappedRequestSizeLimiterType) {
+			maximum = reflect.New(target).Interface().(WrappedRequestSizeLimiter).VgiRpcMaxWrappedRequestBytes()
+		}
+		innerBatch, err := readWrappedRequest(binCol.Value(0), maximum)
+		if err != nil {
+			return reflect.Value{}, err
+		}
+		defer innerBatch.Release()
+		return deserializeParams(innerBatch, target)
 	}
 
 	// Tag parsing and field enumeration are memoized per type (types_cache.go)
@@ -151,6 +148,42 @@ func deserializeParams(batch arrow.RecordBatch, target reflect.Type) (reflect.Va
 		}
 	}
 	return result, nil
+}
+
+// readWrappedRequest accepts exactly one record batch. Arrow permits either a
+// clean physical EOF after the record or one EOS marker. The IPC reader consumes
+// each message exactly, so its remaining bytes identify incomplete messages,
+// second batches and bytes after EOS without decoding another message.
+func readWrappedRequest(data []byte, maximum int) (arrow.RecordBatch, error) {
+	if maximum < 0 {
+		return nil, fmt.Errorf("wrapped request byte limit must not be negative")
+	}
+	if maximum > 0 && len(data) > maximum {
+		return nil, fmt.Errorf("wrapped request IPC exceeds limit of %d bytes", maximum)
+	}
+	if len(data) == 0 {
+		return nil, fmt.Errorf("wrapped request IPC is empty")
+	}
+	source := bytes.NewReader(data)
+	reader, err := ipc.NewReader(source)
+	if err != nil {
+		return nil, fmt.Errorf("unwrapping request IPC: %w", err)
+	}
+	defer reader.Release()
+	if !reader.Next() {
+		if err := reader.Err(); err != nil {
+			return nil, fmt.Errorf("unwrapping request IPC: %w", err)
+		}
+		return nil, fmt.Errorf("wrapped request IPC has no record batch")
+	}
+	tail := data[len(data)-source.Len():]
+	if len(tail) != 0 && !bytes.Equal(tail, []byte{0, 0, 0, 0}) &&
+		!bytes.Equal(tail, []byte{255, 255, 255, 255, 0, 0, 0, 0}) {
+		return nil, fmt.Errorf("wrapped request IPC requires exactly one complete batch with no trailing data")
+	}
+	batch := reader.RecordBatch()
+	batch.Retain()
+	return batch, nil
 }
 
 // setFieldFromArrow sets a struct field value from an Arrow array at index i.
