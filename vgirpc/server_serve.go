@@ -278,17 +278,6 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 		return nil
 	}
 
-	// Capture self-contained IPC bytes of the request batch for observability
-	// hooks. This re-encodes the whole request payload, so only pay for it when
-	// a hook is actually installed to consume DispatchInfo.RequestData.
-	// Best-effort: a serialization failure here must not fail dispatch.
-	var reqBytes []byte
-	if s.dispatchHook != nil {
-		if rb, serErr := SerializeRequestBatch(req.Batch); serErr == nil {
-			reqBytes = rb
-		}
-	}
-
 	// Application-protocol-version gate, against the binding that owns the
 	// resolved method. A server hosting several protocols has a version per
 	// binding and no single "server version"; gating against the primary would
@@ -338,7 +327,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 			RequestID:         req.RequestID,
 			TransportMetadata: req.Metadata,
 			Auth:              Anonymous(),
-			RequestData:       reqBytes,
+			Request:           RequestShapeOf(req.Batch),
 			StreamID:          streamID,
 			Implementation:    s.implementation,
 		}

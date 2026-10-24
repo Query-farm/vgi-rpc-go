@@ -47,7 +47,7 @@ func (s *nsCountState) Exchange(_ context.Context, in arrow.RecordBatch, out *Ou
 var nsCountSchema = arrow.NewSchema([]arrow.Field{{Name: "rows", Type: arrow.PrimitiveTypes.Int64}}, nil)
 
 // newNamespacedServer hosts all three protocols a co-hosting server can carry:
-// the application's own, vgi_rpc.Reflection.v1, and vgi_rpc.Identity.v1.
+// the application's own, vgi_rpc.Reflection.v1, and vgi_rpc.Identity.v2.
 func newNamespacedServer(t *testing.T) *Server {
 	t.Helper()
 	RegisterStateType(&nsCountState{})
@@ -73,7 +73,7 @@ func newNamespacedServer(t *testing.T) *Server {
 			return IssuedGrant{
 				Token:     "grant-for-" + principal,
 				GrantID:   "gid-1",
-				ExpiresAt: float64(time.Now().Add(time.Hour).Unix()),
+				ExpiresAt: time.Now().Add(time.Hour),
 			}, nil
 		},
 	})
@@ -195,7 +195,7 @@ func TestPathAndMetadataProtocolMustAgree(t *testing.T) {
 
 // Accepted on HTTP, where the path segment already resolved the binding.
 //
-// This test asserted the opposite until IDENTITY_V1_SPEC.md §5c settled it, and
+// This test asserted the opposite until IDENTITY_V2_SPEC.md §5c settled it, and
 // the reversal is worth recording rather than quietly editing: "vgi_rpc.protocol
 // is required on every request" was the original brief, two ports implemented it
 // strictly, and one became unshippable -- the shared conformance harness's

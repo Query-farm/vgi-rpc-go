@@ -3,7 +3,7 @@
 
 package vgirpc
 
-// vgi_rpc.Identity.v1, driven end to end over a raw transport.
+// vgi_rpc.Identity.v2, driven end to end over a raw transport.
 //
 // Every other identity test in this port constructs an *IdentityImpl directly
 // and hands it a *CallContext it built itself. That is exactly the shape that

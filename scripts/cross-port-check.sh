@@ -18,7 +18,7 @@
 #                            full structure against Python's. Exits non-zero on
 #                            disagreement.
 #   identity_consistency.py  greps this port's source for the constants and
-#                            strings vgi_rpc.Identity.v1 requires and prints a
+#                            strings vgi_rpc.Identity.v2 requires and prints a
 #                            matrix. A source grep is a weak instrument; it is
 #                            here because the alternative is nothing.
 #

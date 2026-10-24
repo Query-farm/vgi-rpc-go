@@ -272,6 +272,10 @@ Register a `DispatchHook` to observe every RPC call (tracing, metrics, logging):
 server.SetDispatchHook(myHook)
 ```
 
+`SetDispatchHook` replaces; `AddDispatchHook` runs a further hook alongside the
+installed one (an access log plus metrics, say). See
+[Combining hooks](docs/guide/observability.md#combining-hooks).
+
 ### OpenTelemetry
 
 The optional `vgirpc/otel` module provides a ready-made hook with W3C trace propagation, spans, and metrics:
@@ -317,7 +321,7 @@ Arrow parser. A request whose two carriers disagree is refused with 400, a
 percent sign in the protocol segment is refused without decoding, and an
 unhosted protocol is a 404. Co-hosted framework protocols are reached the same
 way as anything else: `POST /vgi_rpc.Reflection.v1/describe`,
-`POST /vgi_rpc.Identity.v1/issue_grant`.
+`POST /vgi_rpc.Identity.v2/issue_grant`.
 
 All request and response bodies use `Content-Type: application/vnd.apache.arrow.stream`.
 
@@ -472,14 +476,20 @@ hosting part of a protocol: a capability that may be absent is its own protocol.
 ## Introspection
 
 Introspection is `vgi_rpc.Reflection.v1`, a protocol co-hosted alongside the
-application's own. Register it with `vgirpc.RegisterReflection(server)`; a
-client then calls `list_protocols` to learn what the server hosts and
-`describe` for one protocol's methods:
+application's own. It is opt-in: register it with
+`vgirpc.RegisterReflection(server)`. A client then asks over the connection it
+already holds — any `*HttpClient` or `*TcpClient` (TCP, Unix, Iroh), bound to
+any protocol the server hosts; nothing new is opened and nothing is closed:
 
-```python
-from vgi_rpc.introspect import introspect
-info = introspect(transport)          # list_protocols, then describe
+```go
+hosted, err := vgirpc.ListProtocols(ctx, client)                 // []vgirpc.HostedProtocol, server order
+desc, err := vgirpc.DescribeProtocol(ctx, client, "acme.App.v1") // *vgirpc.ClientServiceDescription
 ```
+
+A server without reflection returns `*vgirpc.ReflectionNotSupportedError`,
+which carries the server's error fields and leaves the connection usable; an
+unknown protocol name is an ordinary `*RpcError` with kind
+`protocol_not_supported`. See `docs/guide/introspection.md`.
 
 A description carries method names, types (unary/stream), parameter, result and
 header schemas, and the protocol's canonical `protocol_hash` — a digest taken

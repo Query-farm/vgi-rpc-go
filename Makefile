@@ -42,7 +42,25 @@ VGI_RPC_PYTHON_REPO ?= $(wildcard $(HOME)/Development/vgi-rpc-python)
 # carries jsonschema for access-record validation, and httpx2 is pinned to a
 # release that satisfies the Python reference's security minimum.
 VGI_RPC_REF_EXTRAS := [http,cli,external,conformance]
-VGI_RPC_TEST_DEPS := pytest pytest-timeout httpx2==2.13.1
+VGI_RPC_TEST_DEPS := pytest pytest-timeout pytest-xdist httpx2==2.13.1
+
+# --- Parallelism ---------------------------------------------------------
+# The conformance suites run under pytest-xdist. Every fixture already binds
+# ephemeral ports (the worker prints PORT:/TCP:/UNIX: discovery lines), unix
+# sockets come from mkstemp and access logs from tmp_path_factory, so each
+# xdist worker owns its own servers; session fixtures are per xdist worker.
+#
+#	CONFORMANCE_WORKERS=16 make test   # fixed count
+#	CONFORMANCE_WORKERS=0 make test    # serial (no xdist)
+#
+# `auto` is one worker per core. `leakcheck` stays serial: it needs `-s` to
+# see the worker's stderr, which xdist does not forward. An interpreter
+# without pytest-xdist (a .venv bootstrapped before it joined
+# VGI_RPC_TEST_DEPS) runs serially and says so instead of failing on `-n`.
+CONFORMANCE_WORKERS ?= auto
+PYTEST_XDIST = $(if $(filter 0,$(CONFORMANCE_WORKERS)),,$$($(PYTHON) -c 'import xdist' 2>/dev/null \
+	&& printf -- "-n %s" "$(CONFORMANCE_WORKERS)" \
+	|| echo "conformance: pytest-xdist missing from $(PYTHON); running serially" >&2))
 
 # Bootstrap only when PYTHON came from this file — never when the caller
 # supplied their own interpreter.
@@ -139,7 +157,7 @@ go-test:
 	go test ./...
 
 test: go-test conformance-worker $(PYTHON_BOOTSTRAP)
-	$(PYTHON) -m pytest test_go_conformance.py -v
+	$(PYTHON) -m pytest test_go_conformance.py -v $(PYTEST_XDIST)
 
 # --- Client role -----------------------------------------------------------
 # The same suite, pointed the other way: the Go client under test, driven
@@ -166,20 +184,20 @@ CLIENT_DRIVER := $(CURDIR)/conformance-client-driver
 test-client: conformance-worker conformance-client-driver $(PYTHON_BOOTSTRAP)
 	VGI_CONFORMANCE_ROLE=client VGI_CONFORMANCE_SERVER=go \
 	VGI_CLIENT_DRIVER="$(CLIENT_DRIVER)" \
-	$(PYTHON) -m pytest test_go_conformance.py -v
+	$(PYTHON) -m pytest test_go_conformance.py -v $(PYTEST_XDIST)
 
 test-client-python: conformance-client-driver $(PYTHON_BOOTSTRAP)
 	VGI_CONFORMANCE_ROLE=client VGI_CONFORMANCE_SERVER=python \
 	VGI_CLIENT_DRIVER="$(CLIENT_DRIVER)" \
 	VGI_RPC_PYTHON_REPO="$(VGI_RPC_PYTHON_REPO)" \
 	VGI_RPC_PYTHON="$(PYTHON)" \
-	$(PYTHON) -m pytest test_go_conformance.py -v
+	$(PYTHON) -m pytest test_go_conformance.py -v $(PYTEST_XDIST)
 
 # --- Cross-port drift ------------------------------------------------------
 # The reference's two cross-implementation checks, run against this port. They
 # compare this port *to Python* — describe_diff over vgi_rpc.Reflection.v1
 # (protocol_hash first, then every field of every method), identity_consistency
-# over the Identity.v1 constants — so neither is expressible inside this
+# over the Identity.v2 constants — so neither is expressible inside this
 # repository alone, and until they were wired into CI they ran only when a
 # maintainer remembered to run them. That is how four ports came to describe
 # vgi_rpc.Reflection.v1 as having zero methods.
@@ -227,9 +245,8 @@ conformance-runner: conformance-worker $(PYTHON_BOOTSTRAP)
 conformance-access-log: conformance-worker $(PYTHON_BOOTSTRAP)
 	rm -f $(ACCESS_LOG)
 	$(PYTHON_BIN)vgi-rpc-test \
-		--cmd "$(GO_CONFORMANCE_WORKER) --access-log $(ACCESS_LOG) --access-log-debug" \
+		--cmd "$(GO_CONFORMANCE_WORKER) --access-log $(ACCESS_LOG)" \
 		--access-log "$(ACCESS_LOG)" \
-		--require-request-data \
 		--filter '!large_payload.echo_binary_over_int32_max'
 	rm -f $(ACCESS_LOG)
 
@@ -260,7 +277,7 @@ hosted-reverse: conformance-worker $(PYTHON_BOOTSTRAP)
 
 coverage: conformance-worker-cover $(PYTHON_BOOTSTRAP)
 	rm -rf $(COVDIR) && mkdir -p $(COVDIR)
-	GOCOVERDIR=$(COVDIR) $(PYTHON) -m pytest test_go_conformance.py -v
+	GOCOVERDIR=$(COVDIR) $(PYTHON) -m pytest test_go_conformance.py -v $(PYTEST_XDIST)
 	go tool covdata textfmt -i=$(COVDIR) -o=coverage-go.txt
 	@echo "Coverage written to coverage-go.txt"
 
@@ -286,7 +303,7 @@ leakcheck: $(PYTHON_BOOTSTRAP)
 
 race: $(PYTHON_BOOTSTRAP)
 	go build -race -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
-	GORACE=halt_on_error=1 VGI_GO_WORKER_TEARDOWN_TIMEOUT=30 $(PYTHON) -m pytest test_go_conformance.py -v -p no:timeout
+	GORACE=halt_on_error=1 VGI_GO_WORKER_TEARDOWN_TIMEOUT=30 $(PYTHON) -m pytest test_go_conformance.py -v -p no:timeout $(PYTEST_XDIST)
 
 # --- Documentation verification -------------------------------------------
 # Checks README.md, CLAUDE.md and docs/** against the code: module paths

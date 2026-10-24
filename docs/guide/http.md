@@ -25,7 +25,7 @@ Arrow parser. A request whose two carriers disagree is refused with 400, a
 percent sign in the protocol segment is refused without decoding, and an
 unhosted protocol is a 404. Co-hosted framework protocols are reached the same
 way as anything else: `POST /vgi_rpc.Reflection.v1/describe`,
-`POST /vgi_rpc.Identity.v1/issue_grant`.
+`POST /vgi_rpc.Identity.v2/issue_grant`.
 
 All request and response bodies use `Content-Type: application/vnd.apache.arrow.stream`.
 

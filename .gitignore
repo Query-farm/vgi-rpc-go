@@ -1,8 +1,11 @@
-conformance-worker
-conformance-client-driver
-vgi-rpc-conformance-go
-hello-worker
-benchmark-worker
+# Binaries built at the repository root. Anchored: unanchored, a name also
+# matches the source directory of the same name (conformance/cmd/vgi-rpc-conformance-go/,
+# tools/docverify/), which tools that honour .gitignore, such as rsync, then skip.
+/conformance-worker
+/conformance-client-driver
+/vgi-rpc-conformance-go
+/hello-worker
+/benchmark-worker
 __pycache__/
 .benchmarks/
 site/
@@ -15,5 +18,5 @@ _vgi-rpc-python/
 .claude/
 
 # Build artifacts
-docverify
+/docverify
 .venv/

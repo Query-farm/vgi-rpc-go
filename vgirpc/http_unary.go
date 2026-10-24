@@ -108,17 +108,6 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	var handlerErr error
 	stats := &CallStatistics{}
 
-	// Capture self-contained IPC bytes of the request batch for observability
-	// hooks. This re-encodes the whole request payload, so only pay for it when
-	// a hook is actually installed to consume DispatchInfo.RequestData.
-	// Best-effort: a serialization failure here must not fail dispatch.
-	var reqBytes []byte
-	if h.server.dispatchHook != nil {
-		if rb, serErr := SerializeRequestBatch(req.Batch); serErr == nil {
-			reqBytes = rb
-		}
-	}
-
 	transportMeta := buildHTTPTransportMeta(req.Metadata, r)
 	// The owning binding's identity, not the server's primary: see
 	// Server.dispatchLabel.
@@ -134,7 +123,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		TransportMetadata: transportMeta,
 		Auth:              auth,
 		RemoteAddr:        r.RemoteAddr,
-		RequestData:       reqBytes,
+		Request:           h.server.requestShapeForHook(req.Batch),
 		Implementation:    h.server.implementation,
 	}
 

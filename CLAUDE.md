@@ -16,6 +16,17 @@ make cross-port # compare this port to the Python reference (see below)
 make ci         # every gate in .github/workflows/ci.yml — run this before pushing
 ```
 
+The pytest conformance targets (`test`, `test-client`, `test-client-python`,
+`coverage`, `race`) run under pytest-xdist, one worker per core by default.
+`CONFORMANCE_WORKERS=8 make test` caps it; `CONFORMANCE_WORKERS=0 make test`
+runs serially. Every fixture binds ephemeral ports (the worker's
+`PORT:`/`TCP:`/`UNIX:` discovery lines), sockets come from `mkstemp` and access
+logs from `tmp_path_factory`, so xdist workers never share a server — keep it
+that way: a new fixture must not hardcode a port or a shared path. `leakcheck`
+stays serial (it needs `-s`, which xdist does not forward). An interpreter
+without `pytest-xdist` falls back to serial with a warning; `pytest-xdist` is in
+the bootstrap's `VGI_RPC_TEST_DEPS`, so delete an older `.venv` to pick it up.
+
 `make ci` exists because the other targets, run together, are still not the CI
 gate list. Four gates are reachable through no other make target —
 `staticcheck` at the version CI pins (`STATICCHECK_VERSION`, since releases add
@@ -66,7 +77,7 @@ the Python reference? It runs the reference's own two tools —
 `vgi_rpc.Reflection.v1` for every protocol it hosts and compares
 `protocol_hash` and then every field of every method against Python's; and
 `identity_consistency.py`, which greps this port's source for the
-`vgi_rpc.Identity.v1` constants and error kinds.
+`vgi_rpc.Identity.v2` constants and error kinds.
 
 They ran only by hand until they were wired into CI, and in one day of running
 them properly they found four ports describing `vgi_rpc.Reflection.v1` as
@@ -116,7 +127,7 @@ To install by hand, matching what the bootstrap and CI do:
 
 ```bash
 pip install -e "/path/to/vgi-rpc-python[http,cli,external,conformance]" \
-    pytest pytest-timeout "httpx2==2.9.1"
+    pytest pytest-timeout pytest-xdist "httpx2==2.9.1"
 ```
 
 Override `PYTHON` to use an interpreter you manage yourself. Supplying it on the command line or in the environment skips the `.venv` bootstrap entirely:
@@ -168,20 +179,20 @@ upstream changed something not yet released. See `.github/workflows/ci.yml`.
 This port tracks `vgi-rpc-python` for wire compatibility. Two surfaces matter:
 
 - **Introspection** — `vgi_rpc.Reflection.v1`, an ordinary co-hosted protocol: `list_protocols` for what the server hosts, then `describe` for one protocol's methods. `__describe__` is retired and is refused with a message naming that replacement (see `retiredDescribeError`) rather than with a bare "no such method", which a stale client cannot tell from "this server was built without introspection". Each protocol's `protocol_hash` is the **canonical** digest (`ComputeProtocolHash`, `protocolhash.go`), taken over what Arrow decodes to rather than over serialized IPC bytes, and so comparable across ports — `WIRE_PROTOCOL.md §14`. The legacy byte-based digest taken over the old describe payload is gone with the payload.
-- **Access log** — every dispatch fires `AccessLogHook` (when installed), writing one JSONL record per call. The record shape conforms to `vgi_rpc/access_log.schema.json` in the Python repo and validates under `vgi-rpc-test --access-log <path>`. `DispatchInfo` carries `Protocol`, `ProtocolHash`, `ProtocolVersion`, `RemoteAddr`, `RequestData`, `StreamID`, `Cancelled`, and `HTTPStatus`; the access-log emitter maps these to the spec field names. `Protocol` and `ProtocolHash` name the protocol that **owns the dispatched method**, not the server's primary, and both come from `Server.dispatchLabel(binding)` at every emit site — a record naming one protocol while carrying another's digest is well-formed, passes the schema, and decodes against the wrong description. Configure protocol-version via `Server.SetProtocolVersion(...)`.
+- **Access log** — every dispatch fires `AccessLogHook` (when installed), writing one JSONL record per call. The record shape conforms to `vgi_rpc/access_log.schema.json` in the Python repo and validates under `vgi-rpc-test --access-log <path>`. `DispatchInfo` carries `Protocol`, `ProtocolHash`, `ProtocolVersion`, `RemoteAddr`, `Request` (the request's shape: field names, Arrow types, rows — never values), `StreamID`, `Cancelled`, and `HTTPStatus`; the access-log emitter maps these to the spec field names. `Protocol` and `ProtocolHash` name the protocol that **owns the dispatched method**, not the server's primary, and both come from `Server.dispatchLabel(binding)` at every emit site — a record naming one protocol while carrying another's digest is well-formed, passes the schema, and decodes against the wrong description. Configure protocol-version via `Server.SetProtocolVersion(...)`.
 
-The conformance worker accepts `--access-log <path>` anywhere on the CLI to enable JSONL emission, plus `--access-log-sample <rate>`, `--access-log-async`, `--access-log-queue-size <n>` and `--access-log-debug` (the CLI face of `AccessLogHook.SetDebug`).
+The conformance worker accepts `--access-log <path>` anywhere on the CLI to enable JSONL emission, plus `--access-log-sample <rate>`, `--access-log-async` and `--access-log-queue-size <n>`. `--access-log-debug` was removed with payload logging and is refused.
 
 Verify a change against the spec with the standalone runner, which validates every emitted record against the schema and exits non-zero if any fails:
 
 ```bash
 make conformance-worker
 ~/…/vgi-rpc/.venv/bin/vgi-rpc-test \
-  --cmd "$PWD/conformance-worker --access-log /tmp/go-al.jsonl --access-log-debug" \
-  --access-log /tmp/go-al.jsonl --require-request-data
+  --cmd "$PWD/conformance-worker --access-log /tmp/go-al.jsonl" \
+  --access-log /tmp/go-al.jsonl
 ```
 
-`--access-log-debug` + `--require-request-data` belong together and are not optional here: at INFO the worker omits `request_data`, and a log that never carries the field satisfies every rule governing it trivially, so the payload contract goes unchecked. CI runs exactly this command (`.github/workflows/ci.yml`, "Verify access log against the spec") — do not fall back to checking it by hand, which is how it drifted before.
+**No payload value reaches any log, at any level.** A record describes the request by `request_fields` (`[{name, type}]`) and `request_rows`, and HTTP state tokens (if ever logged) only by size (`request_state_bytes` / `response_state_bytes`). `request_data`, `request_state` and `response_state` are forbidden by the reference schema: the framework cannot know which parameters are secret, and a VGI `catalog_attach` carries API keys in its options. There is deliberately no opt-in (the old `AccessLogHook.SetDebug` is gone), and the reference rejects `--require-request-data`. `TestNoPayloadInLogsHTTP`/`TestNoPayloadInLogsPipe` hold this: a sentinel secret in a request argument and in stream state must not appear, raw or base64-encoded, in the access log or the slog output at its most verbose. Error messages that could quote decrypted state report only the error's type (`openToken`). Records carry no `truncated: "payload_omitted"` marker: nothing is omitted, and the reference stopped emitting it in 0.50.1. CI runs exactly this command (`.github/workflows/ci.yml`, "Verify access log against the spec") — do not fall back to checking it by hand, which is how it drifted before.
 
 `--cmd` only exercises the pipe path. The HTTP-only fields (`request_id`, `request_bytes`, `response_bytes`, `externalized_bytes`) need the worker started with `--http` / `--http-with-storage` and the runner pointed at it with `--url`.
 
@@ -222,7 +233,7 @@ vgi-rpc-test --cmd "$PWD/conformance-worker"   # also --unix / --tcp
 
 Run it on macOS. Linux caps a single transfer at `0x7ffff000` and returns a short count that any correct loop absorbs, so a Linux-only CI cannot tell you whether this still holds. The test is scoped to pipe/unix/tcp; HTTP bodies take a different path with their own caps.
 
-Two CI steps run `vgi-rpc-test`, and the split is deliberate. `_pytest_suite.py` has no `large_payload` tests, so the category is reachable only through the runner; "Run conformance suite (large payloads included)" is where the >2 GiB test executes, with no access log and a 600s budget. The access-log step excludes that one test by name, because at `--access-log-debug` the emitter base64s the whole request batch into the record — a 4 MiB payload already produces a 5,593,736-byte record, so 2 GiB would produce a ~2.9 GB JSONL line for Python to schema-validate. Do not merge the two steps back together.
+Two CI steps run `vgi-rpc-test`, and the split is deliberate. `_pytest_suite.py` has no `large_payload` tests, so the category is reachable only through the runner; "Run conformance suite (large payloads included)" is where the >2 GiB test executes, with no access log and a 600s budget. The access-log step excludes that one test by name only for runtime: it already runs in the step before, and the log's shape is exercised as well by a 4 MiB payload. Do not merge the two steps back together.
 
 ### Access-log rotation
 
@@ -242,9 +253,9 @@ hook := vgirpc.NewAccessLogHook(writer, serverVersion)
 server.SetDispatchHook(hook)
 ```
 
-`AccessLogHook` serializes writes through an internal mutex, so wrapping a non-thread-safe writer is safe. For high-volume workloads, call `hook.SetDebug(true)` only when replay/audit needs the full base64 `request_data` field — at INFO the field is replaced with `original_request_bytes` + `truncated: "payload_omitted"`, which typically halves record size.
+`AccessLogHook` serializes writes through an internal mutex, so wrapping a non-thread-safe writer is safe. Records never carry request payloads (see "Access log" above), so record size does not grow with the request.
 
-`"payload_omitted"` is deliberately not `true`. `true` means genuine size-driven shedding; `"payload_omitted"` means nothing was lost to a cap, the emitter simply is not logging payloads at this level. Sharing one marker made it fire on essentially every record and left a consumer scanning for real data loss with nothing to filter on. This port enforces no per-record byte cap (rotation and truncation are the caller's, per the `lumberjack` pattern above), so it never emits `true`.
+This port enforces no per-record byte cap (rotation and truncation are the caller's, per the `lumberjack` pattern above), so it never emits `truncated` at all.
 
 ### Sentry integration
 
@@ -264,7 +275,8 @@ vgisentry.Instrument(server, nil) // default config
 Limitations vs Python:
 - No auto-attach on server construction — call `Instrument` explicitly.
 - No `record_params` / `tag_params` (per-call kwarg recording): vgi-rpc-go fires `OnDispatchStart` before parameter deserialisation, so the typed params struct isn't visible to the hook. The remaining surface (auth, claims, custom tags, error capture, transactions) is fully supported.
-- `SetDispatchHook` holds at most one hook in core; `Instrument` replaces it. For composite usage (AccessLog + Sentry + OTel) wrap them in a caller-side multiplexing `DispatchHook` before registering.
+- `Instrument` (and `vgiotel.InstrumentServer`) add their hook with `Server.AddDispatchHook`, composing with an access log or each other via `MultiDispatchHook`. A later `SetDispatchHook` still replaces all of them.
+- The submodules pin a *published* core version (no `replace`), so a submodule can use new core API only after a core release that has it.
 
 ### Race-detector pass
 
@@ -315,11 +327,13 @@ field reachable from a handler needs the same treatment — the conformance
 suite does not exercise concurrent first requests, so this class of bug does
 not show up there.
 
-### `DispatchInfo.RequestData` is conditional
+### `DispatchInfo.Request` is a shape, never a payload
 
-`SerializeRequestBatch` re-encodes the whole request payload, so it only runs
-when a `DispatchHook` is actually registered. With no hook installed,
-`RequestData` is nil. See `http_unary.go`, `http_stream.go`, `server_serve.go`.
+`DispatchInfo.Request` (`RequestShapeOf`) is the request batch's column names,
+Arrow types and row count. Hooks feed logs, so no payload value reaches a hook
+through `DispatchInfo`. The HTTP paths build it only when a `DispatchHook` is
+installed (`Server.requestShapeForHook`); the byte-stream path builds
+`DispatchInfo` only then anyway.
 
 ## Documentation verification
 

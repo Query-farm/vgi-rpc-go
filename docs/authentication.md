@@ -210,7 +210,7 @@ The normative cross-language contract is
 
 ## Accepting identity credentials as bearers
 
-When a server hosts `vgi_rpc.Identity.v1` (`RegisterIdentity`), its
+When a server hosts `vgi_rpc.Identity.v2` (`RegisterIdentity`), its
 `HttpServer` also accepts that identity's credentials as ordinary bearers,
 appended after your own `AuthenticateFunc` in this order:
 
@@ -244,7 +244,11 @@ if err := hs.InitIdentityBearer(); err != nil { // refuse to start on a bad comp
 ```
 
 `VGI_RPC_GRANT_KEYS` is a comma-separated list of standard-base64 32-byte keys;
-the first mints, all verify (rotate by adding the new key first). A grant
+the first mints, all verify (rotate by adding the new key first). A custom
+`MintGrant` returns an `IssuedGrant` whose `ExpiresAt` is a `time.Time`; it is
+sent as `timestamp[us, tz="UTC"]` (non-null) under `vgi_rpc.Identity.v2` —
+Identity.v1 carried it as float64 Unix seconds, and a v1 peer fails discovery
+rather than mis-decoding it. A grant
 authenticates as `Domain "grant"` with claims `grant_id`, `scopes`, `purpose`
 and **no `auth_time`**, so a grant can never mint another grant
 (`stale_auth`). Grants are not individually revocable: keep the max TTL short

@@ -425,7 +425,7 @@ def conformance_http_cors_port(conformance_fake_storage: str) -> Iterator[int]:
 
 @pytest.fixture(scope="session")
 def conformance_http_identity_port() -> Iterator[int]:
-    """A Go HTTP worker hosting ``vgi_rpc.Identity.v1`` with both hooks.
+    """A Go HTTP worker hosting ``vgi_rpc.Identity.v2`` with both hooks.
 
     Backs the shared identity group.  The protocol is nearly all guards and
     every guard reads deployment policy -- who may introspect, what a

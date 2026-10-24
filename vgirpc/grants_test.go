@@ -247,7 +247,7 @@ func TestSealedMintWhenNoHookAndGrantsCannotMintGrants(t *testing.T) {
 		t.Fatal(err)
 	}
 	if claims.Principal != "alice" || claims.ExpiresAt-claims.IssuedAt != 3600 || claims.GrantID != grant.GrantID ||
-		grant.ExpiresAt != float64(claims.ExpiresAt) {
+		!grant.ExpiresAt.Equal(time.Unix(claims.ExpiresAt, 0)) {
 		t.Fatalf("minted claims %+v for grant %+v", claims, grant)
 	}
 	if _, err := impl.IssueGrant("x", nil, 0, idCtx(fresh)); !isKind(err, "grant_refused") {

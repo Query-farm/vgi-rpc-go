@@ -24,6 +24,35 @@ type DispatchHook interface {
 
 Both calls are wrapped in `recover` — a panicking hook never crashes the server.
 
+### Combining hooks
+
+A server holds one hook. To run several -- an access log, Sentry and
+OpenTelemetry, say -- use `AddDispatchHook`, which composes with whatever is
+already installed instead of replacing it:
+
+```go
+server.AddDispatchHook(accessLog)
+server.AddDispatchHook(metricsHook)
+```
+
+or build the composite yourself with `vgirpc.MultiDispatchHook(a, b, c)` and
+pass it to `SetDispatchHook`. Hooks start in order, each receiving the context
+the previous one returned, and end in reverse. A panic in one hook is logged
+and does not stop the others.
+
+`vgiotel.InstrumentServer` (from `vgirpc/otel` v0.20.0) and
+`vgisentry.Instrument` (from `vgirpc/sentry` v0.17.0) add their hook the same
+way, so the three combine in any order:
+
+```go
+server.AddDispatchHook(accessLog)
+vgiotel.InstrumentServer(server, vgiotel.DefaultConfig())
+vgisentry.Instrument(server, nil)
+```
+
+`SetDispatchHook` still replaces everything installed, so call it before the
+instrumenters, never after.
+
 ### DispatchInfo
 
 `DispatchInfo` carries per-call metadata:
