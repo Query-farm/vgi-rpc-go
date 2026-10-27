@@ -223,6 +223,22 @@ type ParamsSchemaDeclarer interface {
 	VgiRpcParamsSchema() *arrow.Schema
 }
 
+// WrappedRequestSizeLimiter optionally bounds the raw IPC bytes carried by a
+// params type's single binary "request" envelope. The limit is checked before
+// its nested IPC schema or buffers are decoded; it does not cap the transport
+// request itself or change reflection. Types without this interface keep their
+// existing size policy.
+//
+// The method must be safe to call on a zero-valued params instance and return a
+// constant: positive means a byte limit, zero means no additional limit, and a
+// negative value is invalid. A value or pointer receiver is supported.
+type WrappedRequestSizeLimiter interface {
+	// VgiRpcMaxWrappedRequestBytes returns the additional packed IPC byte bound.
+	VgiRpcMaxWrappedRequestBytes() int
+}
+
+var wrappedRequestSizeLimiterType = reflect.TypeFor[WrappedRequestSizeLimiter]()
+
 // paramsSchemaFor returns the schema to advertise for a params type: the
 // type's own declaration when it implements ParamsSchemaDeclarer, otherwise
 // the one derived from its struct tags.
