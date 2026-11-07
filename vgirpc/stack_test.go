@@ -86,3 +86,19 @@ func TestWithStackKeepsAnExistingStack(t *testing.T) {
 		t.Fatal("WithStack must wrap transparently")
 	}
 }
+
+// An error converted to an RpcError keeps the original's stack.
+func TestRpcErrorCarriesAConvertedStack(t *testing.T) {
+	orig := handlerSiteError()
+	rpc := &RpcError{Type: "RuntimeError", Message: orig.Error()}
+	if StackTraceOf(rpc) != nil || WithStack(rpc) == error(rpc) {
+		t.Fatal("a bare RpcError must carry no stack")
+	}
+	rpc.SetStackTrace(StackTraceOf(orig))
+	extra := decodeExtra(t, rpc, traceOpts{include: true, method: "m"})
+	var tb string
+	_ = json.Unmarshal(extra["traceback"], &tb)
+	if !strings.HasPrefix(tb, "RuntimeError: ") || !strings.Contains(tb, "handlerSiteError") {
+		t.Fatalf("traceback = %s", tb)
+	}
+}

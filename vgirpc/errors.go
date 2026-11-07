@@ -38,6 +38,32 @@ type RpcError struct {
 	// order, unknown types included. The typed accessors ([RpcError.RetryInfo]
 	// and friends) return the catalog entry of their type and skip the rest.
 	Details []map[string]any
+
+	// stack is the creation-site stack carried over by SetStackTrace.
+	stack *callStack
+}
+
+type callStack struct{ pcs []uintptr }
+
+// StackTrace returns the stack recorded with SetStackTrace, or nil. It makes
+// *RpcError a [StackTracer], so a server error converted to an RpcError keeps
+// the stack of the error it was converted from.
+func (e *RpcError) StackTrace() []uintptr {
+	if e.stack == nil {
+		return nil
+	}
+	return e.stack.pcs
+}
+
+// SetStackTrace records pcs (as runtime.Callers reports them) as the stack the
+// remote traceback shows for this error. Use it when converting an error into
+// an RpcError: e.SetStackTrace(vgirpc.StackTraceOf(original)). nil clears it.
+func (e *RpcError) SetStackTrace(pcs []uintptr) {
+	if len(pcs) == 0 {
+		e.stack = nil
+		return
+	}
+	e.stack = &callStack{pcs: pcs}
 }
 
 // Error returns a string of the form "Type: Message".

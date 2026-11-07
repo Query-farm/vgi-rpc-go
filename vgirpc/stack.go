@@ -22,7 +22,8 @@ type traceOpts struct {
 // -- rather than a synthesized one.
 //
 // The returned program counters are in the form runtime.Callers reports.
-// [Errorf] and [WithStack] return errors that implement it.
+// [Errorf] and [WithStack] return errors that implement it, as does an
+// [RpcError] given one with [RpcError.SetStackTrace].
 type StackTracer interface {
 	StackTrace() []uintptr
 }
@@ -58,11 +59,24 @@ func WithStack(err error) error {
 	if err == nil {
 		return nil
 	}
-	var st StackTracer
-	if errors.As(err, &st) {
+	if StackTraceOf(err) != nil {
 		return err
 	}
 	return &stackError{err: err, pcs: callers(1)}
+}
+
+// StackTraceOf returns the stack recorded by err or the innermost error it
+// wraps that carries one (the closest to the fault), or nil.
+func StackTraceOf(err error) []uintptr {
+	var pcs []uintptr
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if st, ok := e.(StackTracer); ok {
+			if p := st.StackTrace(); len(p) > 0 {
+				pcs = p
+			}
+		}
+	}
+	return pcs
 }
 
 const maxTracebackChars = 16000
@@ -85,13 +99,7 @@ func formatTraceback(err error, errType string, trace traceOpts) (string, *[]sta
 		}
 	}
 	frames := []stackFrame{}
-	var pcs []uintptr
-	for e := err; e != nil; e = errors.Unwrap(e) {
-		if st, ok := e.(StackTracer); ok && len(st.StackTrace()) > 0 {
-			pcs = st.StackTrace()
-		}
-	}
-	if len(pcs) > 0 {
+	if pcs := StackTraceOf(err); len(pcs) > 0 {
 		cf := runtime.CallersFrames(pcs)
 		for {
 			f, more := cf.Next()
