@@ -326,7 +326,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			// above. A strict producer overshoot must never be resumable.
 			buf.Reset()
 			errWriter := ipc.NewWriter(&buf, ipc.WithSchema(outputSchema))
-			h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(errWriter, outputSchema, capErr, h.server.serverID, "", h.server.tracebacks()))
+			h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(errWriter, outputSchema, capErr, h.server.serverID, "", h.server.traceFor(info.Name)))
 			h.logIPCWriteErr("close", info.Name, errWriter.Close())
 			handlerErr = capErr
 		}
@@ -711,7 +711,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 		responseBudgetFromContext(ctx).Limit, 0); capErr != nil {
 		buf.Reset()
 		errWriter := ipc.NewWriter(&buf, ipc.WithSchema(schema))
-		h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(errWriter, schema, capErr, h.server.serverID, "", h.server.tracebacks()))
+		h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(errWriter, schema, capErr, h.server.serverID, "", h.server.traceFor(info.Name)))
 		h.logIPCWriteErr("close", info.Name, errWriter.Close())
 		err = capErr
 	}
@@ -779,7 +779,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 
 	if exchangeErr != nil {
 		out.releaseBatches()
-		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, exchangeErr, h.server.serverID, "", h.server.tracebacks()))
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, exchangeErr, h.server.serverID, "", h.server.traceFor(info.Name)))
 		h.logIPCWriteErr("close", info.Name, writer.Close())
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return exchangeErr
@@ -787,7 +787,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 
 	if err := out.validate(); err != nil {
 		out.releaseBatches()
-		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.tracebacks()))
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.traceFor(info.Name)))
 		h.logIPCWriteErr("close", info.Name, writer.Close())
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return err
@@ -797,7 +797,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	newToken, err := h.packCursorToken(callID, state, auth, protocol)
 	if err != nil {
 		out.releaseBatches()
-		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.tracebacks()))
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.traceFor(info.Name)))
 		h.logIPCWriteErr("close", info.Name, writer.Close())
 		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
 		return err
@@ -909,7 +909,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 func (h *HttpServer) writeExchangeCapError(w http.ResponseWriter, schema *arrow.Schema, method string, capErr error) {
 	var errBuf bytes.Buffer
 	errW := ipc.NewWriter(&errBuf, ipc.WithSchema(schema))
-	h.logIPCWriteErr("cap-error-batch", method, writeErrorBatch(errW, schema, capErr, h.server.serverID, "", h.server.tracebacks()))
+	h.logIPCWriteErr("cap-error-batch", method, writeErrorBatch(errW, schema, capErr, h.server.serverID, "", h.server.traceFor(method)))
 	h.logIPCWriteErr("close", method, errW.Close())
 	h.writeArrow(w, http.StatusInternalServerError, errBuf.Bytes())
 }
@@ -1121,13 +1121,13 @@ func (h *HttpServer) runProduceTurn(ctx context.Context, writer *ipc.Writer, sch
 
 	if produceErr != nil {
 		out.releaseBatches()
-		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, produceErr, h.server.serverID, "", h.server.tracebacks()))
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, produceErr, h.server.serverID, "", h.server.traceFor(info.Name)))
 		return false, produceErr
 	}
 
 	if err := out.validate(); err != nil {
 		out.releaseBatches()
-		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.tracebacks()))
+		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.traceFor(info.Name)))
 		return false, err
 	}
 
@@ -1136,7 +1136,7 @@ func (h *HttpServer) runProduceTurn(ctx context.Context, writer *ipc.Writer, sch
 	// continuation-token escape.
 	if capErr := h.checkExternalBudget(ctx, out, info.Name); capErr != nil {
 		out.releaseBatches()
-		h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(writer, schema, capErr, h.server.serverID, "", h.server.tracebacks()))
+		h.logIPCWriteErr("cap-error-batch", info.Name, writeErrorBatch(writer, schema, capErr, h.server.serverID, "", h.server.traceFor(info.Name)))
 		return false, capErr
 	}
 

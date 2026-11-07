@@ -155,7 +155,7 @@ func (h *HttpServer) writeHttpError(w http.ResponseWriter, statusCode int, err e
 		schema = arrow.NewSchema(nil, nil)
 	}
 	var buf bytes.Buffer
-	h.logIPCWriteErr("error-response", "", writeErrorResponse(&buf, schema, err, h.server.serverID, "", h.server.tracebacks()))
+	h.logIPCWriteErr("error-response", "", writeErrorResponse(&buf, schema, err, h.server.serverID, "", h.server.traceFor("")))
 	h.writeArrow(w, statusCode, buf.Bytes())
 }
 

@@ -431,10 +431,11 @@ func (s *Server) SetDebugErrors(enabled bool) {
 	s.SetIncludeTracebacks(enabled)
 }
 
-// tracebacks reports whether errors carry the traceback: always, unless the
-// operator turned them off.
-func (s *Server) tracebacks() bool {
-	return !s.omitTracebacks
+// traceFor is the traceback setting for an error raised by method: included
+// always, unless the operator turned them off. method names the call in the
+// synthesized trace written for an error that carries no stack of its own.
+func (s *Server) traceFor(method string) traceOpts {
+	return traceOpts{include: !s.omitTracebacks, protocol: s.serviceName, method: method}
 }
 
 // drainInputStream reads and discards any batches remaining on the input

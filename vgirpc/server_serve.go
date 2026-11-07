@@ -173,7 +173,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 		// Try to write error response
 		if rpcErr, ok := err.(*RpcError); ok {
 			emptySchema := arrow.NewSchema(nil, nil)
-			s.logIPCWriteErr("error-response", "", writeErrorResponse(w, emptySchema, rpcErr, s.serverID, "", s.tracebacks()))
+			s.logIPCWriteErr("error-response", "", writeErrorResponse(w, emptySchema, rpcErr, s.serverID, "", s.traceFor("")))
 			return nil // continue serving
 		}
 		return err // transport error, stop serving
@@ -184,7 +184,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 	if shmConn.disabled && hasSharedMemoryMetadata(req.Batch) {
 		rpcErr := networkSharedMemoryError()
 		s.logIPCWriteErr("error-response", req.Method,
-			writeErrorResponse(w, arrow.NewSchema(nil, nil), rpcErr, s.serverID, req.RequestID, s.tracebacks()))
+			writeErrorResponse(w, arrow.NewSchema(nil, nil), rpcErr, s.serverID, req.RequestID, s.traceFor(req.Method)))
 		// Terminate instead of interpreting a possible streaming continuation as
 		// another request or draining attacker-controlled input indefinitely.
 		return rpcErr
@@ -214,7 +214,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 				}
 				emptySchema := arrow.NewSchema(nil, nil)
 				s.logIPCWriteErr("error-response", req.Method,
-					writeErrorResponse(w, emptySchema, rpcErr, s.serverID, req.RequestID, s.tracebacks()))
+					writeErrorResponse(w, emptySchema, rpcErr, s.serverID, req.RequestID, s.traceFor(req.Method)))
 				return nil
 			}
 			req.Batch.Release()
@@ -248,7 +248,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 		}
 		emptySchema := arrow.NewSchema(nil, nil)
 		s.logIPCWriteErr("error-response", req.Method,
-			writeErrorResponse(w, emptySchema, rpcErr, s.serverID, req.RequestID, s.tracebacks()))
+			writeErrorResponse(w, emptySchema, rpcErr, s.serverID, req.RequestID, s.traceFor(req.Method)))
 		return nil
 	}
 
@@ -259,7 +259,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 	if req.Method == retiredDescribeMethod {
 		emptySchema := arrow.NewSchema(nil, nil)
 		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, emptySchema,
-			retiredDescribeError(), s.serverID, req.RequestID, s.tracebacks()))
+			retiredDescribeError(), s.serverID, req.RequestID, s.traceFor(req.Method)))
 		return nil
 	}
 
@@ -274,7 +274,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 	if rerr != nil {
 		emptySchema := arrow.NewSchema(nil, nil)
 		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, emptySchema,
-			rerr, s.serverID, req.RequestID, s.tracebacks()))
+			rerr, s.serverID, req.RequestID, s.traceFor(req.Method)))
 		return nil
 	}
 
@@ -294,7 +294,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 				errSchema = arrow.NewSchema(nil, nil)
 			}
 			s.logIPCWriteErr("error-response", req.Method,
-				writeErrorResponse(w, errSchema, pverr, s.serverID, req.RequestID, s.tracebacks()))
+				writeErrorResponse(w, errSchema, pverr, s.serverID, req.RequestID, s.traceFor(req.Method)))
 			return nil
 		}
 	}
@@ -358,7 +358,7 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 	default:
 		s.logIPCWriteErr("error-response", req.Method, writeErrorResponse(w, info.ResultSchema,
 			fmt.Errorf("method type %d not yet implemented", info.Type),
-			s.serverID, req.RequestID, s.tracebacks()))
+			s.serverID, req.RequestID, s.traceFor(req.Method)))
 	}
 
 	// Hook end (panic-safe)

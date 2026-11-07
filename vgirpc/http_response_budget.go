@@ -185,7 +185,7 @@ func (w *responseCapWriter) finish() {
 		err := newResponseCapError(w.method, w.bodyBytes, limit)
 		w.server.logIPCWriteErr("response-cap-error", w.method,
 			writeErrorResponse(&body, arrow.NewSchema(nil, nil), err,
-				w.server.server.serverID, "", w.server.server.tracebacks()))
+				w.server.server.serverID, "", w.server.server.traceFor(w.method)))
 		w.Header().Set(rpcErrorHeader, "true")
 		w.Header().Del("Content-Encoding")
 		w.Header().Del(customContentEncodingHeader)

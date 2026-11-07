@@ -118,3 +118,21 @@ the remote traceback to its user -- and `SetIncludeTracebacks(false)` turns
 them off for the whole server, on every transport it serves. The type,
 message, code, kind and details are sent either way. (`SetDebugErrors` is the
 older name for the same setting.)
+
+The traceback is only as useful as where it was captured. Return an error
+built with `vgirpc.Errorf` (or wrap one with `vgirpc.WithStack`) and the
+traceback and frames are the stack at the error site; any error implementing
+`vgirpc.StackTracer` (`StackTrace() []uintptr`) is used the same way. An error
+with no captured stack gets a short synthesized trace instead -- its type and
+message, the `protocol/method` that raised it, and the wrapped causes -- with
+an empty `frames` list, rather than the dispatcher's own goroutine frames.
+
+```go
+func (h *Handler) Lookup(ctx context.Context, cc *vgirpc.CallContext, key string) (string, error) {
+    v, err := h.db.Get(key)
+    if err != nil {
+        return "", vgirpc.Errorf("lookup %q: %w", key, err) // traceback = this line
+    }
+    return v, nil
+}
+```

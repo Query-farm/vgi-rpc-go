@@ -83,7 +83,7 @@ func TestWrappedErrorsKeepTheirModel(t *testing.T) {
 	if string(m.details) != `[{"@type":"vgi_rpc.RetryInfo","retry_delay_seconds":9}]` {
 		t.Fatalf("wrapped details = %s", m.details)
 	}
-	extra := buildErrorExtra(err, m, false)
+	extra := buildErrorExtra(err, m, traceOpts{})
 	if !strings.Contains(extra, `"exception_type":"IdentityUnavailableError"`) {
 		t.Fatalf("wrapped exception_type lost: %s", extra)
 	}
@@ -236,7 +236,7 @@ func decodeExceptionMetadata(t *testing.T, err error, includeTraceback bool) map
 	t.Helper()
 	var buf bytes.Buffer
 	schema := arrow.NewSchema(nil, nil)
-	if werr := writeErrorResponse(&buf, schema, err, "srv", "", includeTraceback); werr != nil {
+	if werr := writeErrorResponse(&buf, schema, err, "srv", "", traceOpts{include: includeTraceback}); werr != nil {
 		t.Fatal(werr)
 	}
 	r, rerr := ipc.NewReader(&buf)

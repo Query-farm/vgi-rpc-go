@@ -849,7 +849,7 @@ func TestIdentityErrorKindsReachTheWire(t *testing.T) {
 		if !ok {
 			t.Fatalf("%T does not advertise an error kind", err)
 		}
-		extra := buildErrorExtra(err, errorModelOf(err), false)
+		extra := buildErrorExtra(err, errorModelOf(err), traceOpts{})
 		wantType := err.(errorTypeCarrier).ErrorType()
 		if !strings.Contains(extra, `"exception_type":"`+wantType+`"`) {
 			t.Errorf("%T: log_extra = %s, want exception_type %q", err, extra, wantType)

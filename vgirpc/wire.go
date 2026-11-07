@@ -238,11 +238,11 @@ func writeStateTokenBatch(w *ipc.Writer, schema *arrow.Schema, token []byte, cal
 // Carries the error model (WIRE_PROTOCOL.md §8): vgi_rpc.error_code always,
 // vgi_rpc.error_kind when the error declares one, vgi_rpc.error_details when it
 // declares any that pass the catalog rules and fit the 4 KiB cap -- all three
-// mirrored in log_extra. includeTraceback decides whether log_extra carries the
+// mirrored in log_extra. trace decides whether log_extra carries the
 // stack trace; see [Server.SetIncludeTracebacks].
-func writeErrorBatch(w *ipc.Writer, schema *arrow.Schema, err error, serverID, requestID string, includeTraceback bool) error {
+func writeErrorBatch(w *ipc.Writer, schema *arrow.Schema, err error, serverID, requestID string, trace traceOpts) error {
 	model := errorModelOf(err)
-	extraJSON := buildErrorExtra(err, model, includeTraceback)
+	extraJSON := buildErrorExtra(err, model, trace)
 
 	keys := []string{MetaLogLevel, MetaLogMessage, MetaLogExtra, MetaErrorCode}
 	vals := []string{string(LogException), err.Error(), extraJSON, string(model.code)}
@@ -306,12 +306,12 @@ func WriteErrorResponse(w io.Writer, schema *arrow.Schema, err error, serverID, 
 	if schema == nil {
 		schema = arrow.NewSchema(nil, nil)
 	}
-	return writeErrorResponse(w, schema, err, serverID, requestID, true)
+	return writeErrorResponse(w, schema, err, serverID, requestID, traceOpts{include: true})
 }
 
-func writeErrorResponse(w io.Writer, schema *arrow.Schema, err error, serverID, requestID string, debug bool) error {
+func writeErrorResponse(w io.Writer, schema *arrow.Schema, err error, serverID, requestID string, trace traceOpts) error {
 	writer := ipc.NewWriter(w, ipc.WithSchema(schema))
-	writeErr := writeErrorBatch(writer, schema, err, serverID, requestID, debug)
+	writeErr := writeErrorBatch(writer, schema, err, serverID, requestID, trace)
 	closeErr := writer.Close()
 	if writeErr != nil {
 		return writeErr

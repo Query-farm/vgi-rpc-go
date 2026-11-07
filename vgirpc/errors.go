@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"runtime"
 )
 
 // ErrRpc is a sentinel for use with errors.Is to check whether any error in a
@@ -292,8 +291,10 @@ type errorExtra struct {
 	ErrorDetails     json.RawMessage `json:"error_details,omitempty"`
 	// Absent -- not empty -- when the operator turned tracebacks off
 	// (Server.SetIncludeTracebacks); present by default (WIRE_PROTOCOL.md §8).
-	Traceback string       `json:"traceback,omitempty"`
-	Frames    []stackFrame `json:"frames,omitempty"`
+	Traceback string `json:"traceback,omitempty"`
+	// A pointer so an error with no captured stack sends "frames": [] next to
+	// its synthesized traceback, and both are absent when tracebacks are off.
+	Frames *[]stackFrame `json:"frames,omitempty"`
 }
 
 // errorModel is the error model's three layers, read off a server-side error
@@ -315,9 +316,19 @@ func errorModelOf(err error) errorModel {
 }
 
 // buildErrorExtra creates the JSON string for vgi_rpc.log_extra from an error.
-// When includeTraceback is false, stack traces and file paths are omitted.
-func buildErrorExtra(err error, model errorModel, includeTraceback bool) string {
-	errType := fmt.Sprintf("%T", err)
+// When trace.include is false, stack traces and file paths are omitted.
+func buildErrorExtra(err error, model errorModel, trace traceOpts) string {
+	// The stack carrier from Errorf/WithStack is invisible: the class name is
+	// that of the error it carries.
+	named := err
+	for {
+		se, ok := named.(*stackError)
+		if !ok {
+			break
+		}
+		named = se.err
+	}
+	errType := fmt.Sprintf("%T", named)
 
 	// Prefer the wire-stable class name for typed errors. Asked of the error
 	// itself rather than enumerated in a switch: a switch has to be edited
@@ -341,34 +352,8 @@ func buildErrorExtra(err error, model errorModel, includeTraceback bool) string 
 		ErrorDetails:     model.details,
 	}
 
-	if includeTraceback {
-		// Capture Go stack trace
-		buf := make([]byte, 4096)
-		n := runtime.Stack(buf, false)
-		extra.Traceback = string(buf[:n])
-
-		// Extract frames from runtime callers
-		pcs := make([]uintptr, 10)
-		n = runtime.Callers(2, pcs)
-		if n > 0 {
-			callersFrames := runtime.CallersFrames(pcs[:n])
-			count := 0
-			for {
-				frame, more := callersFrames.Next()
-				if count >= 5 {
-					break
-				}
-				extra.Frames = append(extra.Frames, stackFrame{
-					File:     frame.File,
-					Line:     frame.Line,
-					Function: frame.Function,
-				})
-				count++
-				if !more {
-					break
-				}
-			}
-		}
+	if trace.include {
+		extra.Traceback, extra.Frames = formatTraceback(err, errType, trace)
 	}
 
 	data, _ := marshalCompact(extra)
