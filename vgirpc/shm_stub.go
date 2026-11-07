@@ -1,10 +1,12 @@
 // © Copyright 2025-2026, Query.Farm LLC - https://query.farm
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !unix && !windows
+//go:build !windows && !(unix && cgo)
 
 // Stub implementation of the shared-memory side-channel for non-POSIX
-// platforms. Functions return nil/false so callers transparently fall
+// platforms, and for unix builds without cgo (CGO_ENABLED=0; the POSIX
+// implementation calls shm_open through cgo). On those
+// builds functions return nil/false so callers transparently fall
 // back to the pipe transport.
 
 package vgirpc
