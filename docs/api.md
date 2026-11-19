@@ -212,6 +212,35 @@ func PublishExternalResult[R any](value R, storage ExternalStorage,
 | `PublishExternalResult(value, ...)` | `PublishExternal` for a Go value, building the result batch as `Unary` would for result type `R` |
 | `CallContext.RespondWithExternalRef(ref)` | Answer the current unary call with the ref's pointer batch: no build, serialization or upload; never inlined; not counted toward the externalized-response cap |
 
+### Blob vendor
+
+The blob vendor holds the object-storage credentials and hands out
+pre-signed, single-object URLs pinned to its region's storage hosts.
+
+```go
+// From VGI_BLOB_VENDOR_URL + VGI_BLOB_VENDOR_TOKEN: externalize results over
+// VGI_RPC_EXTERNALIZE_THRESHOLD_BYTES, vend upload URLs, advertise and enforce
+// VGI_RPC_MAX_REQUEST_BYTES, advertise VGI_RPC_MAX_UPLOAD_BYTES.
+config, err := vgirpc.ConfigureHTTPServerFromEnv(httpServer, nil)
+
+blobs, err := vgirpc.NewVendorBlobClient(vendorURL, token, vgirpc.BlobPurposeFS, vgirpc.VendorOptions{})
+ref, err := blobs.PutBytes(ctx, data, &vgirpc.BlobScope{Shard: "att-00", ExecutionID: "s.01"}, "call.0")
+data, err = blobs.GetBytes(ctx, ref) // verified against ref's size and SHA-256
+```
+
+| Symbol | Description |
+|---|---|
+| `VendorStorage` | `ExternalStorage` + `UploadURLProvider`: results as purpose `rpc` objects, unsized upload URL pairs from `/v1/upload_urls` |
+| `VendorBlobClient` | Raw blobs (`PutBytes` / `GetBytes` / `Delete` / `DeleteScope`), purpose `fs` by default |
+| `VendorError` | `Status` and `Code` (`not_found`, `idempotency_conflict`, `NoSuchKey`, `size_mismatch`, `sha256_mismatch`, ...) |
+| `PinnedHostsValidator` / `VendorURLValidator` | URL validators accepting only the vendor's storage hosts and prefixes |
+| `ExternalConfigFromEnv` / `ClientExternalConfigFromEnv` | Server / client configs from the environment (`nil` without a vendor) |
+| `ConfigureHTTPServerFromEnv` | Apply the whole blob-vendor environment to an `HttpServer` |
+
+Signed-URL requests use a bare client: no caller transport, cookies or
+redirects. Neither the token nor a signed query string appears in logs or
+errors.
+
 ## RpcError
 
 ```go

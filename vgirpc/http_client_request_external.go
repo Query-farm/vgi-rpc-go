@@ -131,20 +131,28 @@ func (c *HttpClient) externalizeRequestBody(ctx context.Context, body []byte) ([
 	return buildPointerRequestBody(body, urls[0].DownloadURL)
 }
 
+// storageUploadClient carries request uploads to vended URLs. It is bare on
+// purpose -- not the RPC client, whose cookie jar or credential-injecting
+// transport would otherwise reach the storage host (which may also refuse a
+// second auth mechanism) -- and it never follows a redirect, which could carry
+// the signed URL somewhere nobody vetted.
+var storageUploadClient = &http.Client{CheckRedirect: noRedirects}
+
 // putExternalRequest uploads the request body to a vended URL.
 //
-// Deliberately without the client's default headers: the target is object
-// storage rather than the worker, the URL carries its own signature, and an
-// extra header can invalidate one.
+// Deliberately without the client's default headers, cookies or transport:
+// the target is object storage rather than the worker, the URL carries its own
+// signature, and an extra header can invalidate one. Errors name the URL
+// without its (signed) query.
 func (c *HttpClient) putExternalRequest(ctx context.Context, uploadURL string, body []byte) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(body))
 	if err != nil {
-		return &RpcError{Type: "ExternalUploadFailed", Message: fmt.Sprintf("build upload request: %v", err)}
+		return &RpcError{Type: "ExternalUploadFailed", Message: fmt.Sprintf("build upload request for %s", redactExternalURL(uploadURL))}
 	}
 	req.Header.Set("Content-Type", arrowContentType)
-	resp, err := c.inner.Do(req)
+	resp, err := storageUploadClient.Do(req)
 	if err != nil {
-		return &RpcError{Type: "ExternalUploadFailed", Message: fmt.Sprintf("PUT to upload URL failed: %v", err)}
+		return &RpcError{Type: "ExternalUploadFailed", Message: fmt.Sprintf("PUT to upload URL %s failed", redactExternalURL(uploadURL))}
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
