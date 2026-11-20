@@ -255,10 +255,21 @@ func TestVendorStorageUploadAndUploadURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer storage.Close()
+	// The fake counts grants by origin: a server write sends none (puts_rpc),
+	// a client-upload grant sends origin=client_upload (puts_upload), and the
+	// signed PUTs to client-upload objects count apart (client_uploads).
+	stat := func(key string) int64 { return vendorStat(t, base, key) }
+	putsRPC, putsUpload, clientUploads := stat("puts_rpc"), stat("puts_upload"), stat("client_uploads")
 	data := bytes.Repeat([]byte{1, 2, 3}, 4000)
 	download, err := storage.Upload(data, nil, "")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := stat("puts_rpc") - putsRPC; got != 1 {
+		t.Fatalf("server write: puts_rpc +%d, want +1", got)
+	}
+	if got := stat("puts_upload") - putsUpload; got != 0 {
+		t.Fatalf("server write was marked as a client upload: puts_upload +%d", got)
 	}
 	if err := storage.URLValidator()(download); err != nil {
 		t.Fatalf("download URL off the pinned hosts: %v", err)
@@ -281,6 +292,12 @@ func TestVendorStorageUploadAndUploadURL(t *testing.T) {
 	}
 	if pair.ExpiresAt.IsZero() || pair.UploadURL == "" || pair.DownloadURL == "" {
 		t.Fatalf("upload pair = %+v", pair)
+	}
+	if got := stat("puts_upload") - putsUpload; got != 1 {
+		t.Fatalf("client-upload grant: puts_upload +%d, want +1 (origin=%s missing?)", got, ClientUploadOrigin)
+	}
+	if got := stat("puts_rpc") - putsRPC; got != 1 {
+		t.Fatalf("client-upload grant counted as a server write: puts_rpc +%d, want +1", got)
 	}
 	if _, ok := pair.Headers["x-amz-checksum-sha256"]; !ok {
 		t.Fatalf("sized upload URL carries no x-amz-checksum-sha256 header: %v", pair.Headers)
@@ -314,6 +331,9 @@ func TestVendorStorageUploadAndUploadURL(t *testing.T) {
 	}
 	if status := vendorPut(body); status/100 != 2 {
 		t.Fatalf("PUT of the declared body refused (HTTP %d)", status)
+	}
+	if got := stat("client_uploads") - clientUploads; got != 1 {
+		t.Fatalf("client_uploads +%d, want +1", got)
 	}
 	resp, err = http.Get(pair.DownloadURL)
 	if err != nil {

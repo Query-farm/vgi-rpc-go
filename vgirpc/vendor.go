@@ -425,6 +425,13 @@ const (
 	vendorInfoPath        = "/v1/info"
 )
 
+// ClientUploadOrigin is the advisory "origin" a [VendorStorage] sends on the
+// /v1/blobs/put grant it requests for a client to upload a request
+// ([VendorStorage.GenerateUploadURL]); the server's own writes send none.
+// The vendor ignores the field; test fakes count and fault client uploads by
+// it. Matches vgi-rpc-python's CLIENT_UPLOAD_ORIGIN.
+const ClientUploadOrigin = "client_upload"
+
 // noRedirects stops a client following a redirect: one could carry the bearer
 // token or a signed URL to a host nobody vetted.
 func noRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -770,6 +777,8 @@ type vendorPutRequest struct {
 	Scope           *BlobScope
 	ContentEncoding string
 	IdempotencyKey  string
+	// Origin is the advisory grant origin ([ClientUploadOrigin]); empty sends none.
+	Origin string
 }
 
 func (a *vendorAPI) put(ctx context.Context, req vendorPutRequest) (*PutGrant, error) {
@@ -782,6 +791,9 @@ func (a *vendorAPI) put(ctx context.Context, req vendorPutRequest) (*PutGrant, e
 	}
 	if req.IdempotencyKey != "" {
 		body["idempotency_key"] = req.IdempotencyKey
+	}
+	if req.Origin != "" {
+		body["origin"] = req.Origin
 	}
 	resp, err := a.call(ctx, http.MethodPost, vendorPutPath, "put", body)
 	if err != nil {
@@ -1112,7 +1124,10 @@ func (v *VendorStorage) Upload(data []byte, _ *arrow.Schema, contentEncoding str
 // /v1/blobs/put, purpose rpc) for a body of exactly size bytes hashing to
 // sha256Hex. The grant's required headers (x-amz-checksum-sha256 and anything
 // else the signature covers, minus Content-Length) come back as the
-// [UploadURL.Headers] the client must send. Implements [UploadURLProvider].
+// [UploadURL.Headers] the client must send. The grant request carries the
+// advisory origin [ClientUploadOrigin], which the vendor ignores and test
+// fakes use to tell client uploads from the server's own writes. Implements
+// [UploadURLProvider].
 func (v *VendorStorage) GenerateUploadURL(size int64, sha256Hex string) (UploadURL, error) {
 	digest, err := hex.DecodeString(sha256Hex)
 	if err != nil || len(digest) != sha256.Size {
@@ -1122,6 +1137,7 @@ func (v *VendorStorage) GenerateUploadURL(size int64, sha256Hex string) (UploadU
 	defer cancel()
 	grant, err := v.api.put(ctx, vendorPutRequest{
 		Size: size, SHA256B64: base64.StdEncoding.EncodeToString(digest), Purpose: BlobPurposeRPC,
+		Origin: ClientUploadOrigin,
 	})
 	if err != nil {
 		return UploadURL{}, err
