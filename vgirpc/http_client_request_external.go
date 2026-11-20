@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -115,11 +114,18 @@ func (c *HttpClient) externalizeRequestBody(ctx context.Context, body []byte) ([
 	// v2 only. A v1 server vends blank URLs that storage accepts any bytes
 	// on, and asks for a count this client no longer sends; there is no
 	// fallback to that shape.
-	if caps.UploadURLVersion < 2 {
+	if caps.UploadURLVersion < uploadURLProtocolVersion {
 		return nil, &RpcError{
 			Type: "ProtocolError",
-			Message: fmt.Sprintf("server's upload protocol is too old: it advertises %s: %s (v%d); this client needs %s",
-				uploadURLHeader, uploadURLHeaderValue(caps.UploadURLVersion), caps.UploadURLVersion, UploadURLProtocolVersion),
+			Message: fmt.Sprintf("Server upload protocol is too old: it advertises %s v%d and this client needs %d",
+				uploadURLHeader, caps.UploadURLVersion, uploadURLProtocolVersion),
+		}
+	}
+	if caps.UploadURLVersion > uploadURLProtocolVersion {
+		return nil, &RpcError{
+			Type: "ProtocolError",
+			Message: fmt.Sprintf("Server upload protocol is newer than this client: it advertises %s: %d and this client speaks %d",
+				uploadURLHeader, caps.UploadURLVersion, uploadURLProtocolVersion),
 		}
 	}
 	digest := sha256.Sum256(body)
@@ -147,14 +153,8 @@ func (c *HttpClient) externalizeRequestBody(ctx context.Context, body []byte) ([
 	return buildPointerRequestBody(body, urls[0].DownloadURL, sha256Hex)
 }
 
-// uploadURLHeaderValue renders an advertised upload-URL version the way the
-// header spells it, for error messages.
-func uploadURLHeaderValue(version int) string {
-	if version == 1 {
-		return "true"
-	}
-	return strconv.Itoa(version)
-}
+// uploadURLProtocolVersion is [UploadURLProtocolVersion] as a number.
+const uploadURLProtocolVersion = 2
 
 // uploadContentType is the PUT's Content-Type when the vended headers name
 // none: application/octet-stream, not the Arrow media type, because a URL

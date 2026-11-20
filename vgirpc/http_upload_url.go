@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
@@ -180,54 +181,56 @@ func parseUploadRequests(batch arrow.RecordBatch, maxUploadBytes int64) ([]Uploa
 		return nil, retiredCountShape()
 	}
 	if batch.NumRows() != 1 {
-		return nil, uploadRefusal("__upload_url__/init expects exactly one request row, got %d", batch.NumRows())
+		return nil, uploadRefusal("__upload_url__ request expects exactly one row, got %d", batch.NumRows())
 	}
 	list, ok := batch.Column(uploadsIdx).(*array.List)
 	if !ok {
-		return nil, uploadRefusal("uploads must be list<struct<size: int64, sha256: utf8>>, got %s", schema.Field(uploadsIdx).Type)
+		return nil, uploadRefusal("__upload_url__ 'uploads' must be list<struct<size: int64, sha256: utf8>>, got %s", schema.Field(uploadsIdx).Type)
 	}
 	if list.IsNull(0) {
-		return nil, uploadRefusal("uploads must not be null")
+		return nil, uploadRefusal("__upload_url__ 'uploads' must have 1-%d entries, got null", MaxUploadURLCount)
 	}
 	elems, ok := list.ListValues().(*array.Struct)
 	if !ok {
-		return nil, uploadRefusal("uploads must be list<struct<size: int64, sha256: utf8>>, got %s", schema.Field(uploadsIdx).Type)
+		return nil, uploadRefusal("__upload_url__ 'uploads' must be list<struct<size: int64, sha256: utf8>>, got %s", schema.Field(uploadsIdx).Type)
 	}
 	structType := elems.DataType().(*arrow.StructType)
 	sizeIdx, hasSize := structType.FieldIdx("size")
 	shaIdx, hasSHA := structType.FieldIdx("sha256")
 	if !hasSize || !hasSHA {
-		return nil, uploadRefusal("uploads entries must have size and sha256 fields, got %s", structType)
+		return nil, uploadRefusal("__upload_url__ 'uploads' entries must have size and sha256 fields, got %s", structType)
 	}
 	sizes, ok := elems.Field(sizeIdx).(*array.Int64)
 	if !ok {
-		return nil, uploadRefusal("uploads[].size must be int64, got %s", structType.Field(sizeIdx).Type)
+		return nil, uploadRefusal("__upload_url__ uploads[].size must be int64, got %s", structType.Field(sizeIdx).Type)
 	}
 	hashes, ok := elems.Field(shaIdx).(*array.String)
 	if !ok {
-		return nil, uploadRefusal("uploads[].sha256 must be utf8, got %s", structType.Field(shaIdx).Type)
+		return nil, uploadRefusal("__upload_url__ uploads[].sha256 must be utf8, got %s", structType.Field(shaIdx).Type)
 	}
 	start, end := list.ValueOffsets(0)
 	n := int(end - start)
 	if n < 1 || n > MaxUploadURLCount {
-		return nil, uploadRefusal("uploads must have between 1 and %d entries, got %d", MaxUploadURLCount, n)
+		return nil, uploadRefusal("__upload_url__ 'uploads' must have 1-%d entries, got %d", MaxUploadURLCount, n)
 	}
 	out := make([]UploadRequest, 0, n)
 	for i := 0; i < n; i++ {
 		row := int(start) + i
-		if elems.IsNull(row) || sizes.IsNull(row) || hashes.IsNull(row) {
-			return nil, uploadRefusal("uploads[%d] must have a non-null size and sha256", i)
+		// Per entry, in the reference's order: size, then sha256, then the
+		// upload cap.
+		if elems.IsNull(row) || sizes.IsNull(row) {
+			return nil, uploadRefusal("__upload_url__ uploads[%d].size must be an integer >= 1, got null", i)
 		}
 		size := sizes.Value(row)
 		if size < 1 {
-			return nil, uploadRefusal("uploads[%d].size must be at least 1, got %d", i, size)
+			return nil, uploadRefusal("__upload_url__ uploads[%d].size must be an integer >= 1, got %d", i, size)
+		}
+		if hashes.IsNull(row) || !isLowerHexSHA256(hashes.Value(row)) {
+			return nil, uploadRefusal("__upload_url__ uploads[%d].sha256 must be 64 lowercase hex characters", i)
 		}
 		hash := hashes.Value(row)
-		if !isLowerHexSHA256(hash) {
-			return nil, uploadRefusal("uploads[%d].sha256 must be 64 lowercase hex characters", i)
-		}
 		if maxUploadBytes > 0 && size > maxUploadBytes {
-			return nil, uploadRefusal("uploads[%d].size %d exceeds VGI-Max-Upload-Bytes (%d)", i, size, maxUploadBytes)
+			return nil, uploadRefusal("__upload_url__ uploads[%d].size %d exceeds VGI-Max-Upload-Bytes (%d)", i, size, maxUploadBytes)
 		}
 		out = append(out, UploadRequest{Size: size, SHA256: hash})
 	}
@@ -236,8 +239,8 @@ func parseUploadRequests(batch arrow.RecordBatch, maxUploadBytes int64) ([]Uploa
 
 // retiredCountShape refuses an upload-URL v1 request.
 func retiredCountShape() error {
-	return uploadRefusal("__upload_url__/init request uses the retired count shape; " +
-		"this server requires VGI-Upload-URL-Support: 2 (send uploads: list<struct<size: int64, sha256: utf8>>)")
+	return uploadRefusal("__upload_url__ request uses the retired count shape: this server requires " +
+		"VGI-Upload-URL-Support: 2 and an 'uploads' parameter (list<struct<size: int64, sha256: utf8>>, one entry per upload)")
 }
 
 // buildUploadURLBatch frames the response rows. upload_headers is always
@@ -263,6 +266,12 @@ func buildUploadURLBatch(urls []UploadURL) arrow.RecordBatch {
 		headersB.Append(true)
 		names := make([]string, 0, len(u.Headers))
 		for name := range u.Headers {
+			// Never Content-Length: the client sends a plain one for exactly
+			// the declared size, and a provider's copy (the vendor grant's
+			// required_headers carries one) is not for it to repeat.
+			if strings.EqualFold(name, "Content-Length") {
+				continue
+			}
 			names = append(names, name)
 		}
 		sort.Strings(names)

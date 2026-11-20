@@ -869,7 +869,7 @@ func (d *driver) opHTTPAdmin(req *request) {
 			"sticky_default_ttl":              optionalInt(caps.StickyDefaultTTL),
 			"sticky_echo_headers":             stringList(caps.StickyEchoHeaders),
 			"upload_url_support":              caps.UploadURLSupport,
-			"upload_url_version":              caps.UploadURLVersion,
+			"upload_url_version":              optionalInt(int64(caps.UploadURLVersion)),
 			"max_request_bytes":               optionalInt(caps.MaxRequestBytes),
 			"max_response_bytes":              optionalInt(caps.MaxResponseBytes),
 			"max_externalized_response_bytes": optionalInt(caps.MaxExternalizedResponseBytes),

@@ -520,8 +520,16 @@ func resolveExternalLocation(
 		return batch, meta, fmt.Errorf("external location batch missing URL")
 	}
 	expectedSHA, hasSHA := metaGet(meta, MetaLocationSHA256)
-	if requireSHA && expectedSHA == "" {
-		return batch, meta, fmt.Errorf("request pointer is missing %s (required by upload-URL protocol v2)", MetaLocationSHA256)
+	if requireSHA {
+		if expectedSHA == "" {
+			return batch, meta, fmt.Errorf("Request pointer is missing %s "+
+				"(required on request pointers since vgi-rpc upload-URL protocol v2): %s",
+				MetaLocationSHA256, redactExternalURL(locationURL))
+		}
+		if !isLowerHexSHA256(expectedSHA) {
+			return batch, meta, fmt.Errorf("Request pointer %s is not 64 lowercase hex characters: %s",
+				MetaLocationSHA256, redactExternalURL(locationURL))
+		}
 	}
 
 	// Validate URL
@@ -566,7 +574,8 @@ func resolveExternalLocation(
 		hash := sha256.Sum256(fetchedData)
 		actualSHA := hex.EncodeToString(hash[:])
 		if actualSHA != expectedSHA {
-			return batch, meta, fmt.Errorf("sha256 mismatch: expected %s, got %s", expectedSHA, actualSHA)
+			return batch, meta, fmt.Errorf("ExternalLocation sha256 mismatch (SHA-256 checksum mismatch) for %s: expected %s, got %s",
+				redactExternalURL(locationURL), expectedSHA, actualSHA)
 		}
 	}
 

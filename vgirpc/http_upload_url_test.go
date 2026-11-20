@@ -95,9 +95,9 @@ func TestParseUploadRequests(t *testing.T) {
 		max     int64
 		want    string
 	}{
-		"empty":     {nil, 0, "between 1 and 100"},
-		"too many":  {tooMany, 0, "between 1 and 100"},
-		"size zero": {[]UploadRequest{{Size: 0, SHA256: testSHA}}, 0, "size must be at least 1"},
+		"empty":     {nil, 0, "must have 1-100 entries"},
+		"too many":  {tooMany, 0, "must have 1-100 entries"},
+		"size zero": {[]UploadRequest{{Size: 0, SHA256: testSHA}}, 0, "size must be an integer >= 1, got 0"},
 		"upper hex": {[]UploadRequest{{Size: 1, SHA256: strings.ToUpper(testSHA)}}, 0, "64 lowercase hex"},
 		"short hex": {[]UploadRequest{{Size: 1, SHA256: testSHA[:63]}}, 0, "64 lowercase hex"},
 		"over max":  {[]UploadRequest{{Size: 11, SHA256: testSHA}}, 10, "exceeds VGI-Max-Upload-Bytes"},
@@ -128,7 +128,7 @@ func TestParseUploadRequests(t *testing.T) {
 }
 
 func TestUploadURLVersionHeader(t *testing.T) {
-	for raw, want := range map[string]int{"": 0, "false": 0, "true": 1, "TRUE": 1, "2": 2, "3": 3, "x": 0, "-1": 0} {
+	for raw, want := range map[string]int{"": 0, "false": 0, "true": 1, "TRUE": 1, "2": 2, "3": 3, "x": 0, "-1": 0, "+2": 0, "02": 0, "0": 0} {
 		h := http.Header{}
 		if raw != "" {
 			h.Set(uploadURLHeader, raw)

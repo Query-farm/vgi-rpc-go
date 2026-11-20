@@ -143,7 +143,17 @@ func uploadURLVersion(headers http.Header) int {
 	if strings.EqualFold(raw, "true") {
 		return 1
 	}
-	if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+	// A positive decimal without a leading zero or sign, as the reference
+	// parses it ("02", "+2" and " 2x" are not versions).
+	if raw == "" || raw[0] == '0' {
+		return 0
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] < '0' || raw[i] > '9' {
+			return 0
+		}
+	}
+	if n, err := strconv.Atoi(raw); err == nil {
 		return n
 	}
 	return 0

@@ -5,6 +5,9 @@ package conformance
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -79,7 +82,13 @@ func (f *FakeStorage) Upload(data []byte, _ *arrow.Schema, contentEncoding strin
 // alloc request so a fixture that verifies sized uploads can; any headers it
 // wants on the PUT come back as upload_headers.
 func (f *FakeStorage) GenerateUploadURL(size int64, sha256Hex string) (vgirpc.UploadURL, error) {
-	reqBody, err := json.Marshal(map[string]any{"size": size, "sha256": sha256Hex})
+	digest, err := hex.DecodeString(sha256Hex)
+	if err != nil || len(digest) != sha256.Size {
+		return vgirpc.UploadURL{}, fmt.Errorf("upload sha256 must be 64 hex characters")
+	}
+	// A sized allocation: the fixture verifies the PUT against it and hands
+	// back the header the PUT must carry.
+	reqBody, err := json.Marshal(map[string]any{"size": size, "sha256_b64": base64.StdEncoding.EncodeToString(digest)})
 	if err != nil {
 		return vgirpc.UploadURL{}, err
 	}
