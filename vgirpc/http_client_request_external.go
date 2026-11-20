@@ -5,9 +5,13 @@ package vgirpc
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -108,7 +112,19 @@ func (c *HttpClient) externalizeRequestBody(ctx context.Context, body []byte) ([
 			Message: fmt.Sprintf("request of %d bytes exceeds the advertised max_upload_bytes of %d", len(body), caps.MaxUploadBytes),
 		}
 	}
-	urls, err := c.RequestUploadURLs(ctx, 1)
+	// v2 only. A v1 server vends blank URLs that storage accepts any bytes
+	// on, and asks for a count this client no longer sends; there is no
+	// fallback to that shape.
+	if caps.UploadURLVersion < 2 {
+		return nil, &RpcError{
+			Type: "ProtocolError",
+			Message: fmt.Sprintf("server's upload protocol is too old: it advertises %s: %s (v%d); this client needs %s",
+				uploadURLHeader, uploadURLHeaderValue(caps.UploadURLVersion), caps.UploadURLVersion, UploadURLProtocolVersion),
+		}
+	}
+	digest := sha256.Sum256(body)
+	sha256Hex := hex.EncodeToString(digest[:])
+	urls, err := c.RequestUploadURLs(ctx, []UploadRequest{{Size: int64(len(body)), SHA256: sha256Hex}})
 	if err != nil {
 		return nil, err
 	}
@@ -125,11 +141,26 @@ func (c *HttpClient) externalizeRequestBody(ctx context.Context, body []byte) ([
 			return nil, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf("download URL rejected by validator: %v", err)}
 		}
 	}
-	if err := c.putExternalRequest(ctx, urls[0].UploadURL, body); err != nil {
+	if err := c.putExternalRequest(ctx, urls[0].UploadURL, urls[0].Headers, body); err != nil {
 		return nil, err
 	}
-	return buildPointerRequestBody(body, urls[0].DownloadURL)
+	return buildPointerRequestBody(body, urls[0].DownloadURL, sha256Hex)
 }
+
+// uploadURLHeaderValue renders an advertised upload-URL version the way the
+// header spells it, for error messages.
+func uploadURLHeaderValue(version int) string {
+	if version == 1 {
+		return "true"
+	}
+	return strconv.Itoa(version)
+}
+
+// uploadContentType is the PUT's Content-Type when the vended headers name
+// none: application/octet-stream, not the Arrow media type, because a URL
+// that signs the content type (GCS) is signed for octet-stream. Matches the
+// reference's _UPLOAD_CONTENT_TYPE.
+const uploadContentType = "application/octet-stream"
 
 // storageUploadClient carries request uploads to vended URLs. It is bare on
 // purpose -- not the RPC client, whose cookie jar or credential-injecting
@@ -138,18 +169,28 @@ func (c *HttpClient) externalizeRequestBody(ctx context.Context, body []byte) ([
 // the signed URL somewhere nobody vetted.
 var storageUploadClient = &http.Client{CheckRedirect: noRedirects}
 
-// putExternalRequest uploads the request body to a vended URL.
+// putExternalRequest uploads the request body to a vended URL with exactly
+// the vended headers.
 //
 // Deliberately without the client's default headers, cookies or transport:
 // the target is object storage rather than the worker, the URL carries its own
-// signature, and an extra header can invalidate one. Errors name the URL
-// without its (signed) query.
-func (c *HttpClient) putExternalRequest(ctx context.Context, uploadURL string, body []byte) error {
+// signature, and an extra header can invalidate one. The body goes with a
+// plain Content-Length (never chunked), which a sized URL's signature covers;
+// a Content-Length among the vended headers is ignored for that reason.
+// Errors name the URL without its (signed) query.
+func (c *HttpClient) putExternalRequest(ctx context.Context, uploadURL string, headers map[string]string, body []byte) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(body))
 	if err != nil {
 		return &RpcError{Type: "ExternalUploadFailed", Message: fmt.Sprintf("build upload request for %s", redactExternalURL(uploadURL))}
 	}
-	req.Header.Set("Content-Type", arrowContentType)
+	req.ContentLength = int64(len(body))
+	req.Header.Set("Content-Type", uploadContentType)
+	for name, value := range headers {
+		if strings.EqualFold(name, "Content-Length") {
+			continue
+		}
+		req.Header.Set(name, value)
+	}
 	resp, err := storageUploadClient.Do(req)
 	if err != nil {
 		return &RpcError{Type: "ExternalUploadFailed", Message: fmt.Sprintf("PUT to upload URL %s failed", redactExternalURL(uploadURL))}
@@ -171,7 +212,7 @@ func (c *HttpClient) putExternalRequest(ctx context.Context, uploadURL string, b
 // request id, stream cursor -- because the server routes on the outer batch
 // and only then resolves the pointer to read the parameters. Strip any of it
 // and the request no longer names what it is.
-func buildPointerRequestBody(originalBody []byte, locationURL string) ([]byte, error) {
+func buildPointerRequestBody(originalBody []byte, locationURL, sha256Hex string) ([]byte, error) {
 	reader, err := ipc.NewReader(bytes.NewReader(originalBody))
 	if err != nil {
 		return nil, &RpcError{Type: "ProtocolError", Message: fmt.Sprintf("read request body for externalization: %v", err)}
@@ -182,7 +223,7 @@ func buildPointerRequestBody(originalBody []byte, locationURL string) ([]byte, e
 	}
 	record := reader.RecordBatch()
 	metadata := recordMetadata(record)
-	pointer, pointerMeta := MakeExternalLocationBatch(record.Schema(), locationURL)
+	pointer, pointerMeta := MakeExternalLocationBatch(record.Schema(), locationURL, sha256Hex)
 	defer pointer.Release()
 	for i, key := range pointerMeta.Keys() {
 		metadata[key] = pointerMeta.Values()[i]

@@ -110,8 +110,18 @@ type request struct {
 	IsExchange bool   `json:"is_exchange"`
 	HasHeader  bool   `json:"has_header"`
 
-	Count int     `json:"count"`
-	Token *string `json:"token"`
+	Count   int             `json:"count"`
+	Uploads []uploadRequest `json:"uploads"`
+	Token   *string         `json:"token"`
+}
+
+// oneZeroByteSHA256 is the SHA-256 of the single byte 0x00.
+const oneZeroByteSHA256 = "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d"
+
+// uploadRequest is one (size, sha256) entry of a request_upload_urls op.
+type uploadRequest struct {
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
 }
 
 func (d *driver) dispatch(line string) (stop bool) {
@@ -859,6 +869,7 @@ func (d *driver) opHTTPAdmin(req *request) {
 			"sticky_default_ttl":              optionalInt(caps.StickyDefaultTTL),
 			"sticky_echo_headers":             stringList(caps.StickyEchoHeaders),
 			"upload_url_support":              caps.UploadURLSupport,
+			"upload_url_version":              caps.UploadURLVersion,
 			"max_request_bytes":               optionalInt(caps.MaxRequestBytes),
 			"max_response_bytes":              optionalInt(caps.MaxResponseBytes),
 			"max_externalized_response_bytes": optionalInt(caps.MaxExternalizedResponseBytes),
@@ -867,11 +878,23 @@ func (d *driver) opHTTPAdmin(req *request) {
 			"supported_encodings":             stringList(caps.SupportedEncodings),
 		}})
 	case "request_upload_urls":
-		count := req.Count
-		if count < 1 {
-			count = 1
+		// Upload-URL v2: the entries pass through verbatim. A bare count
+		// (older harness) becomes that many 1-byte entries, so the op keeps
+		// working while the harness moves to uploads.
+		uploads := make([]vgirpc.UploadRequest, 0, len(req.Uploads))
+		for _, u := range req.Uploads {
+			uploads = append(uploads, vgirpc.UploadRequest{Size: u.Size, SHA256: u.SHA256})
 		}
-		urls, err := d.http.RequestUploadURLs(ctx, count)
+		if req.Uploads == nil {
+			count := req.Count
+			if count < 1 {
+				count = 1
+			}
+			for range count {
+				uploads = append(uploads, vgirpc.UploadRequest{Size: 1, SHA256: oneZeroByteSHA256})
+			}
+		}
+		urls, err := d.http.RequestUploadURLs(ctx, uploads)
 		if err != nil {
 			d.fail(err.Error())
 			return
@@ -879,9 +902,10 @@ func (d *driver) opHTTPAdmin(req *request) {
 		rendered := make([]any, 0, len(urls))
 		for _, url := range urls {
 			rendered = append(rendered, map[string]any{
-				"upload_url":   url.UploadURL,
-				"download_url": url.DownloadURL,
-				"expires_at":   url.ExpiresAt.Unix(),
+				"upload_url":     url.UploadURL,
+				"download_url":   url.DownloadURL,
+				"expires_at":     url.ExpiresAt.Unix(),
+				"upload_headers": url.Headers,
 			})
 		}
 		d.respond(map[string]any{"ok": true, "urls": rendered})

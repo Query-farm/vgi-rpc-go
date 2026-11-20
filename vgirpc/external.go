@@ -49,16 +49,26 @@ type ExternalStorage interface {
 // re-POST a small pointer batch.  The expiry is informational; the
 // server-side store decides actual lifetime.
 type UploadURL struct {
-	UploadURL   string    // PUT URL
+	UploadURL   string    // PUT URL, signed for one exact size and hash where the backend can
 	DownloadURL string    // GET URL the server will fetch from
 	ExpiresAt   time.Time // UTC
+	// Headers must be sent on the PUT verbatim (the signature covers them).
+	// Never contains Content-Length: the client sends exactly the declared
+	// size with a plain Content-Length, which the signature also covers.
+	// May be empty, never nil on the wire (an empty map<utf8, utf8>).
+	Headers map[string]string
 }
 
 // UploadURLProvider generates pre-signed upload/download URL pairs for
-// client-vended request externalization.  Implementations must be safe
-// for concurrent use.
+// client-vended request externalization (upload-URL protocol v2).
+// Implementations must be safe for concurrent use.
 type UploadURLProvider interface {
-	GenerateUploadURL(schema *arrow.Schema) (UploadURL, error)
+	// GenerateUploadURL vends one PUT/GET pair for a body of exactly size
+	// bytes whose SHA-256 is sha256Hex (64 lowercase hex characters). A
+	// backend that can sign the length and checksum (S3, R2, the blob vendor)
+	// does, so storage itself refuses a mismatched body; the headers it signs
+	// come back in [UploadURL.Headers].
+	GenerateUploadURL(size int64, sha256Hex string) (UploadURL, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -457,7 +467,19 @@ func ResolveExternalLocation(
 	meta arrow.Metadata,
 	config *ExternalLocationConfig,
 ) (arrow.RecordBatch, arrow.Metadata, error) {
-	return resolveExternalLocationWithLog(batch, meta, config, nil)
+	return resolveExternalLocation(batch, meta, config, nil, false)
+}
+
+// ResolveExternalRequestLocation is [ResolveExternalLocation] for a pointer a
+// client sent: a request pointer (upload-URL protocol v2) must carry
+// vgi_rpc.location.sha256, and one without it is refused before anything is
+// fetched. The downloaded bytes are verified against it before decoding.
+func ResolveExternalRequestLocation(
+	batch arrow.RecordBatch,
+	meta arrow.Metadata,
+	config *ExternalLocationConfig,
+) (arrow.RecordBatch, arrow.Metadata, error) {
+	return resolveExternalLocation(batch, meta, config, nil, true)
 }
 
 // resolveExternalLocationWithLog is [ResolveExternalLocation] with somewhere to
@@ -473,6 +495,18 @@ func resolveExternalLocationWithLog(
 	config *ExternalLocationConfig,
 	onLog ClientLogHandler,
 ) (arrow.RecordBatch, arrow.Metadata, error) {
+	return resolveExternalLocation(batch, meta, config, onLog, false)
+}
+
+// resolveExternalLocation is the shared resolver. requireSHA makes
+// vgi_rpc.location.sha256 mandatory, as it is on request pointers.
+func resolveExternalLocation(
+	batch arrow.RecordBatch,
+	meta arrow.Metadata,
+	config *ExternalLocationConfig,
+	onLog ClientLogHandler,
+	requireSHA bool,
+) (arrow.RecordBatch, arrow.Metadata, error) {
 	if config == nil {
 		return batch, meta, nil
 	}
@@ -484,6 +518,10 @@ func resolveExternalLocationWithLog(
 	locationURL, _ := metaGet(meta, MetaLocation)
 	if locationURL == "" {
 		return batch, meta, fmt.Errorf("external location batch missing URL")
+	}
+	expectedSHA, hasSHA := metaGet(meta, MetaLocationSHA256)
+	if requireSHA && expectedSHA == "" {
+		return batch, meta, fmt.Errorf("request pointer is missing %s (required by upload-URL protocol v2)", MetaLocationSHA256)
 	}
 
 	// Validate URL
@@ -522,12 +560,13 @@ func resolveExternalLocationWithLog(
 		return batch, meta, fmt.Errorf("fetching external data after %d attempts: %w", maxAttempts, fetchErr)
 	}
 
-	// Verify SHA-256 checksum if present in pointer metadata
-	if expectedSHA, ok := metaGet(meta, MetaLocationSHA256); ok {
+	// Verify SHA-256 checksum if present in pointer metadata (always present
+	// on a request pointer: checked above).
+	if hasSHA {
 		hash := sha256.Sum256(fetchedData)
 		actualSHA := hex.EncodeToString(hash[:])
 		if actualSHA != expectedSHA {
-			return batch, meta, fmt.Errorf("SHA-256 checksum mismatch: expected %s, got %s", expectedSHA, actualSHA)
+			return batch, meta, fmt.Errorf("sha256 mismatch: expected %s, got %s", expectedSHA, actualSHA)
 		}
 	}
 

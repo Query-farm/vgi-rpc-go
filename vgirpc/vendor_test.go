@@ -273,16 +273,47 @@ func TestVendorStorageUploadAndUploadURL(t *testing.T) {
 		t.Fatalf("download: %d, %d bytes", resp.StatusCode, len(got))
 	}
 
-	pair, err := storage.GenerateUploadURL(nil)
+	body := []byte("request-body")
+	digest := sha256.Sum256(body)
+	pair, err := storage.GenerateUploadURL(int64(len(body)), hex.EncodeToString(digest[:]))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if pair.ExpiresAt.IsZero() || pair.UploadURL == "" || pair.DownloadURL == "" {
 		t.Fatalf("upload pair = %+v", pair)
 	}
-	put, _ := http.NewRequest(http.MethodPut, pair.UploadURL, bytes.NewReader([]byte("request-body")))
-	if resp, err := storageUploadClient.Do(put); err != nil || resp.StatusCode/100 != 2 {
-		t.Fatalf("PUT to vended URL: %v %v", err, resp)
+	if _, ok := pair.Headers["x-amz-checksum-sha256"]; !ok {
+		t.Fatalf("sized upload URL carries no x-amz-checksum-sha256 header: %v", pair.Headers)
+	}
+	for name := range pair.Headers {
+		if strings.EqualFold(name, "Content-Length") {
+			t.Fatalf("upload headers must not carry Content-Length: %v", pair.Headers)
+		}
+	}
+	vendorPut := func(payload []byte) int {
+		t.Helper()
+		put, _ := http.NewRequest(http.MethodPut, pair.UploadURL, bytes.NewReader(payload))
+		for name, value := range pair.Headers {
+			put.Header.Set(name, value)
+		}
+		resp, err := storageUploadClient.Do(put)
+		if err != nil {
+			t.Fatalf("PUT to vended URL: %v", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	// Storage verifies the sized grant: same length, different bytes is a
+	// checksum refusal; a different length is refused too.
+	if status := vendorPut([]byte("request-bodx")); status/100 == 2 {
+		t.Fatalf("PUT of tampered bytes accepted (HTTP %d)", status)
+	}
+	if status := vendorPut([]byte("short")); status/100 == 2 {
+		t.Fatalf("PUT of a short body accepted (HTTP %d)", status)
+	}
+	if status := vendorPut(body); status/100 != 2 {
+		t.Fatalf("PUT of the declared body refused (HTTP %d)", status)
 	}
 	resp, err = http.Get(pair.DownloadURL)
 	if err != nil {
@@ -292,6 +323,10 @@ func TestVendorStorageUploadAndUploadURL(t *testing.T) {
 	resp.Body.Close()
 	if string(got) != "request-body" {
 		t.Fatalf("vended download = %q", got)
+	}
+
+	if _, err := storage.GenerateUploadURL(int64(len(body)), "not-hex"); err == nil {
+		t.Fatal("GenerateUploadURL accepted a malformed sha256")
 	}
 }
 

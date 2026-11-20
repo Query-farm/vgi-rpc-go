@@ -341,7 +341,7 @@ func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool)
 		w.Header().Set(externalizationEnabledHeader, "false")
 	}
 	if h.uploadURLProvider != nil {
-		w.Header().Set(uploadURLHeader, "true")
+		w.Header().Set(uploadURLHeader, UploadURLProtocolVersion)
 		if h.maxUploadBytes > 0 {
 			w.Header().Set(maxUploadBytesHeader, strconv.FormatInt(h.maxUploadBytes, 10))
 		}
@@ -602,7 +602,8 @@ func (h *HttpServer) SetTokenTTL(d time.Duration) {
 // SetUploadURLProvider configures a provider that issues pre-signed
 // upload/download URL pairs for server-vended client externalization.
 // When set, the server registers POST {prefix}/__upload_url__/init and
-// advertises VGI-Upload-URL-Support: true on every response.
+// advertises VGI-Upload-URL-Support: 2 (upload-URL protocol v2) on every
+// response.
 func (h *HttpServer) SetUploadURLProvider(p UploadURLProvider) {
 	h.uploadURLProvider = p
 	h.initRoutes()

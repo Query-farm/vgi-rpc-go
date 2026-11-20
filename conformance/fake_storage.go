@@ -72,11 +72,18 @@ func (f *FakeStorage) Upload(data []byte, _ *arrow.Schema, contentEncoding strin
 	return alloc.ObjectURL, nil
 }
 
-// GenerateUploadURL allocates a new blob slot and returns a URL pair the
-// client can PUT to and the server can later GET from. The fake storage
-// uses the same URL for both verbs (HTTP method dispatch in the service).
-func (f *FakeStorage) GenerateUploadURL(_ *arrow.Schema) (vgirpc.UploadURL, error) {
-	allocResp, err := f.Client.Post(f.BaseURL+"/alloc", "application/json", bytes.NewReader([]byte("{}")))
+// GenerateUploadURL allocates a new blob slot for a body of exactly size
+// bytes hashing to sha256Hex and returns a URL pair the client can PUT to and
+// the server can later GET from. The fake storage uses the same URL for both
+// verbs (HTTP method dispatch in the service). The size and hash ride the
+// alloc request so a fixture that verifies sized uploads can; any headers it
+// wants on the PUT come back as upload_headers.
+func (f *FakeStorage) GenerateUploadURL(size int64, sha256Hex string) (vgirpc.UploadURL, error) {
+	reqBody, err := json.Marshal(map[string]any{"size": size, "sha256": sha256Hex})
+	if err != nil {
+		return vgirpc.UploadURL{}, err
+	}
+	allocResp, err := f.Client.Post(f.BaseURL+"/alloc", "application/json", bytes.NewReader(reqBody))
 	if err != nil {
 		return vgirpc.UploadURL{}, fmt.Errorf("fake storage alloc: %w", err)
 	}
@@ -86,9 +93,10 @@ func (f *FakeStorage) GenerateUploadURL(_ *arrow.Schema) (vgirpc.UploadURL, erro
 		return vgirpc.UploadURL{}, fmt.Errorf("fake storage alloc returned %d: %s", allocResp.StatusCode, body)
 	}
 	var alloc struct {
-		ObjectURL   string `json:"object_url"`
-		UploadURL   string `json:"upload_url"`
-		DownloadURL string `json:"download_url"`
+		ObjectURL     string            `json:"object_url"`
+		UploadURL     string            `json:"upload_url"`
+		DownloadURL   string            `json:"download_url"`
+		UploadHeaders map[string]string `json:"upload_headers"`
 	}
 	if err := json.NewDecoder(allocResp.Body).Decode(&alloc); err != nil {
 		return vgirpc.UploadURL{}, fmt.Errorf("fake storage alloc decode: %w", err)
@@ -101,10 +109,15 @@ func (f *FakeStorage) GenerateUploadURL(_ *arrow.Schema) (vgirpc.UploadURL, erro
 	if downloadURL == "" {
 		downloadURL = alloc.ObjectURL
 	}
+	headers := alloc.UploadHeaders
+	if headers == nil {
+		headers = map[string]string{}
+	}
 	return vgirpc.UploadURL{
 		UploadURL:   uploadURL,
 		DownloadURL: downloadURL,
 		ExpiresAt:   time.Now().UTC().Add(1 * time.Hour),
+		Headers:     headers,
 	}, nil
 }
 

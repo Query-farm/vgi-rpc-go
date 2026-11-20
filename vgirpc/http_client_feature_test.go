@@ -56,7 +56,7 @@ func TestDecodeErrorEnvelopeIgnoresNonArrowBodies(t *testing.T) {
 func TestCapabilitySnapshotReadsOptionalFeatures(t *testing.T) {
 	headers := http.Header{}
 	headers.Set(acceptMaxResponseBytesSupportHeader, "true")
-	headers.Set(uploadURLHeader, "true")
+	headers.Set(uploadURLHeader, "2")
 	headers.Set(maxUploadBytesHeader, "16777216")
 	headers.Set(supportedEncodingsHeader, "zstd, gzip, identity")
 	headers.Set(stickyEnabledHeader, "true")
@@ -68,8 +68,8 @@ func TestCapabilitySnapshotReadsOptionalFeatures(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseHTTPServerCapabilities: %v", err)
 	}
-	if !caps.UploadURLSupport || caps.MaxUploadBytes != 16777216 {
-		t.Errorf("upload capability = %v/%d", caps.UploadURLSupport, caps.MaxUploadBytes)
+	if !caps.UploadURLSupport || caps.UploadURLVersion != 2 || caps.MaxUploadBytes != 16777216 {
+		t.Errorf("upload capability = %v/v%d/%d", caps.UploadURLSupport, caps.UploadURLVersion, caps.MaxUploadBytes)
 	}
 	if !caps.StickyEnabled || caps.StickyDefaultTTL != 300 {
 		t.Errorf("sticky capability = %v/%d", caps.StickyEnabled, caps.StickyDefaultTTL)

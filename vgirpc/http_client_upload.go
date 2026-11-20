@@ -25,21 +25,23 @@ import (
 // server's dispatch-boundary check, which is what lets a client ask for upload
 // URLs before it has decided which protocol it is going to speak.
 
-// RequestUploadURLs asks the server for count pre-signed upload/download URL
-// pairs.
+// RequestUploadURLs asks the server for one pre-signed upload/download URL
+// pair per entry (upload-URL protocol v2), each signed for that entry's exact
+// size and SHA-256 where the backend can. The result is in request order, and
+// every entry's Headers must be sent on its PUT verbatim.
 //
-// count is clamped by the server to [1, MaxUploadURLCount]. A server with no
-// upload-URL provider does not route this endpoint at all and answers 404,
-// which surfaces as an RpcError of type NotSupported rather than a transport
-// failure: "this server cannot do that" is an answer, not an outage.
-func (c *HttpClient) RequestUploadURLs(ctx context.Context, count int) ([]UploadURL, error) {
+// The server refuses (rather than clamps) an empty list, more than
+// [MaxUploadURLCount] entries, a size below 1, a hash that is not 64
+// lowercase hex characters, and a size over its VGI-Max-Upload-Bytes. A
+// server with no upload-URL provider does not route this endpoint at all and
+// answers 404, which surfaces as an RpcError of type NotSupported rather than
+// a transport failure: "this server cannot do that" is an answer, not an
+// outage.
+func (c *HttpClient) RequestUploadURLs(ctx context.Context, uploads []UploadRequest) ([]UploadURL, error) {
 	if c == nil {
 		return nil, fmt.Errorf("vgirpc: HTTP client is nil")
 	}
-	if count < 1 {
-		count = 1
-	}
-	body, err := c.uploadURLRequestBody(count)
+	body, err := c.uploadURLRequestBody(uploads)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +53,7 @@ func (c *HttpClient) RequestUploadURLs(ctx context.Context, count int) ([]Upload
 		}
 		return nil, err
 	}
-	// Deliberately not enforced against [UploadURLResponseSchema]. The three
+	// Deliberately not enforced against [UploadURLResponseSchema]. The
 	// columns are what matters and they are read by name; the reference marks
 	// them nullable where this port does not, and refusing the whole response
 	// over a nullability flag would deny a client the upload route on the one
@@ -61,7 +63,7 @@ func (c *HttpClient) RequestUploadURLs(ctx context.Context, count int) ([]Upload
 		return nil, err
 	}
 	defer parsed.release()
-	urls := make([]UploadURL, 0, count)
+	urls := make([]UploadURL, 0, len(uploads))
 	for _, batch := range parsed.batches {
 		decoded, derr := decodeUploadURLBatch(batch.Batch)
 		if derr != nil {
@@ -69,21 +71,35 @@ func (c *HttpClient) RequestUploadURLs(ctx context.Context, count int) ([]Upload
 		}
 		urls = append(urls, decoded...)
 	}
+	if len(urls) != len(uploads) {
+		return nil, &RpcError{
+			Type:    "ProtocolError",
+			Message: fmt.Sprintf("server returned %d upload URLs for %d requested", len(urls), len(uploads)),
+		}
+	}
 	return urls, nil
 }
 
-// uploadURLRequestBody frames the one-row count batch this endpoint expects.
+// uploadURLRequestBody frames the one-row uploads batch this endpoint expects.
 //
 // Built here rather than through initialBody because that stamps the client's
 // routing key, and this request must not carry one.
-func (c *HttpClient) uploadURLRequestBody(count int) ([]byte, error) {
+func (c *HttpClient) uploadURLRequestBody(uploads []UploadRequest) ([]byte, error) {
 	requestID, err := clientRequestID()
 	if err != nil {
 		return nil, err
 	}
-	builder := array.NewInt64Builder(defaultAllocator())
+	builder := array.NewListBuilder(defaultAllocator(), uploadEntryType)
 	defer builder.Release()
-	builder.Append(int64(count))
+	entries := builder.ValueBuilder().(*array.StructBuilder)
+	sizes := entries.FieldBuilder(0).(*array.Int64Builder)
+	hashes := entries.FieldBuilder(1).(*array.StringBuilder)
+	builder.Append(true)
+	for _, upload := range uploads {
+		entries.Append(true)
+		sizes.Append(upload.Size)
+		hashes.Append(upload.SHA256)
+	}
 	column := builder.NewArray()
 	defer column.Release()
 	batch := array.NewRecordBatch(UploadURLParamsSchema, []arrow.Array{column}, 1)
@@ -95,7 +111,8 @@ func (c *HttpClient) uploadURLRequestBody(count int) ([]byte, error) {
 	}, c.maxRequest)
 }
 
-// decodeUploadURLBatch reads one (upload_url, download_url, expires_at) batch.
+// decodeUploadURLBatch reads one (upload_url, download_url, expires_at,
+// upload_headers) batch.
 //
 // By name rather than by position: this is a framework endpoint whose reply a
 // client decodes without a compiled declaration to check it against, so the
@@ -124,9 +141,27 @@ func decodeUploadURLBatch(batch arrow.RecordBatch) ([]UploadURL, error) {
 			unit = timestampType.Unit
 		}
 	}
+	headers, _ := column("upload_headers").(*array.Map)
+	var headerKeys, headerItems *array.String
+	if headers != nil {
+		headerKeys, _ = headers.Keys().(*array.String)
+		headerItems, _ = headers.Items().(*array.String)
+		if headerKeys == nil || headerItems == nil {
+			return nil, &RpcError{Type: "ProtocolError", Message: "upload URL response 'upload_headers' is not map<utf8, utf8>"}
+		}
+	}
 	out := make([]UploadURL, 0, int(batch.NumRows()))
 	for row := range int(batch.NumRows()) {
-		entry := UploadURL{}
+		entry := UploadURL{Headers: map[string]string{}}
+		if headers != nil && !headers.IsNull(row) {
+			start, end := headers.ValueOffsets(row)
+			for i := int(start); i < int(end); i++ {
+				if headerItems.IsNull(i) {
+					continue
+				}
+				entry.Headers[headerKeys.Value(i)] = headerItems.Value(i)
+			}
+		}
 		if !uploads.IsNull(row) {
 			entry.UploadURL = uploads.Value(row)
 		}

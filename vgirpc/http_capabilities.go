@@ -27,8 +27,14 @@ type HTTPServerCapabilities struct {
 	MaxExternalizedResponseBytes  int64
 	AcceptMaxResponseBytesSupport bool
 	ExternalizationEnabled        bool
-	// UploadURLSupport reports whether {prefix}/__upload_url__/init is routed.
+	// UploadURLSupport reports whether {prefix}/__upload_url__/init is routed
+	// (any VGI-Upload-URL-Support value: "true" for v1, a version number
+	// from v2 on).
 	UploadURLSupport bool
+	// UploadURLVersion is the upload-URL protocol version the server speaks:
+	// 0 when unadvertised, 1 for the retired count shape ("true"), 2 for the
+	// sized (size, sha256) shape. The client uploads only to version 2.
+	UploadURLVersion int
 	MaxUploadBytes   int64
 	// SupportedEncodings are the lowercase wire tokens the server can decode
 	// on a request body -- "zstd", "gzip", "identity" -- in the order
@@ -80,13 +86,15 @@ func ParseHTTPServerCapabilities(headers http.Header) (HTTPServerCapabilities, e
 	if external != "" && external != "true" && external != "false" {
 		return HTTPServerCapabilities{}, fmt.Errorf("vgirpc: invalid capability %s=%q", externalizationEnabledHeader, external)
 	}
+	uploadVersion := uploadURLVersion(headers)
 	return HTTPServerCapabilities{
 		MaxRequestBytes:               maxRequest,
 		MaxResponseBytes:              maxResponse,
 		MaxExternalizedResponseBytes:  capabilityDecimal(headers, maxExternalizedResponseBytesHeader),
 		AcceptMaxResponseBytesSupport: supportPresent,
 		ExternalizationEnabled:        external == "true",
-		UploadURLSupport:              capabilityFlag(headers, uploadURLHeader),
+		UploadURLSupport:              uploadVersion > 0,
+		UploadURLVersion:              uploadVersion,
 		MaxUploadBytes:                capabilityDecimal(headers, maxUploadBytesHeader),
 		SupportedEncodings:            capabilityList(headers, supportedEncodingsHeader),
 		StickyEnabled:                 capabilityFlag(headers, stickyEnabledHeader),
@@ -125,6 +133,20 @@ func capabilityDecimal(headers http.Header, name string) int64 {
 // would make a server unusable for every caller that never wanted the feature.
 func capabilityFlag(headers http.Header, name string) bool {
 	return strings.EqualFold(strings.TrimSpace(headers.Get(name)), "true")
+}
+
+// uploadURLVersion reads VGI-Upload-URL-Support: "true" is the retired v1
+// (count) shape, a positive integer is that protocol version, and anything
+// else -- absent, "false", garbage -- is no support.
+func uploadURLVersion(headers http.Header) int {
+	raw := strings.TrimSpace(headers.Get(uploadURLHeader))
+	if strings.EqualFold(raw, "true") {
+		return 1
+	}
+	if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+		return n
+	}
+	return 0
 }
 
 // capabilityList splits a comma-separated capability header, dropping empties.

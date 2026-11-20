@@ -191,6 +191,25 @@ type ExternalStorage interface {
 server.SetExternalLocation(vgirpc.DefaultExternalLocationConfig(storage))
 ```
 
+### Client upload URLs (upload-URL protocol v2)
+
+```go
+type UploadURLProvider interface {
+    GenerateUploadURL(size int64, sha256Hex string) (UploadURL, error)
+}
+
+httpServer.SetUploadURLProvider(provider) // advertises VGI-Upload-URL-Support: 2
+urls, err := httpClient.RequestUploadURLs(ctx, []vgirpc.UploadRequest{{Size: n, SHA256: hexDigest}})
+```
+
+`POST {prefix}/__upload_url__/init` takes `uploads: list<struct<size, sha256>>`
+(1–100 entries) and answers one `(upload_url, download_url, expires_at,
+upload_headers)` row per entry. The retired `count` shape is refused. The
+client hashes the body, PUTs exactly those bytes with every `upload_headers`
+entry, and sends a pointer carrying `vgi_rpc.location.sha256`, which the
+server requires on request pointers and verifies before decoding. A client
+facing a v1 server (`VGI-Upload-URL-Support: true`) refuses to upload.
+
 ### Pre-published results
 
 ```go
@@ -230,7 +249,7 @@ data, err = blobs.GetBytes(ctx, ref) // verified against ref's size and SHA-256
 
 | Symbol | Description |
 |---|---|
-| `VendorStorage` | `ExternalStorage` + `UploadURLProvider`: results as purpose `rpc` objects, unsized upload URL pairs from `/v1/upload_urls` |
+| `VendorStorage` | `ExternalStorage` + `UploadURLProvider`: results as purpose `rpc` objects; client upload URLs (upload-URL protocol v2) are sized grants from `/v1/blobs/put` (purpose `rpc`), signed for the declared size and SHA-256 |
 | `VendorBlobClient` | Raw blobs (`PutBytes` / `GetBytes` / `Delete` / `DeleteScope`), purpose `fs` by default |
 | `VendorError` | `Status` and `Code` (`not_found`, `idempotency_conflict`, `NoSuchKey`, `size_mismatch`, `sha256_mismatch`, ...) |
 | `PinnedHostsValidator` / `VendorURLValidator` | URL validators accepting only the vendor's storage hosts and prefixes |

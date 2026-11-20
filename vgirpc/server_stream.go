@@ -291,7 +291,7 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 			if bwm, ok := inputBatch.(arrow.RecordBatchWithMetadata); ok {
 				inputMeta = bwm.Metadata()
 			}
-			resolvedBatch, resolvedMeta, resolveErr := ResolveExternalLocation(inputBatch, inputMeta, s.externalConfig)
+			resolvedBatch, resolvedMeta, resolveErr := ResolveExternalRequestLocation(inputBatch, inputMeta, s.externalConfig)
 			if resolveErr != nil {
 				slog.Error("failed to resolve external input", "method", req.Method, "err", resolveErr)
 				streamErr = &RpcError{

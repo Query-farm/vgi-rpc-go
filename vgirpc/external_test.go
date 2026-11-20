@@ -704,7 +704,7 @@ func TestResolveExternalLocation_SHA256Mismatch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected checksum mismatch error")
 	}
-	if !strings.Contains(err.Error(), "SHA-256 checksum mismatch") {
+	if !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("expected SHA-256 mismatch error, got: %v", err)
 	}
 }
@@ -929,7 +929,7 @@ func TestSHA256_MismatchOnFullRoundtrip(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected checksum mismatch error")
 	}
-	if !strings.Contains(err.Error(), "SHA-256 checksum mismatch") {
+	if !strings.Contains(err.Error(), "sha256 mismatch") {
 		t.Fatalf("expected SHA-256 mismatch error, got: %v", err)
 	}
 }

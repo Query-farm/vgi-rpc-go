@@ -106,8 +106,6 @@ const (
 	vendorDefaultAttempts  = 3
 	vendorDefaultBackoff   = 250 * time.Millisecond
 	vendorMaxBackoff       = 5 * time.Second
-	// vendorMaxUploadURLs is the vendor's per-call cap on /v1/upload_urls.
-	vendorMaxUploadURLs = 100
 	// vendorMaxDeleteIDs is the vendor's per-call cap on /v1/blobs/delete.
 	vendorMaxDeleteIDs = 1000
 	// vendorDefaultMaxFetch caps a blob GetBytes will download (the vendor's
@@ -424,7 +422,6 @@ const (
 	vendorGetPath         = "/v1/blobs/get"
 	vendorDeletePath      = "/v1/blobs/delete"
 	vendorDeleteScopePath = "/v1/blobs/delete_scope"
-	vendorUploadURLsPath  = "/v1/upload_urls"
 	vendorInfoPath        = "/v1/info"
 )
 
@@ -870,39 +867,6 @@ func (a *vendorAPI) deleteScope(ctx context.Context, scope BlobScope) (int, erro
 	return vDeleted(resp), nil
 }
 
-func (a *vendorAPI) uploadURLs(ctx context.Context, count int) ([]UploadURL, error) {
-	if count < 1 || count > vendorMaxUploadURLs {
-		return nil, fmt.Errorf("count must be between 1 and %d", vendorMaxUploadURLs)
-	}
-	resp, err := a.call(ctx, http.MethodPost, vendorUploadURLsPath, "upload_urls", map[string]int{"count": count})
-	if err != nil {
-		return nil, err
-	}
-	list, ok := resp["urls"].([]any)
-	if !ok || len(list) == 0 {
-		return nil, &VendorError{Message: "blob vendor upload_urls response has malformed 'urls'"}
-	}
-	out := make([]UploadURL, 0, len(list))
-	for _, item := range list {
-		entry, ok := item.(map[string]any)
-		if !ok {
-			return nil, &VendorError{Message: "blob vendor upload_urls response has a malformed entry"}
-		}
-		var u UploadURL
-		if u.UploadURL, err = vStr(entry, "upload_url", "upload_urls"); err != nil {
-			return nil, err
-		}
-		if u.DownloadURL, err = vStr(entry, "download_url", "upload_urls"); err != nil {
-			return nil, err
-		}
-		if u.ExpiresAt, err = vTime(entry, "expires_at", "upload_urls"); err != nil {
-			return nil, err
-		}
-		out = append(out, u)
-	}
-	return out, nil
-}
-
 func (a *vendorAPI) info(ctx context.Context) (*VendorInfo, error) {
 	resp, err := a.call(ctx, http.MethodGet, vendorInfoPath, "info", nil)
 	if err != nil {
@@ -1073,8 +1037,9 @@ func envLookup(getenv func(string) string) func(string) string {
 // Upload (server-side externalization) asks the vendor for a sized,
 // checksummed grant, PUTs the bytes with exactly the grant's required headers,
 // and returns the grant's download URL. GenerateUploadURL (client uploads)
-// asks /v1/upload_urls for one unsized PUT/GET pair. Vended URLs are checked
-// against the vendor's pinned hosts before use.
+// asks the same sized endpoint (purpose rpc) for a PUT signed for the
+// client's exact size and SHA-256, so storage refuses any other body. Vended
+// URLs are checked against the vendor's pinned hosts before use.
 //
 // Safe for concurrent use. Objects are cleaned up by the vendor; vgi-rpc never
 // deletes them.
@@ -1143,25 +1108,51 @@ func (v *VendorStorage) Upload(data []byte, _ *arrow.Schema, contentEncoding str
 	return downloadURL, nil
 }
 
-// GenerateUploadURL asks the vendor for one unsized PUT/GET pair. Implements
-// [UploadURLProvider].
-func (v *VendorStorage) GenerateUploadURL(_ *arrow.Schema) (UploadURL, error) {
+// GenerateUploadURL asks the vendor for one sized PUT/GET pair (POST
+// /v1/blobs/put, purpose rpc) for a body of exactly size bytes hashing to
+// sha256Hex. The grant's required headers (x-amz-checksum-sha256 and anything
+// else the signature covers, minus Content-Length) come back as the
+// [UploadURL.Headers] the client must send. Implements [UploadURLProvider].
+func (v *VendorStorage) GenerateUploadURL(size int64, sha256Hex string) (UploadURL, error) {
+	digest, err := hex.DecodeString(sha256Hex)
+	if err != nil || len(digest) != sha256.Size {
+		return UploadURL{}, fmt.Errorf("upload sha256 must be 64 hex characters")
+	}
 	ctx, cancel := v.requestContext()
 	defer cancel()
-	urls, err := v.api.uploadURLs(ctx, 1)
+	grant, err := v.api.put(ctx, vendorPutRequest{
+		Size: size, SHA256B64: base64.StdEncoding.EncodeToString(digest), Purpose: BlobPurposeRPC,
+	})
 	if err != nil {
 		return UploadURL{}, err
 	}
-	u := urls[0]
+	downloadURL := grant.DownloadURL
+	if downloadURL == "" {
+		return UploadURL{}, &VendorError{Message: "blob vendor put response for an rpc object has no 'download_url'"}
+	}
 	if v.pin {
-		if err := v.check(u.UploadURL); err != nil {
+		if err := v.check(grant.UploadURL); err != nil {
 			return UploadURL{}, err
 		}
-		if err := v.check(u.DownloadURL); err != nil {
+		if err := v.check(downloadURL); err != nil {
 			return UploadURL{}, err
 		}
 	}
-	return u, nil
+	headers := make(map[string]string, len(grant.RequiredHeaders))
+	for name, value := range grant.RequiredHeaders {
+		if strings.EqualFold(name, "Content-Length") {
+			if value != strconv.FormatInt(size, 10) {
+				return UploadURL{}, &VendorError{Message: fmt.Sprintf("blob vendor granted Content-Length %s for a %d-byte upload", value, size)}
+			}
+			continue
+		}
+		headers[name] = value
+	}
+	expires := grant.ExpiresAt
+	if !grant.DownloadExpiresAt.IsZero() && grant.DownloadExpiresAt.Before(expires) {
+		expires = grant.DownloadExpiresAt
+	}
+	return UploadURL{UploadURL: grant.UploadURL, DownloadURL: downloadURL, ExpiresAt: expires, Headers: headers}, nil
 }
 
 // ---------------------------------------------------------------------------

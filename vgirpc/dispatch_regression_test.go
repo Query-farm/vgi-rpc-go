@@ -4,6 +4,8 @@
 package vgirpc
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -245,9 +247,10 @@ func TestHTTPStreamInitResolvesExternalParams(t *testing.T) {
 
 	pointer, locationMeta := MakeExternalLocationBatch(regressionSchema, fetch.URL)
 	defer pointer.Release()
+	// Request pointers must carry the body's sha256 (upload-URL protocol v2).
 	meta := arrow.NewMetadata(
-		[]string{MetaMethod, MetaProtocol, MetaRequestVersion, MetaLocation},
-		[]string{"external_init", testProtocol, ProtocolVersion, locationMeta.Values()[0]},
+		[]string{MetaMethod, MetaProtocol, MetaRequestVersion, MetaLocation, MetaLocationSHA256},
+		[]string{"external_init", testProtocol, ProtocolVersion, locationMeta.Values()[0], sha256HexOf(externalBody)},
 	)
 	req := httptest.NewRequest(http.MethodPost, "/Service/external_init/init", bytes.NewReader(regressionIPC(t, pointer, meta)))
 	req.Header.Set("Content-Type", arrowContentType)
@@ -301,8 +304,8 @@ func TestHTTPStreamExchangeResolvesExternalInput(t *testing.T) {
 	pointer, _ := MakeExternalLocationBatch(regressionSchema, fetch.URL)
 	defer pointer.Release()
 	meta := arrow.NewMetadata(
-		[]string{MetaStreamState, MetaCallState, MetaLocation},
-		[]string{string(token), string(callToken), fetch.URL},
+		[]string{MetaStreamState, MetaCallState, MetaLocation, MetaLocationSHA256},
+		[]string{string(token), string(callToken), fetch.URL, sha256HexOf(externalBody)},
 	)
 	exReq := httptest.NewRequest(http.MethodPost, "/Service/external_exchange/exchange", bytes.NewReader(regressionIPC(t, pointer, meta)))
 	exReq.Header.Set("Content-Type", arrowContentType)
@@ -405,4 +408,10 @@ func TestUnaryExternalizedResultOwnership(t *testing.T) {
 			}
 		})
 	}
+}
+
+// sha256HexOf is the lowercase hex SHA-256 a request pointer carries.
+func sha256HexOf(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }

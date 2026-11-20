@@ -92,7 +92,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 			outerMeta = rb.Metadata()
 		}
 		if IsExternalLocationBatch(req.Batch, outerMeta) {
-			resolved, _, rerr := ResolveExternalLocation(req.Batch, outerMeta, h.server.externalConfig)
+			resolved, _, rerr := ResolveExternalRequestLocation(req.Batch, outerMeta, h.server.externalConfig)
 			if rerr != nil {
 				h.writeHttpError(w, http.StatusInternalServerError, &RpcError{
 					Type:    "ValueError",
