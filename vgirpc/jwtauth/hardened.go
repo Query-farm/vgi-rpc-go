@@ -169,6 +169,13 @@ func (c *jwksCache) fetch(ctx context.Context) (*keySet, string, error) {
 	if len(body) > maxJWKSBytes {
 		return nil, "", fmt.Errorf("JWKS response exceeds %d bytes", maxJWKSBytes)
 	}
+	// A body that is not a key set is a failed fetch, not an empty set.
+	var shape struct {
+		Keys *[]json.RawMessage `json:"keys"`
+	}
+	if err := json.Unmarshal(body, &shape); err != nil || shape.Keys == nil {
+		return nil, "", fmt.Errorf("JWKS response is not a JWK set")
+	}
 	var marshal jwkset.JWKSMarshal
 	if err := json.Unmarshal(body, &marshal); err != nil {
 		return nil, "", fmt.Errorf("JWKS response is not a JWK set: %w", err)

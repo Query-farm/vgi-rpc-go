@@ -464,3 +464,20 @@ func ecPoint(key *ecdsa.PublicKey) []byte {
 	}
 	return b
 }
+
+func TestHardenedNonKeySetIs503(t *testing.T) {
+	ec, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	for _, body := range []string{`{"foo": 1}`, `[]`, `not json`, `{"keys": "x"}`} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		auth, _, err := NewAuthenticateFunc(orchardConfig(srv.URL))
+		if err != nil {
+			t.Fatal(err)
+		}
+		tok := signPass(t, jwt.SigningMethodES256, ec, "desk-es256-1", "at+jwt", passClaims(nil))
+		_, err = call(t, auth, tok)
+		wantUnavailable(t, err)
+		srv.Close()
+	}
+}
