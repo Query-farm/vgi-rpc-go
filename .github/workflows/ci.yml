@@ -30,6 +30,10 @@ jobs:
       - name: Go unit tests
         run: go test ./...
 
+      # jwtauth is its own module, so the root go test does not reach it.
+      - name: jwtauth unit tests
+        run: cd vgirpc/jwtauth && go test ./...
+
   lint:
     runs-on: ubuntu-latest
     steps:

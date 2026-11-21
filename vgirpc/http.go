@@ -106,6 +106,14 @@ type HttpServer struct {
 	oauthMetadata     *OAuthResourceMetadata
 	oauthMetadataJSON []byte // pre-rendered JSON
 	wwwAuthenticate   string // pre-built WWW-Authenticate header value
+	// wwwAuthenticateExplicit is set by SetWWWAuthenticate: a fixed challenge
+	// that excludes OAuth resource metadata (which builds its own).
+	wwwAuthenticateExplicit bool
+
+	// strictAuth (SetStrictAuth) authenticates every request in ServeHTTP,
+	// before routing and before any body is read. Only HEAD /health and CORS
+	// preflights are exempt.
+	strictAuth bool
 
 	// Pre-rendered HTML pages (built by initPages)
 	landingHTML  []byte
@@ -693,9 +701,84 @@ func (h *HttpServer) SetIdentityBearer(enabled bool) {
 // request otherwise, failing every request closed (500) on that error; call it
 // after configuring authentication so a misconfigured worker does not start.
 func (h *HttpServer) InitIdentityBearer() error {
+	if err := h.checkStrictAuth(); err != nil {
+		return err
+	}
 	_, err := h.effectiveAuthenticate()
 	return err
 }
+
+// SetStrictAuth makes every request authenticate, not just RPC calls.
+//
+// With strict authentication on, the only requests served without a
+// credential are HEAD /health (and {prefix}/health) -- a liveness probe -- and
+// CORS preflights (OPTIONS carrying Access-Control-Request-Method), which
+// browsers send without credentials and which run no handler code. GET
+// /health, other OPTIONS requests, the landing and describe pages, the
+// well-known paths and unknown paths all need a credential, and a request
+// without one gets the standard 401.
+//
+// Authentication also moves ahead of routing, request-size enforcement and
+// request decompression, so no request body is read before the caller is
+// authenticated. The resolved identity is reused by the RPC handlers.
+//
+// Strict authentication requires [HttpServer.SetAuthenticate] and is
+// incompatible with OAuth resource metadata, OAuth PKCE and a peer
+// authentication policy, each of which can admit a request that presented no
+// credential. [HttpServer.InitIdentityBearer] reports such a configuration;
+// a strict server with no authenticator fails every request closed (500).
+// Orchard hosted mode is the intended user. Call before serving.
+func (h *HttpServer) SetStrictAuth(enabled bool) {
+	h.strictAuth = enabled
+}
+
+// SetWWWAuthenticate sets an explicit WWW-Authenticate challenge for every
+// 401, e.g. `Bearer error="invalid_token"`. It is mutually exclusive with
+// [HttpServer.SetOAuthResourceMetadata], which builds its own challenge
+// carrying resource_metadata. The value must be a non-empty single line.
+func (h *HttpServer) SetWWWAuthenticate(challenge string) error {
+	if strings.TrimSpace(challenge) == "" || strings.ContainsAny(challenge, "\r\n") {
+		return fmt.Errorf("vgirpc: WWW-Authenticate challenge must be a non-empty single-line header value")
+	}
+	if h.oauthMetadata != nil {
+		return fmt.Errorf("vgirpc: pass either an explicit WWW-Authenticate challenge or OAuth resource metadata, not both")
+	}
+	h.wwwAuthenticate = challenge
+	h.wwwAuthenticateExplicit = true
+	return nil
+}
+
+// checkStrictAuth reports a strict-auth configuration that could admit a
+// request without a credential.
+func (h *HttpServer) checkStrictAuth() error {
+	if !h.strictAuth {
+		return nil
+	}
+	switch {
+	case h.authenticateFunc == nil:
+		return fmt.Errorf("vgirpc: strict authentication requires an authenticate callback")
+	case h.oauthMetadata != nil:
+		return fmt.Errorf("vgirpc: strict authentication is incompatible with OAuth resource metadata")
+	case h.pkce != nil:
+		return fmt.Errorf("vgirpc: strict authentication is incompatible with OAuth PKCE")
+	case h.peerAuthenticationPolicy != nil:
+		return fmt.Errorf("vgirpc: strict authentication is incompatible with a peer authentication policy")
+	}
+	return nil
+}
+
+// strictAuthExempt reports whether a strict-auth server serves r without a
+// credential: HEAD on the health path, or a CORS preflight.
+func (h *HttpServer) strictAuthExempt(r *http.Request) bool {
+	if r.Method == http.MethodHead && (r.URL.Path == "/health" || (h.prefix != "" && r.URL.Path == h.prefix+"/health")) {
+		return true
+	}
+	return r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != ""
+}
+
+// strictIdentityKey carries the identity ServeHTTP resolved under strict
+// authentication to the handlers, so a request is authenticated once.
+type strictIdentityKey struct{}
 
 // effectiveAuthenticate is the configured AuthenticateFunc with the identity
 // bearer authenticators appended in the normative order: the deployment's,
@@ -768,6 +851,9 @@ func (h *HttpServer) SetOAuthResourceMetadata(m *OAuthResourceMetadata) error {
 	metaURL, err := resourceMetadataURLFromResource(m.Resource)
 	if err != nil {
 		return fmt.Errorf("vgirpc: %w", err)
+	}
+	if h.wwwAuthenticateExplicit {
+		return fmt.Errorf("vgirpc: pass either an explicit WWW-Authenticate challenge or OAuth resource metadata, not both")
 	}
 	h.oauthMetadata = m
 	h.oauthMetadataJSON = data
@@ -902,6 +988,10 @@ type requestIdentity struct {
 // evidence, and finally applies the configured composition policy. Invalid
 // presented credentials never downgrade to peer identity.
 func (h *HttpServer) authenticateIdentity(w http.ResponseWriter, r *http.Request) *requestIdentity {
+	// Already authenticated by ServeHTTP under strict authentication.
+	if resolved, ok := r.Context().Value(strictIdentityKey{}).(*requestIdentity); ok && resolved != nil {
+		return resolved
+	}
 	auth := Anonymous()
 	var missingCredential error
 	authenticate, composeErr := h.effectiveAuthenticate()
@@ -1200,6 +1290,24 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// any verb (typically OPTIONS /health). On OPTIONS we also add a
 	// Cache-Control so well-behaved clients honour the advertised TTL.
 	h.addCapabilityHeaders(w, r.Method == http.MethodOptions)
+
+	// Strict authentication: every request but HEAD /health and a CORS
+	// preflight authenticates here, before routing and before any body is
+	// read, size-checked or decompressed. The CORS headers go on first so a
+	// browser can read the 401.
+	if h.strictAuth && !h.strictAuthExempt(r) {
+		h.addCorsHeaders(w, r, r.Method == http.MethodOptions)
+		if err := h.checkStrictAuth(); err != nil {
+			slog.Error("vgirpc: strict authentication misconfigured; failing closed", "err", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		identity := h.authenticateIdentity(w, r)
+		if identity == nil {
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), strictIdentityKey{}, identity))
+	}
 
 	// CORS preflight — respond before auth or dispatch.
 	if r.Method == http.MethodOptions {

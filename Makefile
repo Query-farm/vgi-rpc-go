@@ -150,11 +150,13 @@ endif
 #             actually keeps this port aligned with the Python/Java/TS/Rust
 #             ones. Runs go-test first, since it is nearly free.
 #
-# The submodules (otel, sentry, jwtauth, s3, gcs) carry no tests; they are
+# jwtauth carries its own tests (the hardened verifier Orchard hosted mode
+# uses); the other submodules (otel, sentry, s3, gcs) carry none and are
 # covered by `make lint`.
 
 go-test:
 	go test ./...
+	cd vgirpc/jwtauth && go test ./...
 
 test: go-test conformance-worker $(PYTHON_BOOTSTRAP)
 	$(PYTHON) -m pytest test_go_conformance.py -v $(PYTEST_XDIST)

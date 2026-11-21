@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
@@ -31,6 +32,46 @@ type JWTAuthConfig struct {
 	PrincipalClaim string
 	// Domain is the authentication domain name. Defaults to "jwt" if empty.
 	Domain string
+
+	// The options below are opt-in hardening. Setting any of them selects
+	// the hardened verifier, which differs from the default one in three
+	// ways: rejections are *vgirpc.AuthFailure values naming their reason
+	// (missing_credential, invalid_credential, expired_credential), which end
+	// a [vgirpc.ChainAuthenticate] chain rather than passing to the next
+	// authenticator, so put it last; claims keep their JSON types (integers
+	// are int64, not float64); and JWKS keys are held by a fail-closed cache
+	// instead of keyfunc's background refresh.
+
+	// Algorithms is the JWS alg allow-list. nil keeps the RS*/ES* default.
+	// "none" and HS* are refused.
+	Algorithms []string
+	// RequiredTyp, when set (e.g. "at+jwt" for RFC 9068 access tokens),
+	// requires the JOSE header typ to match, case-insensitively and with the
+	// "application/" prefix optional.
+	RequiredTyp string
+	// RequireExp rejects a token without exp. An exp that is present is
+	// always checked.
+	RequireExp bool
+	// SingleAudience requires the token's aud to name exactly one value. A
+	// token naming several is refused even if one matches.
+	SingleAudience bool
+	// Leeway is the clock skew allowed on exp, nbf and iat.
+	Leeway time.Duration
+	// JWKSMaxAge is the hard upper bound on how long fetched keys are used.
+	// A shorter Cache-Control max-age on the JWKS response wins. When it
+	// passes the keys are discarded; if the re-fetch fails, verification
+	// fails (AuthUnavailableError, HTTP 503) rather than using stale keys.
+	// Zero keeps keys until an unknown kid triggers a re-fetch.
+	JWKSMaxAge time.Duration
+	// JWKSRefreshMinInterval is the minimum time between JWKS fetches
+	// triggered by an unknown kid. Within it, a token whose kid is unknown is
+	// rejected without a fetch. Zero re-fetches on every unknown kid.
+	JWKSRefreshMinInterval time.Duration
+	// JWKSFetchTimeout bounds each JWKS request. Zero means no timeout
+	// beyond HTTPClient's.
+	JWKSFetchTimeout time.Duration
+	// HTTPClient fetches the JWKS. nil uses http.DefaultClient.
+	HTTPClient *http.Client
 }
 
 // NewAuthenticateFunc creates a [vgirpc.AuthenticateFunc] that validates JWT
@@ -53,6 +94,9 @@ func NewAuthenticateFunc(cfg JWTAuthConfig) (vgirpc.AuthenticateFunc, func(), er
 
 	if cfg.JWKSURI == "" {
 		return nil, nil, fmt.Errorf("jwtauth: jwks_uri is required")
+	}
+	if cfg.hardened() {
+		return newHardenedAuthenticateFunc(cfg)
 	}
 
 	// Create JWKS keyfunc with auto-refresh; cancel stops background goroutine.

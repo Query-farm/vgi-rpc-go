@@ -157,6 +157,61 @@ staticAuth := vgirpc.BearerAuthenticateStatic(map[string]*vgirpc.AuthContext{
 httpServer.SetAuthenticate(vgirpc.ChainAuthenticate(jwtAuth, staticAuth))
 ```
 
+### Hardened JWT verification
+
+`jwtauth.JWTAuthConfig` has opt-in hardening for RFC 9068 access tokens. Setting any of these
+fields selects the hardened verifier:
+
+```go
+passAuth, cleanup, err := jwtauth.NewAuthenticateFunc(jwtauth.JWTAuthConfig{
+    Issuer:                 "https://auth.example.com",
+    Audience:               []string{"https://desk.example.com/d/dep_123"},
+    JWKSURI:                "https://auth.example.com/.well-known/jwks.json",
+    Algorithms:             []string{"ES256"}, // "none" and HS* are refused
+    RequiredTyp:            "at+jwt",          // case-insensitive, "application/" optional
+    RequireExp:             true,
+    SingleAudience:         true,              // aud must name exactly one value
+    Leeway:                 60 * time.Second,  // on exp, nbf and iat
+    JWKSMaxAge:             10 * time.Minute,  // or a shorter Cache-Control max-age
+    JWKSRefreshMinInterval: time.Minute,       // unknown-kid re-fetch rate limit
+    JWKSFetchTimeout:       10 * time.Second,
+})
+```
+
+The hardened verifier differs from the default one in three ways:
+
+- JWKS keys are discarded when `JWKSMaxAge` (or the response's shorter `max-age`) passes. If the
+  re-fetch fails, verification returns `AuthUnavailableError` (HTTP 503 with `Retry-After`) until it
+  succeeds. Stale keys are never used.
+- Rejections are `*vgirpc.AuthFailure` values naming `missing_credential`, `invalid_credential` or
+  `expired_credential`. An `AuthFailure` ends a `ChainAuthenticate` chain, so put this verifier last.
+- Claims keep their JSON types: integers are `int64`, not `float64`.
+
+### Strict authentication
+
+`SetStrictAuth(true)` authenticates every request, not just RPC calls. Only `HEAD /health` and
+CORS preflights (`OPTIONS` carrying `Access-Control-Request-Method`) are served without a
+credential. `GET /health`, other `OPTIONS` requests, the landing and describe pages, the well-known
+paths and unknown paths all get the standard 401. Authentication also runs before routing, so no
+request body is read, size-checked or decompressed before the caller is authenticated.
+`SetWWWAuthenticate` fixes the challenge on every 401:
+
+```go
+httpServer.SetAuthenticate(passAuth)
+httpServer.SetStrictAuth(true)
+if err := httpServer.SetWWWAuthenticate(`Bearer error="invalid_token"`); err != nil {
+    log.Fatal(err)
+}
+if err := httpServer.InitIdentityBearer(); err != nil {
+    log.Fatal(err) // reports a strict configuration that could admit a request without a credential
+}
+```
+
+Strict authentication needs an authenticator. It is incompatible with OAuth resource metadata,
+OAuth PKCE and a peer authentication policy, because each of those can admit a request that
+presented no credential. An explicit `WWW-Authenticate` challenge also excludes OAuth resource
+metadata, which builds its own. This is the HTTP half of Orchard hosted mode in vgi-go.
+
 ### Proxy Proof
 
 Proxy proof lets a worker refuse any request that did not arrive through a trusted proxy. The
@@ -413,7 +468,7 @@ httpServer.SetAuthenticate(vgirpc.ChainAuthenticate(mtlsAuth, apiKeyAuth))
 | `MtlsAuthenticateSubject` | `vgirpc` | PEM certificate subject CN extraction |
 | `MtlsAuthenticateXfcc` | `vgirpc` | Envoy XFCC header parsing |
 | `ChainAuthenticate` | `vgirpc` | Try multiple authenticators in order |
-| `jwtauth.NewAuthenticateFunc` | `vgirpc/jwtauth` | JWT validation via JWKS |
+| `jwtauth.NewAuthenticateFunc` | `vgirpc/jwtauth` | JWT validation via JWKS (optionally hardened) |
 
 ## OAuth Protected Resource Metadata (RFC 9728)
 
