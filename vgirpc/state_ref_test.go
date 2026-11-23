@@ -288,9 +288,30 @@ func TestAdvertisedUploadCapNeverExceedsFetchCap(t *testing.T) {
 	if got := h.effectiveMaxUploadBytes(); got != 1<<20 {
 		t.Fatalf("an upload cap under the fetch cap is advertised as set, got %d", got)
 	}
-	h.SetMaxUploadBytes(1 << 40)
-	if got := h.effectiveMaxUploadBytes(); got != defaultMaxFetchBytes {
-		t.Fatalf("an upload cap over the fetch cap is clamped, got %d", got)
+	// No explicit fetch cap: a larger upload cap raises it, end to end.
+	h.server.SetExternalLocation(DefaultExternalLocationConfig(nil))
+	h.SetMaxUploadBytes(1 << 30)
+	if got := h.effectiveMaxUploadBytes(); got != 1<<30 {
+		t.Fatalf("an upload cap over an unset fetch cap is advertised as set, got %d", got)
+	}
+	if got := h.inboundExternalConfig().maxFetchBytes(); got != 1<<30 {
+		t.Fatalf("inbound pointers must be fetched under the raised cap, got %d", got)
+	}
+	if h.server.externalConfig.MaxFetchBytes != defaultMaxFetchBytes {
+		t.Fatal("raising the cap must not mutate the shared external config")
+	}
+	// An explicit fetch cap below the upload cap clamps the advertisement.
+	h.SetMaxFetchBytes(1 << 20)
+	if got := h.effectiveMaxUploadBytes(); got != 1<<20 {
+		t.Fatalf("an upload cap over an explicit fetch cap is clamped, got %d", got)
+	}
+	if got := h.inboundExternalConfig().maxFetchBytes(); got != 1<<20 {
+		t.Fatalf("SetMaxFetchBytes must govern inbound fetches, got %d", got)
+	}
+	h.SetMaxFetchBytes(0)
+	h.server.externalConfig.MaxFetchBytes = 64 << 20 // non-default: explicit
+	if got := h.effectiveMaxUploadBytes(); got != 64<<20 {
+		t.Fatalf("a non-default config MaxFetchBytes is an explicit cap, got %d", got)
 	}
 }
 

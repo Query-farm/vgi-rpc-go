@@ -145,6 +145,7 @@ type HttpServer struct {
 	maxRequestBytes        int64 // 0 = no limit / not advertised
 	hostingMaxRequestBytes int64 // 0 = no hosting limit
 	maxUploadBytes         int64 // 0 = advertise the inbound fetch cap (see effectiveMaxUploadBytes)
+	maxFetchBytes          int64 // 0 = not set here (see SetMaxFetchBytes and fetchCap)
 
 	// StateRef / turn budget (protocol 3.4, STATE_REF_V1.md). See
 	// SetStateRefInlineBytes, SetCursorRule and SetObjectCache.
@@ -677,13 +678,60 @@ func (h *HttpServer) objectStore() ObjectStore {
 	return nil
 }
 
-// fetchCap is the server's inbound fetch cap: its external config's
-// MaxFetchBytes, else the 256 MiB default.
-func (h *HttpServer) fetchCap() int64 {
-	if cfg := h.server.externalConfig; cfg != nil {
-		return cfg.maxFetchBytes()
+// SetMaxFetchBytes sets the server's inbound fetch cap explicitly: the
+// largest request it fetches from an inbound pointer, and the largest stored
+// StateRef or argument object it fetches back. It overrides the external
+// config's MaxFetchBytes. Once set explicitly, an upload cap above it is
+// clamped to it (with a warning) rather than raising it. 0 clears it.
+func (h *HttpServer) SetMaxFetchBytes(n int64) {
+	if n < 0 {
+		n = 0
 	}
-	return defaultMaxFetchBytes
+	h.maxFetchBytes = n
+}
+
+// explicitFetchCap returns the operator-set fetch cap and whether there is
+// one: SetMaxFetchBytes, VGI_RPC_MAX_FETCH_BYTES, or an external config whose
+// MaxFetchBytes differs from the 256 MiB default.
+func (h *HttpServer) explicitFetchCap() (int64, bool) {
+	if h.maxFetchBytes > 0 {
+		return h.maxFetchBytes, true
+	}
+	if cfg := h.server.externalConfig; cfg != nil {
+		if cfg.fetchCapExplicit || (cfg.MaxFetchBytes > 0 && cfg.MaxFetchBytes != defaultMaxFetchBytes) {
+			return cfg.maxFetchBytes(), true
+		}
+	}
+	return defaultMaxFetchBytes, false
+}
+
+// fetchCap is the server's effective inbound fetch cap. An explicit cap (see
+// explicitFetchCap) stands as set. Without one it is the 256 MiB default,
+// raised to SetMaxUploadBytes when that is larger: setting the upload size is
+// how an operator says "accept requests this large", so it carries the fetch
+// cap with it (as the reference's VGI_RPC_MAX_FETCH_BYTES default does).
+func (h *HttpServer) fetchCap() int64 {
+	fetch, explicit := h.explicitFetchCap()
+	if !explicit && h.maxUploadBytes > fetch {
+		return h.maxUploadBytes
+	}
+	return fetch
+}
+
+// inboundExternalConfig is the external config inbound request pointers are
+// fetched under, carrying the effective fetch cap (which may have risen to the
+// upload cap, or been set with SetMaxFetchBytes). nil without one.
+func (h *HttpServer) inboundExternalConfig() *ExternalLocationConfig {
+	cfg := h.server.externalConfig
+	if cfg == nil {
+		return nil
+	}
+	if fetch := h.fetchCap(); fetch != cfg.maxFetchBytes() {
+		adjusted := *cfg
+		adjusted.MaxFetchBytes = fetch
+		return &adjusted
+	}
+	return cfg
 }
 
 // stateRefRuntime snapshots this server's StateRef machinery for one request.
@@ -723,7 +771,8 @@ func (h *HttpServer) warnBelowCursorFloor() {
 // comes back as a pointer the server fetches under its inbound fetch cap, so
 // advertising more would let a client upload a request the server then
 // refuses after the whole upload: the advertised size is SetMaxUploadBytes
-// when set, never above the fetch cap, and the fetch cap itself when unset.
+// when set (raising an unset fetch cap with it; clamped, with a warning, to an
+// explicit fetch cap below it), and the fetch cap itself when unset.
 func (h *HttpServer) effectiveMaxUploadBytes() int64 {
 	fetch := h.fetchCap()
 	if h.maxUploadBytes <= 0 {
@@ -732,8 +781,8 @@ func (h *HttpServer) effectiveMaxUploadBytes() int64 {
 	if h.maxUploadBytes > fetch {
 		h.uploadWarned.Do(func() {
 			slog.Warn(fmt.Sprintf("max_upload_bytes (%d) exceeds the server's inbound fetch cap (%d): advertising "+
-				"the fetch cap instead. Raise ExternalLocationConfig.MaxFetchBytes (VGI_RPC_MAX_FETCH_BYTES) or lower "+
-				"max_upload_bytes.", h.maxUploadBytes, fetch))
+				"the fetch cap instead. Raise SetMaxFetchBytes / ExternalLocationConfig.MaxFetchBytes "+
+				"(VGI_RPC_MAX_FETCH_BYTES) or lower max_upload_bytes.", h.maxUploadBytes, fetch))
 		})
 		return fetch
 	}
@@ -771,10 +820,12 @@ func (h *HttpServer) SetHostingMaxRequestBytes(n int64) {
 
 // SetMaxUploadBytes sets the largest upload __upload_url__/init vends a URL
 // for, advertised as VGI-Max-Upload-Bytes whenever an upload-URL provider is
-// configured. It never advertises more than the server's inbound fetch cap
-// (the external config's MaxFetchBytes, or 256 MiB without one): a larger
-// value is clamped to the fetch cap with a warning. 0 (the default)
-// advertises the fetch cap itself.
+// configured. The advertisement never exceeds the server's inbound fetch cap:
+// when no fetch cap was set explicitly ([HttpServer.SetMaxFetchBytes],
+// VGI_RPC_MAX_FETCH_BYTES, or a non-default ExternalLocationConfig.MaxFetchBytes)
+// a larger upload cap raises the fetch cap with it, so it works as written;
+// when one was set below it, the advertisement is clamped to it with a
+// warning. 0 (the default) advertises the fetch cap itself.
 func (h *HttpServer) SetMaxUploadBytes(n int64) {
 	h.maxUploadBytes = n
 }

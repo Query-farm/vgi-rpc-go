@@ -114,7 +114,15 @@ type ExternalLocationConfig struct {
 	HTTPClient *http.Client
 	// MaxFetchBytes is the encoded response-body limit. It is enforced while
 	// streaming, before any Content-Encoding is decoded. Default: 256 MiB.
+	//
+	// On an HttpServer that vends upload URLs, a value other than the 256 MiB
+	// default counts as an explicit fetch cap; left at the default it rises to
+	// the server's SetMaxUploadBytes, so a large upload cap works as written
+	// (see [HttpServer.SetMaxUploadBytes]).
 	MaxFetchBytes int64
+	// fetchCapExplicit marks MaxFetchBytes as operator-set even when it equals
+	// the default (VGI_RPC_MAX_FETCH_BYTES was set).
+	fetchCapExplicit bool
 	// MaxDecompressedBytes is the decoded payload limit. Default: 4 GiB.
 	MaxDecompressedBytes int64
 	// MaxRedirects bounds redirect following. Every target is passed to

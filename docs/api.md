@@ -64,7 +64,8 @@ func RegisterStateType(v interface{})
 | `SetStateRefInlineBytes(n int64) error` | Largest compressed `StateRef` payload kept inline (default 16384) |
 | `SetCursorRule(rule CursorRule) error` | `CursorRuleWarn` (default) or `CursorRuleError` for a cursor over the turn budget |
 | `SetObjectCache(c *ObjectCache)` | Object cache for stored `StateRef`s and argument references (default `DefaultObjectCache()`) |
-| `SetMaxUploadBytes(n int64)` | Advertised `VGI-Max-Upload-Bytes`; never above the inbound fetch cap, which it defaults to |
+| `SetMaxUploadBytes(n int64)` | Advertised `VGI-Max-Upload-Bytes` (default: the fetch cap); raises an unset fetch cap, is clamped (with a warning) to an explicit one |
+| `SetMaxFetchBytes(n int64)` | Explicit inbound fetch cap for request pointers, stored `StateRef`s and argument objects |
 | `ServeHTTP(w http.ResponseWriter, r *http.Request)` | Implements `http.Handler` |
 
 ## HttpClient

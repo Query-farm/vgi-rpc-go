@@ -89,7 +89,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			outerMeta = rb.Metadata()
 		}
 		if IsExternalLocationBatch(req.Batch, outerMeta) {
-			resolved, _, resolveErr := ResolveExternalRequestLocation(req.Batch, outerMeta, h.server.externalConfig)
+			resolved, _, resolveErr := ResolveExternalRequestLocation(req.Batch, outerMeta, h.inboundExternalConfig())
 			if resolveErr != nil {
 				h.writeHttpError(w, http.StatusInternalServerError, &RpcError{
 					Type:    "ValueError",
@@ -551,7 +551,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	// from the fetched data batch.
 	var resolvedInput arrow.RecordBatch
 	if !cancelled && h.server.externalConfig != nil && IsExternalLocationBatch(inputBatch, inputMeta) {
-		resolved, resolvedMeta, resolveErr := ResolveExternalRequestLocation(inputBatch, inputMeta, h.server.externalConfig)
+		resolved, resolvedMeta, resolveErr := ResolveExternalRequestLocation(inputBatch, inputMeta, h.inboundExternalConfig())
 		if resolveErr != nil {
 			h.writeHttpError(w, http.StatusInternalServerError, &RpcError{
 				Type:    "ValueError",

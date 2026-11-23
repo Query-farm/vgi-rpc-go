@@ -1484,6 +1484,7 @@ func ExternalConfigFromEnv(getenv func(string) string) (*ExternalLocationConfig,
 	config.ExternalizeThresholdBytes = threshold
 	config.Compression = compression
 	config.MaxFetchBytes = maxFetch
+	config.fetchCapExplicit = strings.TrimSpace(getenv(EnvMaxFetchBytes)) != ""
 	config.URLValidator = storage.URLValidator()
 	// Fetching an inbound pointer is a storage-host request too: a bare
 	// client, never one carrying credentials.
