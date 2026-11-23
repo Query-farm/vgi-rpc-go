@@ -5,6 +5,7 @@ package vgirpc
 
 import (
 	"bytes"
+	"encoding"
 	"fmt"
 	"reflect"
 	"strconv"
@@ -16,6 +17,26 @@ import (
 )
 
 var timeType = reflect.TypeOf(time.Time{})
+
+var binaryUnmarshalerType = reflect.TypeOf((*encoding.BinaryUnmarshaler)(nil)).Elem()
+
+// rawBinaryValue copies row idx of a binary or large-binary column; ok is
+// false for any other column type.
+func rawBinaryValue(col arrow.Array, idx int) ([]byte, bool) {
+	var data []byte
+	switch c := col.(type) {
+	case *array.Binary:
+		data = c.Value(idx)
+	case *array.LargeBinary:
+		data = c.Value(idx)
+	default:
+		return nil, false
+	}
+	out := make([]byte, len(data))
+	copy(out, data)
+	return out, true
+}
+
 var durationType = reflect.TypeOf(time.Duration(0))
 
 // timestampToTime converts an Arrow timestamp value (interpreted in the unit
@@ -195,6 +216,24 @@ func setFieldFromArrow(field reflect.Value, fieldType reflect.Type, col arrow.Ar
 			return nil
 		}
 		fieldType = fieldType.Elem()
+	}
+
+	// A raw-binary field (encoding.BinaryUnmarshaler on its pointer, e.g. a
+	// raw-preserving nested record) receives a private copy of the column
+	// bytes, undecoded.
+	if reflect.PointerTo(fieldType).Implements(binaryUnmarshalerType) {
+		if data, ok := rawBinaryValue(col, idx); ok {
+			ptr := reflect.New(fieldType)
+			if err := ptr.Interface().(encoding.BinaryUnmarshaler).UnmarshalBinary(data); err != nil {
+				return err
+			}
+			if isPtr {
+				field.Set(ptr)
+			} else {
+				field.Set(ptr.Elem())
+			}
+			return nil
+		}
 	}
 
 	// Handle ArrowSerializable types — could be binary (IPC stream at param level)

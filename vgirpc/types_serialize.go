@@ -5,6 +5,7 @@ package vgirpc
 
 import (
 	"bytes"
+	"encoding"
 	"fmt"
 	"reflect"
 	"sort"
@@ -342,8 +343,15 @@ func buildArray(mem memory.Allocator, dt arrow.DataType, value any) (arrow.Array
 	case arrow.BINARY:
 		b := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
 		defer b.Release()
-		// Handle ArrowSerializable types
-		if as, ok := value.(ArrowSerializable); ok {
+		// A raw-binary value (encoding.BinaryMarshaler, e.g. a raw-preserving
+		// nested record) writes its own bytes verbatim.
+		if bm, ok := value.(encoding.BinaryMarshaler); ok {
+			data, err := bm.MarshalBinary()
+			if err != nil {
+				return nil, err
+			}
+			b.Append(data)
+		} else if as, ok := value.(ArrowSerializable); ok {
 			data, err := serializeArrowSerializable(as)
 			if err != nil {
 				return nil, err
@@ -671,7 +679,13 @@ func appendToBuilder(b array.Builder, dt arrow.DataType, value any) error {
 	case arrow.BOOL:
 		b.(*array.BooleanBuilder).Append(value.(bool))
 	case arrow.BINARY:
-		if as, ok := value.(ArrowSerializable); ok {
+		if bm, ok := value.(encoding.BinaryMarshaler); ok {
+			data, err := bm.MarshalBinary()
+			if err != nil {
+				return err
+			}
+			b.(*array.BinaryBuilder).Append(data)
+		} else if as, ok := value.(ArrowSerializable); ok {
 			data, err := serializeArrowSerializable(as)
 			if err != nil {
 				return err
