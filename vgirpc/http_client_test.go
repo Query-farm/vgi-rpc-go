@@ -22,9 +22,14 @@ import (
 	"github.com/apache/arrow-go/v18/arrow/memory"
 )
 
+// clientLifecycleProducer is serialized into a cursor between its two HTTP
+// turns, so it is registered and its field exported: a cursor that cannot be
+// minted is an error the client sees, not a silently finished stream.
 type clientLifecycleProducer struct {
-	emitted bool
+	Emitted bool
 }
+
+func init() { RegisterStateType(&clientLifecycleProducer{}) }
 
 func newResponseBudgetTestServer(handler http.HandlerFunc) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,10 +43,10 @@ func newResponseBudgetTestServer(handler http.HandlerFunc) *httptest.Server {
 }
 
 func (s *clientLifecycleProducer) Produce(_ context.Context, out *OutputCollector, _ *CallContext) error {
-	if s.emitted {
+	if s.Emitted {
 		return out.Finish()
 	}
-	s.emitted = true
+	s.Emitted = true
 	builder := array.NewInt32Builder(memory.DefaultAllocator)
 	builder.Append(7)
 	values := builder.NewInt32Array()

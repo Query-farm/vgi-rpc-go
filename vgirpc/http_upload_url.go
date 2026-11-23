@@ -53,11 +53,17 @@ var UploadURLParamsSchema = arrow.NewSchema([]arrow.Field{
 // UploadURLResponseSchema is the response schema for the __upload_url__/init
 // endpoint: one row per request entry, in order. upload_headers are the
 // headers the client must send on the PUT, verbatim (possibly none).
+// object_id and ref (protocol 3.4, STATE_REF_V1.md §10.2) are the storage id
+// of the object the PUT creates and a sealed argument reference for it, bound
+// to the requesting principal; clients read every column by name and may
+// ignore these two.
 var UploadURLResponseSchema = arrow.NewSchema([]arrow.Field{
 	{Name: "upload_url", Type: arrow.BinaryTypes.String},
 	{Name: "download_url", Type: arrow.BinaryTypes.String},
 	{Name: "expires_at", Type: &arrow.TimestampType{Unit: arrow.Microsecond, TimeZone: "UTC"}},
 	{Name: "upload_headers", Type: arrow.MapOf(arrow.BinaryTypes.String, arrow.BinaryTypes.String)},
+	{Name: "object_id", Type: arrow.BinaryTypes.String},
+	{Name: "ref", Type: arrow.BinaryTypes.Binary},
 }, nil)
 
 // UploadRequest is one entry of an __upload_url__/init request.
@@ -82,9 +88,15 @@ func (h *HttpServer) handleUploadURLInit(w http.ResponseWriter, r *http.Request)
 		http.NotFound(w, r)
 		return
 	}
-	if h.authenticateIdentity(w, r) == nil {
+	// Authenticated exactly like a protocol method -- same authenticators,
+	// same peer-evidence binding, same anonymous fallback -- because the
+	// argument references minted below are bound to this AuthContext and are
+	// opened later under the AuthContext of the call presenting them.
+	identity := h.authenticateIdentity(w, r)
+	if identity == nil {
 		return
 	}
+	auth := identity.auth
 	var budgetOK bool
 	r, budgetOK = h.applyResponseBudget(w, r, UploadURLResponseSchema)
 	if !budgetOK {
@@ -117,7 +129,7 @@ func (h *HttpServer) handleUploadURLInit(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	entries, refusal := parseUploadRequests(req.Batch, h.maxUploadBytes)
+	entries, refusal := parseUploadRequests(req.Batch, h.effectiveMaxUploadBytes())
 	if refusal != nil {
 		h.writeHttpError(w, http.StatusBadRequest, refusal, UploadURLResponseSchema)
 		return
@@ -130,6 +142,20 @@ func (h *HttpServer) handleUploadURLInit(w http.ResponseWriter, r *http.Request)
 			h.writeHttpError(w, http.StatusInternalServerError, gerr, UploadURLResponseSchema)
 			return
 		}
+		if u.ObjectID == "" {
+			h.writeHttpError(w, http.StatusInternalServerError, &RpcError{Type: "RuntimeError",
+				Message: fmt.Sprintf("%T.GenerateUploadURL returned no ObjectID (required since vgi-rpc protocol 3.4)", h.uploadURLProvider)},
+				UploadURLResponseSchema)
+			return
+		}
+		// One sealed argument reference per entry, minted from the claimed
+		// (size, sha256) under this request's AuthContext.
+		ref, merr := MintArgumentRef(h.tokenKey, auth, entry.Size, entry.SHA256, u.ObjectID)
+		if merr != nil {
+			h.writeHttpError(w, http.StatusInternalServerError, merr, UploadURLResponseSchema)
+			return
+		}
+		u.Ref = ref
 		urls = append(urls, u)
 	}
 
@@ -256,12 +282,18 @@ func buildUploadURLBatch(urls []UploadURL) arrow.RecordBatch {
 	defer expiresB.Release()
 	headersB := array.NewMapBuilderWithType(mem, UploadURLResponseSchema.Field(3).Type.(*arrow.MapType))
 	defer headersB.Release()
+	objectIDB := array.NewStringBuilder(mem)
+	defer objectIDB.Release()
+	refB := array.NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
+	defer refB.Release()
 	keyB := headersB.KeyBuilder().(*array.StringBuilder)
 	itemB := headersB.ItemBuilder().(*array.StringBuilder)
 
 	for _, u := range urls {
 		uploadB.Append(u.UploadURL)
 		downloadB.Append(u.DownloadURL)
+		objectIDB.Append(u.ObjectID)
+		refB.Append(u.Ref)
 		expiresB.Append(arrow.Timestamp(u.ExpiresAt.UTC().UnixMicro()))
 		headersB.Append(true)
 		names := make([]string, 0, len(u.Headers))
@@ -289,6 +321,10 @@ func buildUploadURLBatch(urls []UploadURL) arrow.RecordBatch {
 	defer expiresArr.Release()
 	headersArr := headersB.NewArray()
 	defer headersArr.Release()
+	objectIDArr := objectIDB.NewArray()
+	defer objectIDArr.Release()
+	refArr := refB.NewArray()
+	defer refArr.Release()
 	return array.NewRecordBatch(UploadURLResponseSchema,
-		[]arrow.Array{uploadArr, downloadArr, expiresArr, headersArr}, int64(len(urls)))
+		[]arrow.Array{uploadArr, downloadArr, expiresArr, headersArr, objectIDArr, refArr}, int64(len(urls)))
 }

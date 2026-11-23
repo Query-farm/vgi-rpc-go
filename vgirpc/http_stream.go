@@ -183,6 +183,21 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
 	}
+	// The stream method's own context is the init request: the one place
+	// StateRef() is allowed (STATE_REF_V1.md §2.1). Refs it creates point at
+	// stateRefs.stream, which the cursor mint below arms.
+	initRefs := &stateRefScope{
+		rt:       h.stateRefRuntime(),
+		auth:     auth,
+		protocol: protocol,
+		method:   method,
+		init:     true,
+		stream:   &stateRefStream{},
+	}
+	callCtx.stateRefs = initRefs
+	// Every later context of this stream (its first producer turn included)
+	// resolves refs but may not create them.
+	turnRefs := &stateRefScope{rt: initRefs.rt, auth: auth, protocol: protocol, method: method, callID: rawCallID(callID)}
 
 	// Resolve sticky session token (when present) before the handler runs.
 	// Producer / exchange streams open their session on /init and resume
@@ -224,8 +239,9 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	if handlerErr != nil {
 		// The 500 is what writeArrow rewrites to 200 + X-VGI-RPC-Error: true —
 		// the method ran and failed, so the failure is an application result
-		// (same contract as the unary path).
-		h.writeHttpError(w, http.StatusInternalServerError, handlerErr, nil)
+		// (same contract as the unary path). invalid_state_ref is a 400, like
+		// every other token failure.
+		h.writeHttpError(w, methodErrorStatus(handlerErr), handlerErr, nil)
 		return
 	}
 	if streamResult == nil {
@@ -282,6 +298,10 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	headerLen := buf.Len()
+	// The call token is minted before the cursor: its sealed length enters
+	// the cursor's turn budget.
+	budgetForToken := responseBudgetFromContext(ctx)
 
 	if isProducer {
 		// Run exactly one producer transition for this init tick.
@@ -299,19 +319,28 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		// exactly as a continuation tick is: an honest client has no cursor to
 		// put on an /init body yet, so this is the rule stated once rather than
 		// left to depend on the client (the reference strips here too).
-		finished, err := h.runProduceTurn(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, peerEvidence, transportMeta, callCtx.Cookies, callCtx.stickySink, stripFrameworkTickMetadata(requestMetadata(req)))
+		finished, err := h.runProduceTurn(ctx, writer, outputSchema, state.(ProducerState), info, stats, auth, peerEvidence, transportMeta, callCtx.Cookies, callCtx.stickySink, stripFrameworkTickMetadata(requestMetadata(req)), turnRefs)
 		handlerErr = err
+		var mintErr error
 		if err == nil && !finished {
 			// The producer remains active — append a continuation token.
-			token, tokenErr := h.packCursorToken(callID, state, auth, protocol)
-			callToken, callErr := h.packCallToken(callID, outputSchema, auth, streamID, responseBudgetFromContext(ctx), protocol)
-			if tokenErr != nil {
-				handlerErr = tokenErr
-			} else if callErr != nil {
-				handlerErr = callErr
-			} else if werr := writeStateTokenBatch(writer, outputSchema, token, callToken); werr != nil {
-				h.logIPCWriteErr("state-token-batch", info.Name, werr)
-				handlerErr = werr
+			var token []byte
+			var warning string
+			callToken, callErr := h.mintCallToken(callID, outputSchema, auth, streamID, budgetForToken, protocol, method)
+			if callErr == nil {
+				token, warning, mintErr = h.mintCursorToken(callID, state, auth, protocol,
+					cursorMint{method: method, callTokenBytes: sealedLen(callToken), stream: initRefs.stream})
+			} else {
+				mintErr = callErr
+			}
+			if mintErr != nil {
+				handlerErr = mintErr
+			} else {
+				h.writeCursorWarning(writer, outputSchema, info.Name, warning)
+				if werr := writeStateTokenBatch(writer, outputSchema, token, callToken); werr != nil {
+					h.logIPCWriteErr("state-token-batch", info.Name, werr)
+					handlerErr = werr
+				}
 			}
 		}
 		if cerr := writer.Close(); cerr != nil {
@@ -319,6 +348,13 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 			if handlerErr == nil {
 				handlerErr = cerr
 			}
+		}
+		if mintErr != nil {
+			// The cursor could not be minted (cursor_too_large, a StateRef
+			// store failure): discard the turn's data so the refusal never
+			// follows rows the client would otherwise have consumed.
+			buf.Truncate(headerLen)
+			h.writeErrorStream(&buf, outputSchema, info.Name, mintErr)
 		}
 		if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), 0,
 			responseBudgetFromContext(ctx).Limit, 0); capErr != nil {
@@ -332,14 +368,17 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// Exchange init — return state token (carry schema for dynamic methods)
-		token, err := h.packCursorToken(callID, state, auth, protocol)
+		callToken, err := h.mintCallToken(callID, outputSchema, auth, streamID, budgetForToken, protocol, method)
 		if err != nil {
-			h.writeHttpError(w, http.StatusInternalServerError, err, nil)
+			handlerErr = err
+			h.writeHttpError(w, methodErrorStatus(err), err, nil)
 			return
 		}
-		callToken, err := h.packCallToken(callID, outputSchema, auth, streamID, responseBudgetFromContext(ctx), protocol)
+		token, warning, err := h.mintCursorToken(callID, state, auth, protocol,
+			cursorMint{method: method, callTokenBytes: sealedLen(callToken), stream: initRefs.stream})
 		if err != nil {
-			h.writeHttpError(w, http.StatusInternalServerError, err, nil)
+			handlerErr = err
+			h.writeHttpError(w, methodErrorStatus(err), err, nil)
 			return
 		}
 
@@ -350,6 +389,7 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 		for _, logMsg := range initLogs {
 			h.logIPCWriteErr("log-batch", info.Name, writeLogBatch(writer, outputSchema, logMsg, h.server.serverID, ""))
 		}
+		h.writeCursorWarning(writer, outputSchema, info.Name, warning)
 
 		// Write zero-row batch with state token
 		if werr := writeStateTokenBatch(writer, outputSchema, token, callToken); werr != nil {
@@ -383,7 +423,45 @@ func streamResponseStatus(handlerErr error) int {
 	if errors.As(handlerErr, &externalErr) || errors.As(handlerErr, &responseErr) {
 		return http.StatusInternalServerError
 	}
+	switch ErrorKindOf(handlerErr) {
+	case ErrorKindInvalidStateRef:
+		// A token failure, whichever turn raised it (STATE_REF_V1.md §6).
+		return http.StatusBadRequest
+	case ErrorKindCursorTooLarge, ErrorKindStateRefTooLarge, ErrorKindStateRefMissing,
+		ErrorKindStateRefMisuse, ErrorKindStorageUnavailable:
+		// Nothing of this turn is delivered: signal it like a cap refusal.
+		return http.StatusInternalServerError
+	}
 	return http.StatusOK
+}
+
+// methodErrorStatus is the status for an error a stream method (or its state)
+// raised: invalid_state_ref is answered 400 like every other token failure
+// (STATE_REF_V1.md §6); everything else is the ordinary error-signalling 500
+// that writeArrow rewrites to 200 + X-VGI-RPC-Error: true.
+func methodErrorStatus(err error) int {
+	if isInvalidStateRef(err) {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
+
+// writeCursorWarning sends the client the cursor_large WARN log (cursor rule
+// "warn"); a no-op for an empty warning.
+func (h *HttpServer) writeCursorWarning(writer *ipc.Writer, schema *arrow.Schema, method, warning string) {
+	if warning == "" {
+		return
+	}
+	h.logIPCWriteErr("cursor-warning", method, writeLogBatch(writer, schema,
+		LogMessage{Level: LogWarn, Message: warning, Extras: map[string]string{"kind": "cursor_large"}},
+		h.server.serverID, ""))
+}
+
+// writeErrorStream appends a fresh IPC stream carrying only err.
+func (h *HttpServer) writeErrorStream(buf *bytes.Buffer, schema *arrow.Schema, method string, err error) {
+	errWriter := ipc.NewWriter(buf, ipc.WithSchema(schema))
+	h.logIPCWriteErr("error-batch", method, writeErrorBatch(errWriter, schema, err, h.server.serverID, "", h.server.traceFor(method)))
+	h.logIPCWriteErr("close", method, errWriter.Close())
 }
 
 // handleStreamExchange dispatches stream exchange or producer continuation.
@@ -529,9 +607,24 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	}
 	call, err := h.resolveCall(tokenData, callTokenBytes, auth, protocol)
 	if err != nil {
-		h.writeHttpError(w, http.StatusBadRequest, err, nil)
+		status := http.StatusBadRequest
+		switch ErrorKindOf(err) {
+		case ErrorKindStateRefMissing, ErrorKindStateRefTooLarge, ErrorKindStorageUnavailable:
+			// The stored schema could not be fetched: an RPC error, not a
+			// malformed token.
+			status = http.StatusInternalServerError
+		}
+		h.writeHttpError(w, status, err, nil)
 		return
 	}
+	// The call token rides every continuation; its sealed length enters the
+	// turn budget.
+	callTokenSealed := call.CallTokenBytes
+	if callTokenSealed == 0 && len(callTokenBytes) > 0 {
+		callTokenSealed = sealedLen(callTokenBytes)
+	}
+	refs := &stateRefScope{rt: h.stateRefRuntime(), auth: auth, protocol: protocol, method: method, callID: rawCallID(tokenData.CallID)}
+	mint := cursorMint{method: method, callTokenBytes: callTokenSealed}
 	budget := responseBudgetFromContext(r.Context())
 	budget.Limit = minPositive(budget.Limit, call.ResponseLimit)
 	budget.Preferred = minPositive(budget.Preferred, call.PreferredResponse)
@@ -626,14 +719,14 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 	cookies := buildHTTPCookies(r)
 
 	if cancelled {
-		handlerErr = h.handleStreamCancel(ctx, w, outputSchema, tokenData.State, info, auth, peerEvidence, transportMeta, cookies, stickySinkForCtx)
+		handlerErr = h.handleStreamCancel(ctx, w, outputSchema, tokenData.State, info, auth, peerEvidence, transportMeta, cookies, stickySinkForCtx, refs)
 		return
 	}
 
 	if isProducer {
-		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, peerEvidence, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx, inputMeta, protocol)
+		handlerErr = h.handleProducerContinuation(ctx, w, outputSchema, tokenData.State.(ProducerState), info, stats, auth, peerEvidence, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx, inputMeta, protocol, refs, mint)
 	} else {
-		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, inputMeta, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, peerEvidence, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx, protocol)
+		handlerErr = h.handleExchangeCall(ctx, w, inputBatch, inputMeta, outputSchema, tokenData.State.(ExchangeState), info, stats, auth, peerEvidence, transportMeta, cookies, streamID, tokenData.CallID, stickySinkForCtx, protocol, refs, mint)
 	}
 }
 
@@ -641,7 +734,7 @@ func (h *HttpServer) handleStreamExchange(w http.ResponseWriter, r *http.Request
 // the optional StreamCanceller hook on the state and writes an empty IPC
 // stream (no state token) so the client knows the stream is finished.
 func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state interface{}, info *methodInfo, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, sink *stickySink) error {
+	state interface{}, info *methodInfo, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, sink *stickySink, refs *stateRefScope) error {
 	if canceller, ok := state.(StreamCanceller); ok {
 		callCtx := &CallContext{
 			Ctx:               ctx,
@@ -655,6 +748,7 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 			Kind:              TransportKindHTTP,
 			Implementation:    h.server.implementation,
 			stickySink:        sink,
+			stateRefs:         refs,
 		}
 		func() {
 			defer func() {
@@ -677,7 +771,7 @@ func (h *HttpServer) handleStreamCancel(ctx context.Context, w http.ResponseWrit
 // handleProducerContinuation runs one producer transition for a continuation request.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.ResponseWriter, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, requestMeta arrow.Metadata, protocol string) error {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, requestMeta arrow.Metadata, protocol string, refs *stateRefScope, mint cursorMint) error {
 
 	var buf bytes.Buffer
 	writer := ipc.NewWriter(&buf, ipc.WithSchema(schema))
@@ -690,15 +784,19 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 	// framework's own transport keys are stripped first — the pipe transports
 	// never put them on a tick, and the stream-state value is a sealed cursor
 	// token that must not surface to user code.
-	finished, err := h.runProduceTurn(ctx, writer, schema, state, info, stats, auth, peerEvidence, transportMeta, cookies, sink, stripFrameworkTickMetadata(requestMeta))
+	finished, err := h.runProduceTurn(ctx, writer, schema, state, info, stats, auth, peerEvidence, transportMeta, cookies, sink, stripFrameworkTickMetadata(requestMeta), refs)
+	var mintErr error
 	if err == nil && !finished {
 		// The producer remains active — append a continuation token.
-		token, tokenErr := h.packCursorToken(callID, state, auth, protocol)
+		token, warning, tokenErr := h.mintCursorToken(callID, state, auth, protocol, mint)
 		if tokenErr != nil {
-			err = tokenErr
-		} else if werr := writeStateTokenBatch(writer, schema, token, nil); werr != nil {
-			h.logIPCWriteErr("state-token-batch", info.Name, werr)
-			err = werr
+			err, mintErr = tokenErr, tokenErr
+		} else {
+			h.writeCursorWarning(writer, schema, info.Name, warning)
+			if werr := writeStateTokenBatch(writer, schema, token, nil); werr != nil {
+				h.logIPCWriteErr("state-token-batch", info.Name, werr)
+				err = werr
+			}
 		}
 	}
 	if cerr := writer.Close(); cerr != nil {
@@ -706,6 +804,11 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 		if err == nil {
 			err = cerr
 		}
+	}
+	if mintErr != nil {
+		// See handleStreamInit: never deliver data ahead of a cursor refusal.
+		buf.Reset()
+		h.writeErrorStream(&buf, schema, info.Name, mintErr)
 	}
 	if capErr := enforceResponseBudgets(info.Name, int64(buf.Len()), 0,
 		responseBudgetFromContext(ctx).Limit, 0); capErr != nil {
@@ -722,7 +825,7 @@ func (h *HttpServer) handleProducerContinuation(ctx context.Context, w http.Resp
 // handleExchangeCall processes one exchange and returns the result with updated token.
 // Returns the handler error (if any) for hook reporting.
 func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWriter, inputBatch arrow.RecordBatch,
-	inputMeta arrow.Metadata, schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, protocol string) error {
+	inputMeta arrow.Metadata, schema *arrow.Schema, state ExchangeState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, streamID string, callID string, sink *stickySink, protocol string, refs *stateRefScope, mint cursorMint) error {
 
 	// Record input stats
 	stats.RecordInput(inputBatch.NumRows(), batchBufferSize(inputBatch))
@@ -760,6 +863,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		PreferredResponseBytes: budget.Preferred,
 		stickySink:             sink,
 		InputMetadata:          delivered,
+		stateRefs:              refs,
 	}
 
 	var exchangeErr error
@@ -781,7 +885,7 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		out.releaseBatches()
 		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, exchangeErr, h.server.serverID, "", h.server.traceFor(info.Name)))
 		h.logIPCWriteErr("close", info.Name, writer.Close())
-		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
+		h.writeArrow(w, methodErrorStatus(exchangeErr), buf.Bytes())
 		return exchangeErr
 	}
 
@@ -794,12 +898,12 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 	}
 
 	// Serialize updated state into new token (carry schema for dynamic methods)
-	newToken, err := h.packCursorToken(callID, state, auth, protocol)
+	newToken, cursorWarning, err := h.mintCursorToken(callID, state, auth, protocol, mint)
 	if err != nil {
 		out.releaseBatches()
 		h.logIPCWriteErr("error-batch", info.Name, writeErrorBatch(writer, schema, err, h.server.serverID, "", h.server.traceFor(info.Name)))
 		h.logIPCWriteErr("close", info.Name, writer.Close())
-		h.writeArrow(w, http.StatusInternalServerError, buf.Bytes())
+		h.writeArrow(w, methodErrorStatus(err), buf.Bytes())
 		return err
 	}
 
@@ -811,6 +915,8 @@ func (h *HttpServer) handleExchangeCall(ctx context.Context, w http.ResponseWrit
 		h.writeExchangeCapError(w, schema, info.Name, capErr)
 		return capErr
 	}
+
+	h.writeCursorWarning(writer, schema, info.Name, cursorWarning)
 
 	// Flush output batches, merging state token into the data batch metadata
 	var writeErr error
@@ -1081,7 +1187,7 @@ func hasFrameworkTickMetadata(meta arrow.Metadata) bool {
 // POSTs, so callers pass the corresponding request's metadata (framework
 // transport keys stripped).
 func (h *HttpServer) runProduceTurn(ctx context.Context, writer *ipc.Writer, schema *arrow.Schema,
-	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, sink *stickySink, firstTickMeta arrow.Metadata) (bool, error) {
+	state ProducerState, info *methodInfo, stats *CallStatistics, auth *AuthContext, peerEvidence *PeerEvidenceSet, transportMeta map[string]string, cookies map[string]string, sink *stickySink, firstTickMeta arrow.Metadata, refs *stateRefScope) (bool, error) {
 
 	if err := ctx.Err(); err != nil {
 		return true, nil
@@ -1104,6 +1210,7 @@ func (h *HttpServer) runProduceTurn(ctx context.Context, writer *ipc.Writer, sch
 		ResponseLimitBytes:     budget.Limit,
 		PreferredResponseBytes: budget.Preferred,
 		stickySink:             sink,
+		stateRefs:              refs,
 	}
 	callCtx.InputMetadata = firstTickMeta
 

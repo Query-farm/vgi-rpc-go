@@ -13,6 +13,7 @@ package vgigcs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"time"
@@ -117,4 +118,73 @@ func (r readerAt) ReadAt(p []byte, off int64) (int, error) {
 }
 
 // Ensure GCSStorage implements ExternalStorage at compile time.
+// defaultMaxFetchBytes is the Get cap when the caller passes none (256 MiB,
+// vgirpc's default inbound fetch cap).
+const defaultMaxFetchBytes int64 = 256 * 1024 * 1024
+
+// ErrObjectMissing is returned by Get when GCS reports the object absent. It
+// carries an ObjectMissing() method, which vgirpc.IsObjectMissing recognizes,
+// so StateRef and argument-reference resolution map it to state_ref_missing /
+// arguments_ref_missing.
+var ErrObjectMissing error = objectMissingError{}
+
+type objectMissingError struct{}
+
+func (objectMissingError) Error() string       { return "GCS object is gone" }
+func (objectMissingError) ObjectMissing() bool { return true }
+
+// PutObject stores data under a fresh name and returns the name: the
+// vgirpc.ObjectStore contract of protocol 3.4 (StateRef objects). GCS cannot
+// verify a SHA-256 at storage; the upload is length-exact, never overwrites
+// (DoesNotExist), and callers verify the digest on read. Objects carry no
+// TTL: operators MUST set Object Lifecycle Management of at least one day on
+// the prefix.
+func (s *GCSStorage) PutObject(data []byte) (string, error) {
+	key := s.prefix + uuid.New().String() + ".bin"
+	ctx := context.Background()
+	w := s.client.Bucket(s.bucket).Object(key).If(storage.Conditions{DoesNotExist: true}).NewWriter(ctx)
+	w.ContentType = "application/octet-stream"
+	if _, err := w.Write(data); err != nil {
+		w.Close()
+		return "", fmt.Errorf("GCS object write: %w", err)
+	}
+	if err := w.Close(); err != nil {
+		return "", fmt.Errorf("GCS object close: %w", err)
+	}
+	return key, nil
+}
+
+// Get fetches the object a name refers to (vgirpc.ObjectStore), refusing more
+// than maxBytes (<= 0: 256 MiB). A missing object is [ErrObjectMissing]. The
+// bytes are read raw (no transcoding), so a stored Content-Encoding can never
+// inflate past the cap. The caller verifies size and digest.
+func (s *GCSStorage) Get(objectID string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxFetchBytes
+	}
+	ctx := context.Background()
+	r, err := s.client.Bucket(s.bucket).Object(objectID).ReadCompressed(true).NewReader(ctx)
+	if err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return nil, ErrObjectMissing
+		}
+		return nil, fmt.Errorf("GCS object read: %w", err)
+	}
+	defer r.Close()
+	if size := r.Attrs.Size; size > maxBytes {
+		return nil, fmt.Errorf("GCS object is %d bytes, over max_fetch_bytes (%d)", size, maxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("GCS object read: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("GCS object exceeds max_fetch_bytes (%d)", maxBytes)
+	}
+	return data, nil
+}
+
+// Ensure GCSStorage implements ExternalStorage at compile time. (It also
+// implements vgirpc.ObjectStore; that check waits for the core release that
+// declares the interface, since this module pins a published core.)
 var _ vgirpc.ExternalStorage = (*GCSStorage)(nil)

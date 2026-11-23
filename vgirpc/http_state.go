@@ -11,13 +11,13 @@ import (
 	"encoding/base64"
 	"encoding/gob"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
-	"github.com/klauspost/compress/zstd"
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
@@ -47,9 +47,13 @@ func RegisterStateType(v interface{}) {
 // [MetaCallState], echoed by the client on every subsequent request, and
 // never re-issued.
 type callTokenData struct {
-	CreatedAt         int64
-	CallID            string // 32-char lowercase hex; binds this call to its cursors
-	SchemaIPC         []byte // serialized output schema for dynamic methods; nil for static
+	CreatedAt int64
+	CallID    string // 32-char lowercase hex; binds this call to its cursors
+	// SchemasRef is the encoded StateRef (STATE_REF_V1.md §8) of the
+	// serialized output schema for dynamic methods; nil for static ones. A
+	// very wide table's schema is stored once instead of riding every
+	// request.
+	SchemasRef        []byte
 	StreamID          string // stable across init/continuations of one stream call
 	ResponseLimit     int64
 	PreferredResponse int64
@@ -70,6 +74,10 @@ type resolvedCall struct {
 	StreamID          string
 	ResponseLimit     int64
 	PreferredResponse int64
+	// CallTokenBytes is the sealed (base64-decoded) length of the stream's
+	// call token: it rides every continuation, so the turn budget subtracts
+	// it.
+	CallTokenBytes int64
 }
 
 // defaultCallStateCacheEntries bounds the per-process call cache.
@@ -184,120 +192,24 @@ func (c *callStateCache) put(callID string, auth *AuthContext, call *resolvedCal
 // codec-tagged, compressed payload; v6 = cursor-only, with the schemas and
 // stream id moved into the call token.
 //
+// Call history: v1 = the schema bytes inline; v2 = the schema behind a
+// StateRef (protocol 3.4).
+//
 // Each bump matters for rolling deploys: an older plaintext frames
 // differently, so a newer reader would mis-parse it. Rejecting the old
 // version outright turns that into the same clean 400 as any other stale
 // token.
 const (
 	cursorTokenVersion = 0x06
-	callTokenVersion   = 0x01
+	callTokenVersion   = 0x02
 	stateTokenNonceLen = chacha20poly1305.NonceSizeX // 24 bytes for XChaCha20-Poly1305
 	stateTokenTagLen   = chacha20poly1305.Overhead   // 16 bytes Poly1305 tag
 	stateTokenMinLen   = 1 + stateTokenNonceLen + stateTokenTagLen
 	callIDLen          = 16 // random per-stream id, minted at /init
 )
 
-// Codec tags for the token payload, written as the first plaintext byte
-// inside the seal. See packTokenPayload.
-const (
-	tokenCodecRaw  = 0x00
-	tokenCodecZstd = 0x01
-)
-
-// tokenZstdLevel matches the Python reference's choice. At token payload
-// sizes it measures the same speed as level 1 and slightly smaller, while
-// the levels that compress materially better cost many times the CPU for a
-// few hundred bytes.
-const tokenZstdLevel = 3
-
-// maxTokenPlaintextBytes bounds decompression. The payload is authenticated
-// before it is ever decompressed, so this guards against a framework bug
-// rather than an attacker — but an unbounded decompress on a request path
-// is not worth having.
-const maxTokenPlaintextBytes = 64 << 20
-
-// One encoder and one decoder for the process. klauspost's EncodeAll and
-// DecodeAll are safe for concurrent use, and building either per token would
-// allocate level-sized tables on every stream turn.
-var (
-	tokenZstdOnce    sync.Once
-	tokenZstdEncoder *zstd.Encoder
-	tokenZstdDecoder *zstd.Decoder
-	tokenZstdErr     error
-)
-
-func tokenZstd() (*zstd.Encoder, *zstd.Decoder, error) {
-	tokenZstdOnce.Do(func() {
-		enc, err := zstd.NewWriter(nil,
-			zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(tokenZstdLevel)),
-			// Payloads are buffered whole before sealing, so extra worker
-			// goroutines buy nothing and make the shared encoder costlier.
-			zstd.WithEncoderConcurrency(1),
-		)
-		if err != nil {
-			tokenZstdErr = err
-			return
-		}
-		dec, err := zstd.NewReader(nil,
-			zstd.WithDecoderMaxMemory(maxTokenPlaintextBytes),
-			zstd.WithDecoderConcurrency(1),
-		)
-		if err != nil {
-			tokenZstdErr = err
-			return
-		}
-		tokenZstdEncoder, tokenZstdDecoder = enc, dec
-	})
-	return tokenZstdEncoder, tokenZstdDecoder, tokenZstdErr
-}
-
-// packTokenPayload compresses a token payload and tags which codec was used.
-//
-// Compression happens *inside* the seal, and the order is the whole point:
-// once sealed, a token is ciphertext, so the HTTP body codec can no longer
-// find any redundancy in it — it recovers only the slack base64 adds, never
-// the state's own structure. Compressing first reaches the real redundancy.
-//
-// Compression is skipped when it does not pay, so a small token never grows
-// beyond its plaintext plus the one tag byte; the tag means the reader never
-// has to guess.
-func packTokenPayload(plaintext []byte) ([]byte, error) {
-	enc, _, err := tokenZstd()
-	if err != nil {
-		return nil, fmt.Errorf("state token codec: %w", err)
-	}
-	packed := enc.EncodeAll(plaintext, make([]byte, 0, len(plaintext)/2+1))
-	if len(packed) < len(plaintext) {
-		return append([]byte{tokenCodecZstd}, packed...), nil
-	}
-	return append([]byte{tokenCodecRaw}, plaintext...), nil
-}
-
-// unpackTokenPayload reverses packTokenPayload. An unknown tag or a body
-// that will not decompress means a token this server did not mint, so both
-// surface as the same uniform error every other token failure uses.
-func unpackTokenPayload(data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return nil, &RpcError{Type: "RuntimeError", Message: "Malformed state token"}
-	}
-	body := data[1:]
-	switch data[0] {
-	case tokenCodecRaw:
-		return body, nil
-	case tokenCodecZstd:
-		_, dec, err := tokenZstd()
-		if err != nil {
-			return nil, fmt.Errorf("state token codec: %w", err)
-		}
-		out, derr := dec.DecodeAll(body, nil)
-		if derr != nil {
-			return nil, &RpcError{Type: "RuntimeError", Message: "Malformed state token"}
-		}
-		return out, nil
-	default:
-		return nil, &RpcError{Type: "RuntimeError", Message: "Malformed state token"}
-	}
-}
+// The token payload codec (codec tag, zstd, the 64 MiB bound) lives in
+// token_codec.go, shared with StateRef payloads.
 
 // stateTokenAad builds the AEAD associated data that binds a state token
 // to the authenticated caller and to the protocol that owns its stream.
@@ -476,6 +388,9 @@ func (h *HttpServer) openToken(version byte, token []byte, aad []byte, out inter
 
 // checkTokenAge enforces the TTL after authenticity has been established.
 func (h *HttpServer) checkTokenAge(createdAt int64) error {
+	if h.tokenTTL <= 0 {
+		return nil // expiry disabled
+	}
 	age := time.Since(time.Unix(createdAt, 0))
 	if age > h.tokenTTL {
 		return &RpcError{Type: "RuntimeError",
@@ -496,9 +411,32 @@ func normalizeTokenKey(key []byte) []byte {
 	return sum[:]
 }
 
-// packCallToken seals the half of a stream's state that is fixed for the
-// life of the call. Minted once, by /init; never re-issued.
+// sealedLen is the sealed (base64-decoded) length of a token, without
+// decoding it.
+func sealedLen(token []byte) int64 {
+	return int64(len(bytes.TrimRight(token, "="))) * 3 / 4
+}
+
+// rawCallID decodes the hex call id into the 16 bytes StateRef AADs bind.
+func rawCallID(callID string) []byte {
+	raw, err := hex.DecodeString(callID)
+	if err != nil {
+		return []byte(callID)
+	}
+	return raw
+}
+
+// packCallToken is mintCallToken without a method name (tests).
 func (h *HttpServer) packCallToken(callID string, outputSchema *arrow.Schema, auth *AuthContext, streamID string, budget httpResponseBudget, protocol string) ([]byte, error) {
+	return h.mintCallToken(callID, outputSchema, auth, streamID, budget, protocol, "")
+}
+
+// mintCallToken seals the half of a stream's state that is fixed for the
+// life of the call. Minted once, by /init; never re-issued. The output schema
+// goes behind a StateRef sized with call_token_bytes = 0: inline in the
+// common case, stored once when a very wide table would otherwise blow the
+// turn budget.
+func (h *HttpServer) mintCallToken(callID string, outputSchema *arrow.Schema, auth *AuthContext, streamID string, budget httpResponseBudget, protocol, method string) ([]byte, error) {
 	data := callTokenData{
 		CreatedAt:         time.Now().Unix(),
 		CallID:            callID,
@@ -506,8 +444,15 @@ func (h *HttpServer) packCallToken(callID string, outputSchema *arrow.Schema, au
 		ResponseLimit:     budget.Limit,
 		PreferredResponse: budget.Preferred,
 	}
+	var schemaIPC []byte
 	if outputSchema != nil {
-		data.SchemaIPC = serializeSchema(outputSchema)
+		schemaIPC = serializeSchema(outputSchema)
+		ref, err := encodeStateRefValue(schemaIPC,
+			newStateRefEncoder(h.stateRefRuntime(), auth, protocol, method, rawCallID(callID), 0))
+		if err != nil {
+			return nil, err
+		}
+		data.SchemasRef = ref
 	}
 	token, err := h.sealToken(callTokenVersion, &data, callTokenAad(auth, protocol))
 	if err != nil {
@@ -516,21 +461,66 @@ func (h *HttpServer) packCallToken(callID string, outputSchema *arrow.Schema, au
 	// Warm the cache with the values we already hold, so this stream's first
 	// continuation does not have to open the token it was just handed.
 	h.callStates.put(callID, auth, &resolvedCall{
-		SchemaIPC: data.SchemaIPC, StreamID: streamID,
+		SchemaIPC: schemaIPC, StreamID: streamID,
 		ResponseLimit: data.ResponseLimit, PreferredResponse: data.PreferredResponse,
+		CallTokenBytes: sealedLen(token),
 	})
 	return token, nil
 }
 
-// packCursorToken seals the advancing half. Re-minted every turn; this is
-// the only token a response returns.
+// cursorMint is what a cursor mint needs beyond the state itself.
+type cursorMint struct {
+	// method names the stream method, for the cursor rule's message.
+	method string
+	// callTokenBytes is the sealed length of the stream's call token.
+	callTokenBytes int64
+	// stream is the init turn's StateRef encoder slot; nil on continuations,
+	// whose refs were read back from a token and only re-emit their bytes.
+	stream *stateRefStream
+}
+
+// packCursorToken is mintCursorToken without the StateRef/cursor-rule context
+// (tests, and callers with no stream).
 func (h *HttpServer) packCursorToken(callID string, state interface{}, auth *AuthContext, protocol string) ([]byte, error) {
+	token, _, err := h.mintCursorToken(callID, state, auth, protocol, cursorMint{})
+	return token, err
+}
+
+// mintCursorToken seals the advancing half. Re-minted every turn; this is the
+// only token a response returns.
+//
+// On the init turn the state is serialized with the stream's StateRef encoder
+// armed, so a ref created on that turn has its form decided (and is stored,
+// when it is stored) here, once; refs read back from a token re-emit their
+// bytes. The sealed cursor is then checked against the turn budget
+// (STATE_REF_V1.md §9): warning is the cursor_large text under the warn rule;
+// err is cursor_too_large under the error rule.
+func (h *HttpServer) mintCursorToken(callID string, state interface{}, auth *AuthContext, protocol string, mint cursorMint) (token []byte, warning string, err error) {
+	rt := h.stateRefRuntime()
+	if mint.stream != nil {
+		mint.stream.arm(newStateRefEncoder(rt, auth, protocol, mint.method, rawCallID(callID), mint.callTokenBytes))
+		defer mint.stream.arm(nil)
+	}
 	data := cursorTokenData{
 		CreatedAt: time.Now().Unix(),
 		CallID:    callID,
 		State:     state,
 	}
-	return h.sealToken(cursorTokenVersion, &data, stateTokenAad(auth, protocol))
+	token, err = h.sealToken(cursorTokenVersion, &data, stateTokenAad(auth, protocol))
+	if err != nil {
+		// A StateRef failure (store refused, object too large) keeps its
+		// error kind rather than surfacing as an opaque encode error.
+		var rpcErr *RpcError
+		if errors.As(err, &rpcErr) && rpcErr.Kind != "" {
+			return nil, "", rpcErr
+		}
+		return nil, "", err
+	}
+	warning, err = rt.checkCursor(sealedLen(token), mint.callTokenBytes, protocol, mint.method)
+	if err != nil {
+		return nil, "", err
+	}
+	return token, warning, nil
 }
 
 // openCursorToken authenticates a cursor and returns its contents.
@@ -559,7 +549,8 @@ func (h *HttpServer) openCursorToken(token []byte, auth *AuthContext, protocol s
 // On a miss (cold process, evicted entry, or a request load-balanced to a
 // node that never saw this stream's /init) the client-supplied call token is
 // opened and verified, and its embedded CallID must match the one the cursor
-// named.
+// named. Its schema StateRef is then resolved: inline in the common case, one
+// GET per process per stream when it was stored.
 func (h *HttpServer) resolveCall(cursor *cursorTokenData, callToken []byte, auth *AuthContext, protocol string) (*resolvedCall, error) {
 	if got := h.callStates.get(cursor.CallID, auth); got != nil {
 		return got, nil
@@ -581,10 +572,20 @@ func (h *HttpServer) resolveCall(cursor *cursorTokenData, callToken []byte, auth
 		// holds, so it carries no information worth distinguishing.
 		return nil, &RpcError{Type: "RuntimeError", Message: "Malformed state token"}
 	}
+	var schemaIPC []byte
+	if len(data.SchemasRef) > 0 {
+		value, err := resolveEncodedStateRef(data.SchemasRef, h.stateRefRuntime(),
+			stateTokenAad(auth, protocol), rawCallID(data.CallID))
+		if err != nil {
+			return nil, err
+		}
+		schemaIPC = value
+	}
 
 	got := &resolvedCall{
-		SchemaIPC: data.SchemaIPC, StreamID: data.StreamID,
+		SchemaIPC: schemaIPC, StreamID: data.StreamID,
 		ResponseLimit: data.ResponseLimit, PreferredResponse: data.PreferredResponse,
+		CallTokenBytes: sealedLen(callToken),
 	}
 	h.callStates.put(cursor.CallID, auth, got)
 	return got, nil

@@ -179,6 +179,9 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		// A ref can only answer a unary call that returns a value.
 		externalRefAllowed: info.ResultType != nil,
 	}
+	// Unary: no stream, so StateRef() is refused; the runtime is here for
+	// ResolveArgumentRef().
+	callCtx.stateRefs = &stateRefScope{rt: h.stateRefRuntime(), auth: auth, protocol: protocol, method: method}
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
 	}

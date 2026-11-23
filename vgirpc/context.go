@@ -87,6 +87,70 @@ type CallContext struct {
 	// externalRefAllowed is set by the unary dispatchers for methods that
 	// return a value -- the only calls a ref can answer.
 	externalRefAllowed bool
+	// stateRefs is the framework's StateRef view of this request: whether
+	// StateRef() is allowed (only on a stream method's own context) and, on
+	// HTTP, the server's key, storage and object cache. nil gives a scope
+	// that resolves in-memory and inline refs and refuses StateRef().
+	stateRefs *stateRefScope
+}
+
+func (ctx *CallContext) stateRefScope() *stateRefScope {
+	if ctx.stateRefs == nil {
+		ctx.stateRefs = &stateRefScope{auth: ctx.Auth, method: ctx.Method}
+	}
+	return ctx.stateRefs
+}
+
+// StateRef wraps a value that does not change for the life of a stream
+// (STATE_REF_V1.md). Store the returned [StateRef] in a field of the stream
+// state and read it back with [CallContext.Resolve] on any turn. On HTTP a
+// large value is stored once and only a ~130-byte sealed tag rides each
+// continuation; a small one is carried inline, compressed. On the byte-stream
+// transports the value is held in memory. Worker code is the same everywhere.
+//
+// value is a []byte or string, an [encoding.BinaryMarshaler], or a
+// vgirpc-tagged struct (serialized with [MarshalRecord]). Treat it as
+// immutable afterwards.
+//
+// Only valid on the context passed to the stream method itself -- the
+// handling of the stream's init request. Anywhere else (Produce, Exchange,
+// OnCancel, unary calls) it fails with kind state_ref_misuse, code
+// FAILED_PRECONDITION. Within one init, byte-equal values share one ref and
+// one stored object. A ref belongs to its stream and must not be copied into
+// another.
+func (ctx *CallContext) StateRef(value any) (StateRef, error) {
+	return ctx.stateRefScope().stateRef(value)
+}
+
+// Resolve returns the value bytes a [StateRef] names. Valid on every turn and
+// every transport. A stored ref is fetched through the process's object cache
+// (one Get per process per object, single-flight), verified and opened.
+// Failures: invalid_state_ref (unknown form, a tag that does not open for this
+// stream and principal, an expired tag, a digest mismatch; HTTP 400),
+// state_ref_missing, state_ref_too_large, storage_unavailable. The returned
+// slice may be shared: treat it as read-only.
+func (ctx *CallContext) Resolve(ref StateRef) ([]byte, error) {
+	return ctx.stateRefScope().resolve(ref)
+}
+
+// ResolveInto resolves ref and decodes the value into out: a *[]byte or
+// *string, an [encoding.BinaryUnmarshaler], or a pointer to a vgirpc-tagged
+// struct ([UnmarshalRecord]). While the ref still holds the record it was
+// created from, that record is copied into out without a round trip.
+func (ctx *CallContext) ResolveInto(ref StateRef, out any) error {
+	return ctx.stateRefScope().resolveInto(ref, out)
+}
+
+// ResolveArgumentRef resolves a sealed argument reference minted by this
+// server's __upload_url__ grant (the grant's ref column) for the bytes the
+// caller claims alongside it: it opens ref under this request's principal,
+// checks its sealed size and SHA-256 equal size and sha256Hex, then fetches
+// the object through the object cache and verifies it. Only an HTTP server
+// can resolve one (it holds the key and the storage). See
+// [ResolveArgumentRef] for the error kinds. The returned slice is shared with
+// the cache: treat it as read-only.
+func (ctx *CallContext) ResolveArgumentRef(ref []byte, size int64, sha256Hex string) ([]byte, error) {
+	return ctx.stateRefScope().resolveArgumentRef(ref, size, sha256Hex)
 }
 
 // ClientLog records a log message that will be sent to the client.

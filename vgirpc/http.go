@@ -23,8 +23,8 @@ import (
 const (
 	arrowContentType   = "application/vnd.apache.arrow.stream"
 	rpcErrorHeader     = "X-VGI-RPC-Error"
-	defaultTokenTTL    = 5 * time.Minute
-	defaultMaxBodySize = 64 << 20 // 64 MB
+	defaultTokenTTL    = DefaultTokenTTL // 6 h, the maximum stream duration (STATE_REF_V1.md §12)
+	defaultMaxBodySize = 64 << 20        // 64 MB
 
 	// requestIDHeader carries the per-request correlation id, echoed from the
 	// caller when supplied and minted otherwise. The access-log spec's
@@ -144,7 +144,14 @@ type HttpServer struct {
 	uploadURLProvider      UploadURLProvider
 	maxRequestBytes        int64 // 0 = no limit / not advertised
 	hostingMaxRequestBytes int64 // 0 = no hosting limit
-	maxUploadBytes         int64 // 0 = not advertised
+	maxUploadBytes         int64 // 0 = advertise the inbound fetch cap (see effectiveMaxUploadBytes)
+
+	// StateRef / turn budget (protocol 3.4, STATE_REF_V1.md). See
+	// SetStateRefInlineBytes, SetCursorRule and SetObjectCache.
+	stateRefInlineBytes int64
+	cursorRule          CursorRule
+	objectCache         *ObjectCache // nil = DefaultObjectCache()
+	uploadWarned        sync.Once
 
 	// Response caps (advertised + enforced). 0 = unbounded.
 	maxResponseBytes             int64
@@ -187,6 +194,8 @@ func NewHttpServer(server *Server) *HttpServer {
 		server:                server,
 		tokenKey:              key,
 		tokenTTL:              defaultTokenTTL,
+		stateRefInlineBytes:   DefaultStateRefInlineBytes,
+		cursorRule:            CursorRuleWarn,
 		maxBodySize:           defaultMaxBodySize,
 		peerResolutionTimeout: 5 * time.Second,
 		peerProviderSlots:     make(chan struct{}, 64),
@@ -217,6 +226,8 @@ func NewHttpServerWithKey(server *Server, tokenKey []byte) (*HttpServer, error) 
 		server:                server,
 		tokenKey:              tokenKey,
 		tokenTTL:              defaultTokenTTL,
+		stateRefInlineBytes:   DefaultStateRefInlineBytes,
+		cursorRule:            CursorRuleWarn,
 		maxBodySize:           defaultMaxBodySize,
 		peerResolutionTimeout: 5 * time.Second,
 		peerProviderSlots:     make(chan struct{}, 64),
@@ -350,9 +361,8 @@ func (h *HttpServer) addCapabilityHeaders(w http.ResponseWriter, isOptions bool)
 	}
 	if h.uploadURLProvider != nil {
 		w.Header().Set(uploadURLHeader, UploadURLProtocolVersion)
-		if h.maxUploadBytes > 0 {
-			w.Header().Set(maxUploadBytesHeader, strconv.FormatInt(h.maxUploadBytes, 10))
-		}
+		// Always advertised with upload URLs, and never above the fetch cap.
+		w.Header().Set(maxUploadBytesHeader, strconv.FormatInt(h.effectiveMaxUploadBytes(), 10))
 	}
 	// Emitted only when the operator declared require mode — an absent
 	// header means "not enforcing", which is what a proxy needs to see.
@@ -418,10 +428,7 @@ func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, r *http.Request, isOp
 			expose = append(expose, maxRequestBytesHeader)
 		}
 		if h.uploadURLProvider != nil {
-			expose = append(expose, uploadURLHeader)
-			if h.maxUploadBytes > 0 {
-				expose = append(expose, maxUploadBytesHeader)
-			}
+			expose = append(expose, uploadURLHeader, maxUploadBytesHeader)
 		}
 		if h.proxyProofRequired {
 			expose = append(expose, ProofRequiredHeader)
@@ -599,12 +606,138 @@ func (h *HttpServer) SetCallStateCacheEntries(n int) {
 	h.callStates = newCallStateCache(n, h.tokenTTL)
 }
 
-// SetTokenTTL sets the maximum age for state tokens.
+// SetTokenTTL sets the maximum age of cursor tokens, call tokens and stored
+// StateRef tags, each checked from its own creation time. The default is 6
+// hours ([DefaultTokenTTL], the maximum stream duration); 0 disables expiry.
+// Older tokens are refused with HTTP 400.
 func (h *HttpServer) SetTokenTTL(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
 	h.tokenTTL = d
 	// Rebuild the call cache so a cached call can never outlive the token
 	// that names it.
-	h.callStates = newCallStateCache(defaultCallStateCacheEntries, d)
+	cacheTTL := d
+	if cacheTTL <= 0 {
+		cacheTTL = DefaultTokenTTL
+	}
+	h.callStates = newCallStateCache(defaultCallStateCacheEntries, cacheTTL)
+}
+
+// SetStateRefInlineBytes sets the largest compressed StateRef payload kept
+// inline in a token before it is stored (STATE_REF_V1.md §9). The effective
+// limit is also capped at a quarter of the turn budget. Default 16384
+// ([DefaultStateRefInlineBytes]); [ConfigureHTTPServerFromEnv] reads
+// VGI_RPC_STATE_REF_INLINE_BYTES. n must be positive.
+func (h *HttpServer) SetStateRefInlineBytes(n int64) error {
+	if n <= 0 {
+		return fmt.Errorf("state_ref_inline_bytes must be a positive integer, got %d", n)
+	}
+	h.stateRefInlineBytes = n
+	return nil
+}
+
+// SetCursorRule chooses what happens when a sealed cursor exceeds the turn
+// budget, floor((max_request_bytes - 4096) / 1.34) - call_token_bytes:
+// [CursorRuleWarn] (the default) logs cursor_large and sends the client a
+// WARN log; [CursorRuleError] refuses the turn with cursor_too_large (only
+// when a request cap is set). A framework that keeps its unchanging state in
+// StateRef should pass CursorRuleError. Below a 16 KiB request cap the rule is
+// disabled, with a warning.
+func (h *HttpServer) SetCursorRule(rule CursorRule) error {
+	if rule != CursorRuleWarn && rule != CursorRuleError {
+		return fmt.Errorf("cursor rule must be %q or %q, got %q", CursorRuleWarn, CursorRuleError, rule)
+	}
+	h.cursorRule = rule
+	return nil
+}
+
+// SetObjectCache replaces the object cache StateRef and argument-reference
+// resolution go through (default: the process-wide [DefaultObjectCache]).
+func (h *HttpServer) SetObjectCache(c *ObjectCache) {
+	h.objectCache = c
+}
+
+// ObjectCache returns the object cache this server resolves through.
+func (h *HttpServer) ObjectCache() *ObjectCache {
+	if h.objectCache != nil {
+		return h.objectCache
+	}
+	return DefaultObjectCache()
+}
+
+// objectStore is the server's external storage when it implements the
+// protocol 3.4 [ObjectStore] contract, else nil.
+func (h *HttpServer) objectStore() ObjectStore {
+	if cfg := h.server.externalConfig; cfg != nil && cfg.Storage != nil {
+		if store, ok := cfg.Storage.(ObjectStore); ok {
+			return store
+		}
+	}
+	return nil
+}
+
+// fetchCap is the server's inbound fetch cap: its external config's
+// MaxFetchBytes, else the 256 MiB default.
+func (h *HttpServer) fetchCap() int64 {
+	if cfg := h.server.externalConfig; cfg != nil {
+		return cfg.maxFetchBytes()
+	}
+	return defaultMaxFetchBytes
+}
+
+// stateRefRuntime snapshots this server's StateRef machinery for one request.
+func (h *HttpServer) stateRefRuntime() *stateRefRuntime {
+	inline := h.stateRefInlineBytes
+	if inline <= 0 {
+		inline = DefaultStateRefInlineBytes
+	}
+	rule := h.cursorRule
+	if rule == "" {
+		rule = CursorRuleWarn
+	}
+	return &stateRefRuntime{
+		tokenKey:        h.tokenKey,
+		tokenTTL:        h.tokenTTL,
+		storage:         h.objectStore(),
+		maxFetchBytes:   h.fetchCap(),
+		maxRequestBytes: h.effectiveRequestLimit(),
+		inlineCap:       inline,
+		cursorRule:      rule,
+		cache:           h.ObjectCache(),
+		now:             time.Now,
+	}
+}
+
+// warnBelowCursorFloor logs, once per value, that a request cap below 16 KiB
+// disables the cursor rule (STATE_REF_V1.md §9: warn, never refuse).
+func (h *HttpServer) warnBelowCursorFloor() {
+	if limit := h.effectiveRequestLimit(); limit > 0 && limit < CursorRuleFloorBytes {
+		slog.Warn(fmt.Sprintf("max_request_bytes (%d) is below %d: the cursor rule is disabled and stream "+
+			"continuations may not fit", limit, CursorRuleFloorBytes))
+	}
+}
+
+// effectiveMaxUploadBytes is the VGI-Max-Upload-Bytes this server advertises
+// with upload URLs, and the size __upload_url__/init refuses past. An upload
+// comes back as a pointer the server fetches under its inbound fetch cap, so
+// advertising more would let a client upload a request the server then
+// refuses after the whole upload: the advertised size is SetMaxUploadBytes
+// when set, never above the fetch cap, and the fetch cap itself when unset.
+func (h *HttpServer) effectiveMaxUploadBytes() int64 {
+	fetch := h.fetchCap()
+	if h.maxUploadBytes <= 0 {
+		return fetch
+	}
+	if h.maxUploadBytes > fetch {
+		h.uploadWarned.Do(func() {
+			slog.Warn(fmt.Sprintf("max_upload_bytes (%d) exceeds the server's inbound fetch cap (%d): advertising "+
+				"the fetch cap instead. Raise ExternalLocationConfig.MaxFetchBytes (VGI_RPC_MAX_FETCH_BYTES) or lower "+
+				"max_upload_bytes.", h.maxUploadBytes, fetch))
+		})
+		return fetch
+	}
+	return h.maxUploadBytes
 }
 
 // SetUploadURLProvider configures a provider that issues pre-signed
@@ -625,6 +758,7 @@ func (h *HttpServer) SetUploadURLProvider(p UploadURLProvider) {
 // enforcement.
 func (h *HttpServer) SetMaxRequestBytes(n int64) {
 	h.maxRequestBytes = n
+	h.warnBelowCursorFloor()
 }
 
 // SetHostingMaxRequestBytes sets an optional limit imposed by the hosting
@@ -632,11 +766,15 @@ func (h *HttpServer) SetMaxRequestBytes(n int64) {
 // value of this limit and SetMaxRequestBytes.
 func (h *HttpServer) SetHostingMaxRequestBytes(n int64) {
 	h.hostingMaxRequestBytes = n
+	h.warnBelowCursorFloor()
 }
 
-// SetMaxUploadBytes sets the maximum upload size advertised via
-// VGI-Max-Upload-Bytes when an upload-URL provider is configured.
-// Set to 0 to omit the advertisement.
+// SetMaxUploadBytes sets the largest upload __upload_url__/init vends a URL
+// for, advertised as VGI-Max-Upload-Bytes whenever an upload-URL provider is
+// configured. It never advertises more than the server's inbound fetch cap
+// (the external config's MaxFetchBytes, or 256 MiB without one): a larger
+// value is clamped to the fetch cap with a warning. 0 (the default)
+// advertises the fetch cap itself.
 func (h *HttpServer) SetMaxUploadBytes(n int64) {
 	h.maxUploadBytes = n
 }

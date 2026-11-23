@@ -57,6 +57,16 @@ type UploadURL struct {
 	// size with a plain Content-Length, which the signature also covers.
 	// May be empty, never nil on the wire (an empty map<utf8, utf8>).
 	Headers map[string]string
+	// ObjectID is the storage id of the object this entry's PUT creates
+	// (protocol 3.4, STATE_REF_V1.md §10.2). Every provider must set it; the
+	// server refuses a grant without one. On the client it is read from the
+	// response's object_id column ("" from a server without it).
+	ObjectID string
+	// Ref is the sealed argument reference the server minted for the object
+	// (vgi_rpc.argref.v1, bound to the requesting principal). Providers leave
+	// it empty -- the server fills it -- and clients read it from the
+	// response's ref column (nil from a server without it).
+	Ref []byte
 }
 
 // UploadURLProvider generates pre-signed upload/download URL pairs for
@@ -67,7 +77,8 @@ type UploadURLProvider interface {
 	// bytes whose SHA-256 is sha256Hex (64 lowercase hex characters). A
 	// backend that can sign the length and checksum (S3, R2, the blob vendor)
 	// does, so storage itself refuses a mismatched body; the headers it signs
-	// come back in [UploadURL.Headers].
+	// come back in [UploadURL.Headers]. It must also return the storage id
+	// of the object the PUT creates in [UploadURL.ObjectID] (protocol 3.4).
 	GenerateUploadURL(size int64, sha256Hex string) (UploadURL, error)
 }
 

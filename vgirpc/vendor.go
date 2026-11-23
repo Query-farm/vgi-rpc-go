@@ -73,9 +73,17 @@ const (
 	// EnvExternalCompression is "none" (default) or "zstd", optionally with a
 	// level ("zstd:3").
 	EnvExternalCompression = "VGI_RPC_EXTERNAL_COMPRESSION"
-	// EnvMaxUploadBytes is the client-upload size advertised for vendor
-	// upload URLs.
+	// EnvMaxUploadBytes is the largest client upload the server vends a URL
+	// for, advertised as VGI-Max-Upload-Bytes. Unset means "the inbound
+	// fetch cap" (EnvMaxFetchBytes), so a server that vends upload URLs
+	// always advertises a limit and a client is refused at
+	// __upload_url__/init rather than after uploading.
 	EnvMaxUploadBytes = "VGI_RPC_MAX_UPLOAD_BYTES"
+	// EnvMaxFetchBytes is the largest request the server will fetch from an
+	// inbound pointer (ExternalLocationConfig.MaxFetchBytes). Defaults to 256
+	// MiB, raised to EnvMaxUploadBytes when that is set higher; both set with
+	// the upload size above the fetch cap is a startup error.
+	EnvMaxFetchBytes = "VGI_RPC_MAX_FETCH_BYTES"
 	// EnvMaxRequestBytes is the inline request cap a server advertises and
 	// enforces; larger requests go up through upload URLs.
 	EnvMaxRequestBytes = "VGI_RPC_MAX_REQUEST_BYTES"
@@ -431,6 +439,11 @@ const (
 // The vendor ignores the field; test fakes count and fault client uploads by
 // it. Matches vgi-rpc-python's CLIENT_UPLOAD_ORIGIN.
 const ClientUploadOrigin = "client_upload"
+
+// StateRefOrigin is the advisory origin on a /v1/blobs/put grant for a stored
+// StateRef object ([VendorStorage.PutObject]). The vendor ignores it; the
+// fake vendor counts those grants (puts_state_ref) and their reads.
+const StateRefOrigin = "state_ref"
 
 // noRedirects stops a client following a redirect: one could carry the bearer
 // token or a signed URL to a host nobody vetted.
@@ -1168,7 +1181,80 @@ func (v *VendorStorage) GenerateUploadURL(size int64, sha256Hex string) (UploadU
 	if !grant.DownloadExpiresAt.IsZero() && grant.DownloadExpiresAt.Before(expires) {
 		expires = grant.DownloadExpiresAt
 	}
-	return UploadURL{UploadURL: grant.UploadURL, DownloadURL: downloadURL, ExpiresAt: expires, Headers: headers}, nil
+	return UploadURL{UploadURL: grant.UploadURL, DownloadURL: downloadURL, ExpiresAt: expires, Headers: headers,
+		ObjectID: grant.ObjectID}, nil
+}
+
+// PutObject stores data as one rpc object and returns its object_id
+// (implements [ObjectStore]). A sized, checksummed grant (/v1/blobs/put,
+// purpose rpc, advisory origin [StateRefOrigin]) and a PUT with exactly its
+// required headers, so storage verifies the body. Objects carry no TTL; the
+// bucket lifecycle removes them.
+func (v *VendorStorage) PutObject(data []byte) (string, error) {
+	ctx, cancel := v.requestContext()
+	defer cancel()
+	grant, err := v.api.put(ctx, vendorPutRequest{
+		Size: int64(len(data)), SHA256B64: b64SHA256(data), Purpose: BlobPurposeRPC, Origin: StateRefOrigin,
+	})
+	if err != nil {
+		return "", err
+	}
+	if v.pin {
+		if err := v.check(grant.UploadURL); err != nil {
+			return "", err
+		}
+	}
+	if err := v.api.putObject(ctx, grant, data, ""); err != nil {
+		return "", err
+	}
+	return grant.ObjectID, nil
+}
+
+// Get fetches an object by id (implements [ObjectStore]): the download is
+// minted server-side (/v1/blobs/get), pinned to the vendor's download hosts
+// and capped at maxBytes (<= 0: 256 MiB). The vendor's not_found /
+// not_uploaded and a storage 404 are [ErrObjectMissing]. The caller verifies
+// size and digest.
+func (v *VendorStorage) Get(objectID string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxFetchBytes
+	}
+	ctx, cancel := v.requestContext()
+	defer cancel()
+	loc, err := v.api.get(ctx, objectID)
+	if err != nil {
+		var ve *VendorError
+		if errors.As(err, &ve) && (ve.Code == "not_found" || ve.Code == "not_uploaded" || ve.Status == http.StatusNotFound) {
+			return nil, fmt.Errorf("blob vendor object is gone (%s): %w", vendorMissingDetail(ve), ErrObjectMissing)
+		}
+		return nil, err
+	}
+	if loc.Size > maxBytes {
+		return nil, &VendorError{Message: fmt.Sprintf("blob vendor object is %d bytes, over max_fetch_bytes (%d)", loc.Size, maxBytes)}
+	}
+	if loc.ContentEncoding != "" && loc.ContentEncoding != "identity" {
+		return nil, &VendorError{Message: fmt.Sprintf("blob vendor object has unsupported content_encoding %q", loc.ContentEncoding)}
+	}
+	validate := func(string) error { return nil }
+	if v.pin {
+		validate = v.validator.validate
+	}
+	data, err := v.api.download(ctx, loc.DownloadURL, validate, maxBytes)
+	if err != nil {
+		var ve *VendorError
+		if errors.As(err, &ve) && ve.Status == http.StatusNotFound {
+			return nil, fmt.Errorf("blob vendor object is gone (storage 404): %w", ErrObjectMissing)
+		}
+		return nil, err
+	}
+	return data, nil
+}
+
+func vendorMissingDetail(ve *VendorError) string {
+	if ve.Code != "" {
+		return ve.Code
+	}
+	return strconv.Itoa(ve.Status)
 }
 
 // ---------------------------------------------------------------------------
@@ -1390,9 +1476,14 @@ func ExternalConfigFromEnv(getenv func(string) string) (*ExternalLocationConfig,
 	if err != nil {
 		return nil, err
 	}
+	maxFetch, err := MaxFetchBytesFromEnv(getenv)
+	if err != nil {
+		return nil, err
+	}
 	config := DefaultExternalLocationConfig(storage)
 	config.ExternalizeThresholdBytes = threshold
 	config.Compression = compression
+	config.MaxFetchBytes = maxFetch
 	config.URLValidator = storage.URLValidator()
 	// Fetching an inbound pointer is a storage-host request too: a bare
 	// client, never one carrying credentials.
@@ -1428,6 +1519,33 @@ func MaxUploadBytesFromEnv(getenv func(string) string) (int64, error) {
 	return positiveIntEnv(envLookup(getenv), EnvMaxUploadBytes)
 }
 
+// MaxFetchBytesFromEnv reads VGI_RPC_MAX_FETCH_BYTES, the inbound fetch cap.
+// Unset, it is 256 MiB raised to VGI_RPC_MAX_UPLOAD_BYTES when that is larger:
+// setting the upload size is how an operator says "accept requests this
+// large". Both set with the upload size above the fetch cap is an error, since
+// it is an explicit contradiction (a client would upload requests the server
+// then refuses to fetch). getenv defaults to os.Getenv.
+func MaxFetchBytesFromEnv(getenv func(string) string) (int64, error) {
+	getenv = envLookup(getenv)
+	fetch, err := positiveIntEnv(getenv, EnvMaxFetchBytes)
+	if err != nil {
+		return 0, err
+	}
+	upload, err := positiveIntEnv(getenv, EnvMaxUploadBytes)
+	if err != nil {
+		return 0, err
+	}
+	if fetch == 0 {
+		return max(defaultMaxFetchBytes, upload), nil
+	}
+	if upload > fetch {
+		return 0, fmt.Errorf("%s (%d) exceeds %s (%d): clients would upload requests the server then refuses "+
+			"to fetch. Raise %s or lower %s", EnvMaxUploadBytes, upload, EnvMaxFetchBytes, fetch,
+			EnvMaxFetchBytes, EnvMaxUploadBytes)
+	}
+	return fetch, nil
+}
+
 // MaxRequestBytesFromEnv reads VGI_RPC_MAX_REQUEST_BYTES (the inline request
 // cap a server advertises and enforces); 0 when unset. getenv defaults to
 // os.Getenv.
@@ -1436,19 +1554,29 @@ func MaxRequestBytesFromEnv(getenv func(string) string) (int64, error) {
 }
 
 // ConfigureHTTPServerFromEnv applies the blob-vendor HTTP settings to h:
-// VGI_RPC_MAX_REQUEST_BYTES is advertised and enforced whenever it is set;
-// with VGI_BLOB_VENDOR_URL, large results are externalized through the vendor
+// VGI_RPC_MAX_REQUEST_BYTES is advertised and enforced whenever it is set, and
+// VGI_RPC_STATE_REF_INLINE_BYTES sets the StateRef inline limit; with
+// VGI_BLOB_VENDOR_URL, large results are externalized through the vendor
 // ([ExternalConfigFromEnv]), client upload URLs are vended from it, and
-// VGI_RPC_MAX_UPLOAD_BYTES is advertised. Returns the external config (nil
-// without a vendor). getenv defaults to os.Getenv.
+// VGI-Max-Upload-Bytes is advertised: VGI_RPC_MAX_UPLOAD_BYTES, else the
+// inbound fetch cap (VGI_RPC_MAX_FETCH_BYTES; see [MaxFetchBytesFromEnv]).
+// Returns the external config (nil without a vendor). Any malformed or
+// contradictory value is an error. getenv defaults to os.Getenv.
 func ConfigureHTTPServerFromEnv(h *HttpServer, getenv func(string) string) (*ExternalLocationConfig, error) {
 	getenv = envLookup(getenv)
 	maxRequest, err := MaxRequestBytesFromEnv(getenv)
 	if err != nil {
 		return nil, err
 	}
+	inline, err := StateRefInlineBytesFromEnv(getenv)
+	if err != nil {
+		return nil, err
+	}
 	config, err := ExternalConfigFromEnv(getenv)
 	if err != nil {
+		return nil, err
+	}
+	if err := h.SetStateRefInlineBytes(inline); err != nil {
 		return nil, err
 	}
 	if maxRequest > 0 {
@@ -1461,12 +1589,23 @@ func ConfigureHTTPServerFromEnv(h *HttpServer, getenv func(string) string) (*Ext
 	if err != nil {
 		return nil, err
 	}
+	if maxUpload > config.maxFetchBytes() {
+		// Unreachable through ExternalConfigFromEnv (MaxFetchBytesFromEnv
+		// refuses it); kept so the invariant cannot rot.
+		return nil, fmt.Errorf("%s (%d) exceeds the inbound fetch cap (%d)", EnvMaxUploadBytes, maxUpload, config.maxFetchBytes())
+	}
 	h.server.SetExternalLocation(config)
 	if provider, ok := config.Storage.(UploadURLProvider); ok {
 		h.SetUploadURLProvider(provider)
 	}
-	if maxUpload > 0 {
-		h.SetMaxUploadBytes(maxUpload)
-	}
+	// 0 (unset) advertises the fetch cap itself.
+	h.SetMaxUploadBytes(maxUpload)
 	return config, nil
 }
+
+// Compile-time checks: VendorStorage is every storage role protocol 3.4 asks of a backend.
+var (
+	_ ExternalStorage   = (*VendorStorage)(nil)
+	_ UploadURLProvider = (*VendorStorage)(nil)
+	_ ObjectStore       = (*VendorStorage)(nil)
+)

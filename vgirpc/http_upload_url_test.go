@@ -42,7 +42,8 @@ func TestPublicUploadURLContractIsExported(t *testing.T) {
 		t.Fatalf("expected struct<size: int64 not null, sha256: utf8 not null>, got %s", list.Elem())
 	}
 
-	wantNames := []string{"upload_url", "download_url", "expires_at", "upload_headers"}
+	// object_id and ref: the protocol 3.4 grant columns (STATE_REF_V1.md §10.2).
+	wantNames := []string{"upload_url", "download_url", "expires_at", "upload_headers", "object_id", "ref"}
 	if got := UploadURLResponseSchema.NumFields(); got != len(wantNames) {
 		t.Fatalf("expected %d response fields, got %d", len(wantNames), got)
 	}
@@ -56,6 +57,12 @@ func TestPublicUploadURLContractIsExported(t *testing.T) {
 	}
 	if f := UploadURLResponseSchema.Field(3); f.Type.ID() != arrow.MAP {
 		t.Fatalf("expected map upload_headers, got %s", f.Type)
+	}
+	if f := UploadURLResponseSchema.Field(4); f.Type.ID() != arrow.STRING || f.Nullable {
+		t.Fatalf("expected utf8 not null object_id, got %s", f)
+	}
+	if f := UploadURLResponseSchema.Field(5); f.Type.ID() != arrow.BINARY || f.Nullable {
+		t.Fatalf("expected binary not null ref, got %s", f)
 	}
 }
 

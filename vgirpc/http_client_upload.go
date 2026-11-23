@@ -150,9 +150,19 @@ func decodeUploadURLBatch(batch arrow.RecordBatch) ([]UploadURL, error) {
 			return nil, &RpcError{Type: "ProtocolError", Message: "upload URL response 'upload_headers' is not map<utf8, utf8>"}
 		}
 	}
+	// Protocol 3.4 grant columns, read by name and optional: a server
+	// without them still answers a v2 client.
+	objectIDs, _ := column("object_id").(*array.String)
+	refs, _ := column("ref").(*array.Binary)
 	out := make([]UploadURL, 0, int(batch.NumRows()))
 	for row := range int(batch.NumRows()) {
 		entry := UploadURL{Headers: map[string]string{}}
+		if objectIDs != nil && !objectIDs.IsNull(row) {
+			entry.ObjectID = objectIDs.Value(row)
+		}
+		if refs != nil && !refs.IsNull(row) {
+			entry.Ref = append([]byte(nil), refs.Value(row)...)
+		}
 		if headers != nil && !headers.IsNull(row) {
 			start, end := headers.ValueOffsets(row)
 			for i := int(start); i < int(end); i++ {

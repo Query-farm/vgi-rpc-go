@@ -45,6 +45,10 @@ func (s *Server) serveStream(ctx context.Context, r io.Reader, w io.Writer, req 
 	if callCtx.LogLevel == "" {
 		callCtx.LogLevel = LogTrace
 	}
+	// Stream construction is the init request on this transport: the one
+	// context on which StateRef() is allowed. Values stay in memory (the state
+	// never leaves the process), so there is no runtime.
+	callCtx.stateRefs = &stateRefScope{auth: auth, protocol: req.Protocol, method: req.Method, init: true}
 
 	// Call handler to get StreamResult. Recover user panics at the RPC
 	// boundary so the process keeps serving and dispatch cleanup still runs.

@@ -14,13 +14,20 @@ package vgis3
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/smithy-go"
 
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
 )
@@ -120,7 +127,85 @@ func (s *S3Storage) Upload(data []byte, schema *arrow.Schema, contentEncoding st
 	return presigned.URL, nil
 }
 
-// Ensure S3Storage implements ExternalStorage at compile time.
+// defaultMaxFetchBytes is the Get cap when the caller passes none (256 MiB,
+// vgirpc's default inbound fetch cap).
+const defaultMaxFetchBytes int64 = 256 * 1024 * 1024
+
+// ErrObjectMissing is returned by Get when S3 reports the key absent
+// (NoSuchKey / 404). It carries an ObjectMissing() method, which
+// vgirpc.IsObjectMissing recognizes, so StateRef and argument-reference
+// resolution map it to state_ref_missing / arguments_ref_missing.
+var ErrObjectMissing error = objectMissingError{}
+
+type objectMissingError struct{}
+
+func (objectMissingError) Error() string       { return "S3 object is gone" }
+func (objectMissingError) ObjectMissing() bool { return true }
+
+// PutObject stores data under a fresh key and returns the key: the
+// vgirpc.ObjectStore contract of protocol 3.4 (StateRef objects). A SigV4
+// PutObject with ContentLength and ChecksumSHA256, so S3/R2 verify the body.
+// Objects carry no TTL: operators MUST set a lifecycle rule of at least one
+// day on the prefix.
+func (s *S3Storage) PutObject(data []byte) (string, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("S3 object key: %w", err)
+	}
+	key := s.prefix + hex.EncodeToString(raw[:]) + ".bin"
+	sum := sha256.Sum256(data)
+	_, err := s.client.PutObject(context.Background(), &s3.PutObjectInput{
+		Bucket:         aws.String(s.bucket),
+		Key:            aws.String(key),
+		Body:           bytes.NewReader(data),
+		ContentLength:  aws.Int64(int64(len(data))),
+		ChecksumSHA256: aws.String(base64.StdEncoding.EncodeToString(sum[:])),
+		ContentType:    aws.String("application/octet-stream"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("S3 PutObject: %w", err)
+	}
+	return key, nil
+}
+
+// Get fetches the object a key names (vgirpc.ObjectStore), refusing more than
+// maxBytes (<= 0: 256 MiB). A missing key is [ErrObjectMissing]. The caller
+// verifies size and digest.
+func (s *S3Storage) Get(objectID string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxFetchBytes
+	}
+	resp, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(objectID),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.ErrorCode() {
+			case "NoSuchKey", "NotFound", "404":
+				return nil, ErrObjectMissing
+			}
+		}
+		return nil, fmt.Errorf("S3 GetObject: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.ContentLength != nil && *resp.ContentLength > maxBytes {
+		return nil, fmt.Errorf("S3 object is %d bytes, over max_fetch_bytes (%d)", *resp.ContentLength, maxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("S3 GetObject read: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("S3 object exceeds max_fetch_bytes (%d)", maxBytes)
+	}
+	return data, nil
+}
+
+// Ensure S3Storage implements ExternalStorage at compile time. (It also
+// implements vgirpc.ObjectStore; that check waits for the core release that
+// declares the interface, since this module pins a published core.)
 var _ vgirpc.ExternalStorage = (*S3Storage)(nil)
 
 // generateUUID returns a random UUID string.
