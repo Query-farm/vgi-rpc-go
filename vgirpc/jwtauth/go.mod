@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/MicahParks/jwkset v0.11.0
 	github.com/MicahParks/keyfunc/v3 v3.8.0
-	github.com/Query-farm/vgi-rpc-go v0.37.0
+	github.com/Query-farm/vgi-rpc-go v0.38.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 )
 
