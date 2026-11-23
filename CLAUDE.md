@@ -282,6 +282,30 @@ Limitations vs Python:
 
 `make race` builds the conformance worker with `go build -race` and runs the full 1049-test suite under it (~5 minutes; ~3-5× slower than `make test`). The pytest-timeout plugin is disabled for this target because the upstream `_pytest_suite.py` declares `pytestmark = pytest.mark.timeout(5)` at module scope, which fires on the slower instrumented worker even when individual tests pass. Use `make race` before cutting releases.
 
+## Protocol 3.4: StateRef, the object store and argument references
+
+`vgirpc/state_ref.go` ports the reference's `STATE_REF_V1.md` (vgi-rpc-python
+`f22d435`): `CallContext.StateRef` / `Resolve` / `ResolveInto` /
+`ResolveArgumentRef`, the token codec (`token_codec.go`, 0x00/0x01/0x02),
+the object cache (`object_cache.go`), the `ObjectStore` contract
+(`object_store.go`) and the grant columns `object_id` / `ref`
+(`http_upload_url.go`). Things that are easy to break:
+
+- A ref's form is decided at its **first serialization inside a cursor mint**:
+  refs created on the init turn point at that turn's `stateRefStream`, which
+  `mintCursorToken` arms only while it gob-encodes the state. Outside a mint a
+  ref renders inline without caching.
+- The call token (`callTokenVersion` 0x02) carries the output schema behind a
+  `StateRef` (`SchemasRef`), and is minted **before** the cursor, because its
+  sealed length enters the cursor's turn budget.
+- A cursor that cannot be minted (`cursor_too_large`, a store failure)
+  discards the turn's data: a refusal never follows rows the client consumed.
+- `vgirpc/s3` and `vgirpc/gcs` pin a published core, so they report missing
+  objects through an `ObjectMissing() bool` method rather than
+  `vgirpc.ErrObjectMissing`; `IsObjectMissing` accepts both.
+- The shared cases live in the reference's `_state_ref_pytest.py`; the three
+  runner fixtures they need are in `test_go_conformance.py`.
+
 ## Hot-path performance invariants
 
 These are load-bearing: undoing them silently regresses throughput, and the

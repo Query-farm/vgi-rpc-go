@@ -152,13 +152,88 @@ if err != nil {
 }
 ```
 
+!!! warning "Multi-replica deployments MUST share the key"
+    Cursor tokens, call tokens, stored `StateRef` tags and argument references
+    are all sealed under this one key. With no key configured each process draws
+    a random one, so a continuation (or a stored `StateRef`) that lands on
+    another replica — or on the same worker after a restart — is refused.
+
 ## Token TTL
 
-State tokens have a configurable time-to-live. Use `SetTokenTTL` to adjust:
+Cursor tokens, call tokens and stored `StateRef` tags expire `token_ttl` after
+they were minted, each checked from its own creation time. The default is
+**6 hours** (`vgirpc.DefaultTokenTTL`, the maximum stream duration); `0`
+disables expiry:
 
 ```go
 httpServer.SetTokenTTL(30 * time.Minute)
 ```
+
+## StateRef: unchanging stream state by reference
+
+Every HTTP continuation echoes the stream's state back to the server. A
+`StateRef` is how a stream says "this part of my state does not change": create
+it once in the stream method (the init request), keep it in a state field, and
+resolve it on any turn, on any replica.
+
+```go
+type scanState struct {
+    Query vgirpc.StateRef
+    Batch int
+}
+
+func scan(_ context.Context, ctx *vgirpc.CallContext, p scanParams) (*vgirpc.StreamResult, error) {
+    ref, err := ctx.StateRef(p.Query) // only while handling init
+    if err != nil {
+        return nil, err
+    }
+    return &vgirpc.StreamResult{OutputSchema: schema, State: &scanState{Query: ref}}, nil
+}
+
+func (s *scanState) Produce(_ context.Context, out *vgirpc.OutputCollector, ctx *vgirpc.CallContext) error {
+    query, err := ctx.Resolve(s.Query) // any turn, any replica
+    ...
+}
+```
+
+- A value whose compressed payload is at most `state_ref_inline_bytes`
+  (default 16384, `SetStateRefInlineBytes`, env `VGI_RPC_STATE_REF_INLINE_BYTES`,
+  further capped at a quarter of the turn budget) rides the cursor inline. A
+  larger one is sealed and stored **once** through the server's external
+  storage when it implements `vgirpc.ObjectStore` (the blob vendor,
+  `vgirpc/s3`, `vgirpc/gcs`), and only a ~130-byte sealed tag rides each turn.
+  Without such storage it stays inline.
+- On stdio, Unix, TCP and shared memory the value never leaves the process.
+  Worker code is the same on every transport.
+- `StateRef` is refused (`state_ref_misuse`) anywhere but the stream method's
+  own context: state transitions copy the field, they never create a new ref.
+- `ResolveInto(ref, &out)` decodes into a `vgirpc`-tagged struct, an
+  `encoding.BinaryUnmarshaler`, a `*[]byte` or a `*string`.
+- Stored objects are fetched through the process's object cache
+  (`vgirpc.DefaultObjectCache`): keyed by object id, single-flight,
+  byte-bounded by `VGI_RPC_OBJECT_CACHE_BYTES` (default min(1 GiB, 40% of the
+  cgroup memory limit)), entries older than one day re-fetched.
+- Objects carry no TTL and the server never deletes them: set a bucket
+  lifecycle rule of at least one day on their prefix.
+
+### The turn budget and the cursor rule
+
+A continuation must fit the advertised `VGI-Max-Request-Bytes`, so each cursor
+is checked against `floor((max_request_bytes - 4096) / 1.34) - call_token_bytes`.
+`SetCursorRule(vgirpc.CursorRuleWarn)` (the default) logs `cursor_large` and
+sends the client a WARN log; `vgirpc.CursorRuleError` refuses the turn with
+`cursor_too_large` (only when a request cap is set). Below a 16 KiB request cap
+the rule is disabled, with a startup warning.
+
+### Argument references
+
+`__upload_url__/init` answers each entry with `object_id` and `ref`, a sealed
+argument reference bound to the requesting principal.
+`ctx.ResolveArgumentRef(ref, size, sha256Hex)` (or
+`vgirpc.ResolveArgumentRef` with explicit options) opens it for the presenting
+principal, checks the claimed size and SHA-256, fetches through the object
+cache and verifies the bytes. Failures carry the kinds `invalid_arguments_ref`,
+`arguments_ref_integrity` and `arguments_ref_missing`.
 
 ## Concurrency Limits
 

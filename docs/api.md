@@ -60,7 +60,11 @@ func RegisterStateType(v interface{})
 
 | Method | Description |
 |---|---|
-| `SetTokenTTL(d time.Duration)` | Set state token maximum age |
+| `SetTokenTTL(d time.Duration)` | Set the maximum age of cursor/call tokens and stored `StateRef` tags (default 6 h; 0 disables) |
+| `SetStateRefInlineBytes(n int64) error` | Largest compressed `StateRef` payload kept inline (default 16384) |
+| `SetCursorRule(rule CursorRule) error` | `CursorRuleWarn` (default) or `CursorRuleError` for a cursor over the turn budget |
+| `SetObjectCache(c *ObjectCache)` | Object cache for stored `StateRef`s and argument references (default `DefaultObjectCache()`) |
+| `SetMaxUploadBytes(n int64)` | Advertised `VGI-Max-Upload-Bytes`; never above the inbound fetch cap, which it defaults to |
 | `ServeHTTP(w http.ResponseWriter, r *http.Request)` | Implements `http.Handler` |
 
 ## HttpClient
@@ -204,11 +208,32 @@ urls, err := httpClient.RequestUploadURLs(ctx, []vgirpc.UploadRequest{{Size: n, 
 
 `POST {prefix}/__upload_url__/init` takes `uploads: list<struct<size, sha256>>`
 (1–100 entries) and answers one `(upload_url, download_url, expires_at,
-upload_headers)` row per entry. The retired `count` shape is refused. The
+upload_headers, object_id, ref)` row per entry: `object_id` is the storage id
+the provider returned (`UploadURL.ObjectID`, required) and `ref` a sealed
+argument reference for it (`vgirpc.argref.v1`, bound to the requesting
+principal), which `CallContext.ResolveArgumentRef` resolves. The endpoint is
+authenticated exactly like a protocol method. `VGI-Max-Upload-Bytes` is always
+advertised with upload URLs and never exceeds the inbound fetch cap. The retired `count` shape is refused. The
 client hashes the body, PUTs exactly those bytes with every `upload_headers`
 entry, and sends a pointer carrying `vgi_rpc.location.sha256`, which the
 server requires on request pointers and verifies before decoding. A client
 facing a v1 server (`VGI-Upload-URL-Support: true`) refuses to upload.
+
+### Object store (protocol 3.4)
+
+```go
+type ObjectStore interface {
+    PutObject(data []byte) (string, error)
+    Get(objectID string, maxBytes int64) ([]byte, error)
+}
+```
+
+A separate interface next to `ExternalStorage`: stored `StateRef`s and argument
+references use the server's external storage when it also implements
+`ObjectStore`. A missing object is `vgirpc.ErrObjectMissing` (or any error with
+an `ObjectMissing() bool` method; see `IsObjectMissing`). `VendorStorage`,
+`vgis3.S3Storage`, `vgigcs.GCSStorage` and the conformance fake storage
+implement it.
 
 ### Pre-published results
 
