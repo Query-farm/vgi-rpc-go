@@ -326,6 +326,9 @@ func RegisterMethods(server *vgirpc.Server) {
 	// stream_session_counter / exchange_session_counter.
 	vgirpc.Producer(server, "stream_session_counter", sessionCounterOutputSchema, streamSessionCounter)
 	vgirpc.Exchange(server, "exchange_session_counter", sessionCounterOutputSchema, sessionCounterExchangeInputSchema, exchangeSessionCounter)
+
+	// StateRef, the object cache and argument references (protocol 3.4).
+	registerStateRefMethods(server)
 }
 
 // --- Sticky session handlers ---

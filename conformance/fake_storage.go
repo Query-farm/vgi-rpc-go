@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/Query-farm/vgi-rpc-go/vgirpc"
@@ -106,6 +107,7 @@ func (f *FakeStorage) GenerateUploadURL(size int64, sha256Hex string) (vgirpc.Up
 		UploadURL     string            `json:"upload_url"`
 		DownloadURL   string            `json:"download_url"`
 		UploadHeaders map[string]string `json:"upload_headers"`
+		ObjectID      string            `json:"object_id"`
 	}
 	if err := json.NewDecoder(allocResp.Body).Decode(&alloc); err != nil {
 		return vgirpc.UploadURL{}, fmt.Errorf("fake storage alloc decode: %w", err)
@@ -127,7 +129,89 @@ func (f *FakeStorage) GenerateUploadURL(size int64, sha256Hex string) (vgirpc.Up
 		DownloadURL: downloadURL,
 		ExpiresAt:   time.Now().UTC().Add(1 * time.Hour),
 		Headers:     headers,
+		ObjectID:    alloc.ObjectID,
 	}, nil
+}
+
+// PutObject stores data through a sized object allocation and returns its id
+// (implements vgirpc.ObjectStore): POST /alloc with purpose "object" (counted
+// as object_puts) plus the size and digest, then a verified PUT -- the same
+// shape as a vendor sized grant.
+func (f *FakeStorage) PutObject(data []byte) (string, error) {
+	sum := sha256.Sum256(data)
+	reqBody, err := json.Marshal(map[string]any{
+		"size": len(data), "sha256_b64": base64.StdEncoding.EncodeToString(sum[:]), "purpose": "object",
+	})
+	if err != nil {
+		return "", err
+	}
+	allocResp, err := f.Client.Post(f.BaseURL+"/alloc", "application/json", bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("fake storage alloc: %w", err)
+	}
+	defer allocResp.Body.Close()
+	if allocResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(allocResp.Body)
+		return "", fmt.Errorf("fake storage alloc returned %d: %s", allocResp.StatusCode, body)
+	}
+	var alloc struct {
+		UploadURL     string            `json:"upload_url"`
+		UploadHeaders map[string]string `json:"upload_headers"`
+		ObjectID      string            `json:"object_id"`
+	}
+	if err := json.NewDecoder(allocResp.Body).Decode(&alloc); err != nil {
+		return "", fmt.Errorf("fake storage alloc decode: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPut, alloc.UploadURL, bytes.NewReader(data))
+	if err != nil {
+		return "", fmt.Errorf("fake storage put build: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	for k, v := range alloc.UploadHeaders {
+		req.Header.Set(k, v)
+	}
+	putResp, err := f.Client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("fake storage put: %w", err)
+	}
+	defer putResp.Body.Close()
+	if putResp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(putResp.Body)
+		return "", fmt.Errorf("fake storage put returned %d: %s", putResp.StatusCode, body)
+	}
+	if alloc.ObjectID == "" {
+		return "", fmt.Errorf("fake storage alloc returned no object_id")
+	}
+	return alloc.ObjectID, nil
+}
+
+// Get fetches an object by id via GET /objects/{id} (implements
+// vgirpc.ObjectStore; counted as object_gets). A 404 is
+// vgirpc.ErrObjectMissing; a body over maxBytes is refused.
+func (f *FakeStorage) Get(objectID string, maxBytes int64) ([]byte, error) {
+	resp, err := f.Client.Get(f.BaseURL + "/objects/" + url.PathEscape(objectID))
+	if err != nil {
+		return nil, fmt.Errorf("fake storage get: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("fake storage object is gone: %w", vgirpc.ErrObjectMissing)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fake storage get returned %d", resp.StatusCode)
+	}
+	limit := maxBytes
+	if limit <= 0 {
+		limit = 256 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("fake storage get read: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("object is over max_fetch_bytes (%d)", limit)
+	}
+	return data, nil
 }
 
 // AllowAllValidator is a vgirpc.URLValidator that accepts every URL,
@@ -137,3 +221,4 @@ func AllowAllValidator(string) error { return nil }
 // Compile-time check that FakeStorage satisfies the ExternalStorage interface.
 var _ vgirpc.ExternalStorage = (*FakeStorage)(nil)
 var _ vgirpc.UploadURLProvider = (*FakeStorage)(nil)
+var _ vgirpc.ObjectStore = (*FakeStorage)(nil)

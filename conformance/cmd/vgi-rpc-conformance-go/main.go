@@ -68,6 +68,17 @@ const conformancePrincipalHeader = "X-Conformance-Principal"
 // Requests without the header stay anonymous rather than being rejected: the
 // suite probes /health and the capability endpoint before it authenticates
 // anything.
+// requiredPrincipalFromHeader is principalFromHeader, but a request without
+// the header is refused (401). Backs --require-principal: the shared StateRef
+// and argument-reference cases need two principals and an unauthenticated
+// grant that is refused exactly like an unauthenticated method call.
+func requiredPrincipalFromHeader(r *http.Request) (*vgirpc.AuthContext, error) {
+	if r.Header.Get(conformancePrincipalHeader) == "" {
+		return nil, &vgirpc.RpcError{Type: "ValueError", Message: "X-Conformance-Principal is required"}
+	}
+	return principalFromHeader(r)
+}
+
 func principalFromHeader(r *http.Request) (*vgirpc.AuthContext, error) {
 	principal := r.Header.Get(conformancePrincipalHeader)
 	if principal == "" {
@@ -107,6 +118,15 @@ func main() {
 	// No SetIncludeTracebacks: the shared suite asserts the default
 	// (WIRE_PROTOCOL.md §8) -- tracebacks on every transport -- so the worker
 	// must not override it.
+	// --object-cache-bytes sets the process object cache's bound (it is read
+	// once, when the cache is first created), as the reference worker does.
+	if v := findFlagValue(os.Args, "--object-cache-bytes"); v != "" {
+		os.Setenv(vgirpc.ObjectCacheBytesEnv, v)
+	}
+	if _, err := vgirpc.DefaultObjectCacheBytes(nil); err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
 	server := vgirpc.NewServer()
 	transportKindProbe := hasFlag(os.Args, "--transport-kind-probe")
 	// --hosted-reverse registers zeta.Primary.v1, conformance.Secondary.v1 and
@@ -507,10 +527,35 @@ func main() {
 			httpServer.SetUploadURLProvider(fakeStorage)
 			httpServer.SetMaxUploadBytes(64 * 1024 * 1024)
 		}
+		// --max-request-bytes 0 means "no request cap" (the storage modes
+		// otherwise default the cap to 4 KiB).
 		if maxRequestBytes > 0 {
 			httpServer.SetMaxRequestBytes(maxRequestBytes)
-		} else if fakeStorage != nil {
+		} else if fakeStorage != nil && maxRequestBytes != 0 {
 			httpServer.SetMaxRequestBytes(4096)
+		}
+		// STATE_REF_V1.md §15 runner flags: the cursor rule, the token TTL
+		// (cursor, call token and stored-tag expiry) and a required principal.
+		if v := findFlagValue(os.Args, "--cursor-rule"); v != "" {
+			if err := httpServer.SetCursorRule(vgirpc.CursorRule(v)); err != nil {
+				fmt.Fprintf(os.Stderr, "invalid --cursor-rule: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		if v := findFlagValue(os.Args, "--token-ttl"); v != "" {
+			secs, terr := strconv.Atoi(v)
+			if terr != nil || secs < 0 {
+				fmt.Fprintf(os.Stderr, "invalid --token-ttl (expected non-negative integer seconds): %q\n", v)
+				os.Exit(1)
+			}
+			httpServer.SetTokenTTL(time.Duration(secs) * time.Second)
+		}
+		if inline, ierr := vgirpc.StateRefInlineBytesFromEnv(nil); ierr != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", ierr)
+			os.Exit(1)
+		} else if err := httpServer.SetStateRefInlineBytes(inline); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
 		}
 		if hostingMaxRequestBytes > 0 {
 			httpServer.SetHostingMaxRequestBytes(hostingMaxRequestBytes)
@@ -636,6 +681,9 @@ func main() {
 		// to this worker exactly as it connects to the plain one.
 		if hasFlag(os.Args, "--sticky-auth") {
 			httpServer.SetAuthenticate(principalFromHeader)
+		}
+		if hasFlag(os.Args, "--require-principal") {
+			httpServer.SetAuthenticate(requiredPrincipalFromHeader)
 		}
 		// The identity fixture authenticates from X-Conformance-Principal and
 		// carries X-Conformance-Auth-Time into claims["auth_time"] verbatim.
