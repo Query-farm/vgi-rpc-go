@@ -533,3 +533,52 @@ func TestExternalConfigFromEnv(t *testing.T) {
 		t.Fatalf("MaxUploadBytesFromEnv = %d, %v", n, err)
 	}
 }
+
+// TestVendorStorageObjectStore covers the protocol 3.4 ObjectStore contract on
+// the vendor: PutObject is a sized rpc grant marked origin=state_ref (counted
+// in puts_state_ref and puts_rpc), Get mints the download from the id
+// (gets_state_ref), the grant's object_id rides GenerateUploadURL, and a
+// deleted object is ErrObjectMissing.
+func TestVendorStorageObjectStore(t *testing.T) {
+	base := fakeVendor(t)
+	storage, err := NewVendorStorage(base, fakeVendorToken, "", VendorOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	stat := func(key string) int64 { return vendorStat(t, base, key) }
+	putsStateRef, putsRPC, getsStateRef := stat("puts_state_ref"), stat("puts_rpc"), stat("gets_state_ref")
+
+	data := bytes.Repeat([]byte("sealed stateref object "), 300)
+	id, err := storage.PutObject(data)
+	if err != nil || id == "" {
+		t.Fatalf("PutObject: id=%q err=%v", id, err)
+	}
+	if stat("puts_state_ref")-putsStateRef != 1 || stat("puts_rpc")-putsRPC != 1 {
+		t.Fatal("PutObject must be one rpc grant with origin state_ref")
+	}
+	got, err := storage.Get(id, 0)
+	if err != nil || !bytes.Equal(got, data) {
+		t.Fatalf("Get: %d bytes, err=%v", len(got), err)
+	}
+	if stat("gets_state_ref")-getsStateRef != 1 {
+		t.Fatal("Get must mint the download from the object id")
+	}
+	if _, err := storage.Get(id, int64(len(data)-1)); err == nil || IsObjectMissing(err) {
+		t.Fatalf("Get over maxBytes must be refused (not missing), got %v", err)
+	}
+
+	digest := sha256.Sum256([]byte("arg"))
+	pair, err := storage.GenerateUploadURL(3, hex.EncodeToString(digest[:]))
+	if err != nil || pair.ObjectID == "" {
+		t.Fatalf("GenerateUploadURL must return the grant's object id: %+v %v", pair, err)
+	}
+
+	vendorAdmin(t, base, "/__admin__/delete?origin=state_ref")
+	if _, err := storage.Get(id, 0); !IsObjectMissing(err) {
+		t.Fatalf("a deleted object must be ErrObjectMissing, got %v", err)
+	}
+	if _, err := storage.Get("no-such-object", 0); !IsObjectMissing(err) {
+		t.Fatalf("an unknown id must be ErrObjectMissing, got %v", err)
+	}
+}
