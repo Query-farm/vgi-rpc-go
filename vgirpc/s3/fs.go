@@ -30,6 +30,11 @@ func (s *S3Storage) FunctionStore() *FunctionStore {
 }
 
 // scopePrefix is the key prefix of one (shard, execution) scope.
+// Prefix is the function-storage key prefix (<prefix>fs/). Keys written by
+// PutObjectScoped are Prefix() + escaped scope + "/" + name, or Prefix() +
+// name without a scope.
+func (f *FunctionStore) Prefix() string { return f.prefix }
+
 func (f *FunctionStore) scopePrefix(scope string) string {
 	if scope == "" {
 		return f.prefix

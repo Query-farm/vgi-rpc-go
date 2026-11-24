@@ -26,6 +26,11 @@ func (s *GCSStorage) FunctionStore() *FunctionStore {
 	return &FunctionStore{s: s, prefix: s.root + "fs/"}
 }
 
+// Prefix is the function-storage key prefix (<prefix>fs/). Keys written by
+// PutObjectScoped are Prefix() + escaped scope + "/" + name, or Prefix() +
+// name without a scope.
+func (f *FunctionStore) Prefix() string { return f.prefix }
+
 func (f *FunctionStore) scopePrefix(scope string) string {
 	if scope == "" {
 		return f.prefix
