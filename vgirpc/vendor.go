@@ -1629,8 +1629,36 @@ func MaxRequestBytesFromEnv(getenv func(string) string) (int64, error) {
 // inbound fetch cap (VGI_RPC_MAX_FETCH_BYTES; see [MaxFetchBytesFromEnv]).
 // Returns the external config (nil without a vendor). Any malformed or
 // contradictory value is an error. getenv defaults to os.Getenv.
+//
+// The backend is chosen by [StorageBackendFromEnv]: VGI_STORAGE_BACKEND=none
+// keeps everything inline even with VGI_BLOB_VENDOR_URL set, and s3 or gcs
+// is an error here (those backends live in their own modules: build one and
+// call [ConfigureHTTPServerWithStorage]).
 func ConfigureHTTPServerFromEnv(h *HttpServer, getenv func(string) string) (*ExternalLocationConfig, error) {
 	getenv = envLookup(getenv)
+	backend, err := StorageBackendFromEnv(getenv)
+	if err != nil {
+		return nil, err
+	}
+	var config *ExternalLocationConfig
+	switch backend {
+	case StorageBackendVendor:
+		if strings.TrimSpace(getenv(EnvBlobVendorURL)) == "" {
+			return nil, fmt.Errorf("%s=vendor needs %s", EnvStorageBackend, EnvBlobVendorURL)
+		}
+		if config, err = ExternalConfigFromEnv(getenv); err != nil {
+			return nil, err
+		}
+	case StorageBackendS3, StorageBackendGCS:
+		return nil, fmt.Errorf("%s=%s: ConfigureHTTPServerFromEnv builds only the blob vendor; build the backend "+
+			"(vgirpc/s3 or vgirpc/gcs FromEnv) and call ConfigureHTTPServerWithStorage", EnvStorageBackend, backend)
+	}
+	return configureHTTPServer(h, config, getenv)
+}
+
+// configureHTTPServer applies the request caps and, with a config, the
+// external location and (when the storage vends grants) upload URLs.
+func configureHTTPServer(h *HttpServer, config *ExternalLocationConfig, getenv func(string) string) (*ExternalLocationConfig, error) {
 	maxRequest, err := MaxRequestBytesFromEnv(getenv)
 	if err != nil {
 		return nil, err
@@ -1639,9 +1667,16 @@ func ConfigureHTTPServerFromEnv(h *HttpServer, getenv func(string) string) (*Ext
 	if err != nil {
 		return nil, err
 	}
-	config, err := ExternalConfigFromEnv(getenv)
-	if err != nil {
-		return nil, err
+	var maxUpload int64
+	if config != nil {
+		if maxUpload, err = MaxUploadBytesFromEnv(getenv); err != nil {
+			return nil, err
+		}
+		if maxUpload > config.maxFetchBytes() {
+			// Unreachable through the *FromEnv configs (MaxFetchBytesFromEnv
+			// refuses it); kept so the invariant cannot rot.
+			return nil, fmt.Errorf("%s (%d) exceeds the inbound fetch cap (%d)", EnvMaxUploadBytes, maxUpload, config.maxFetchBytes())
+		}
 	}
 	if err := h.SetStateRefInlineBytes(inline); err != nil {
 		return nil, err
@@ -1652,21 +1687,12 @@ func ConfigureHTTPServerFromEnv(h *HttpServer, getenv func(string) string) (*Ext
 	if config == nil {
 		return nil, nil
 	}
-	maxUpload, err := MaxUploadBytesFromEnv(getenv)
-	if err != nil {
-		return nil, err
-	}
-	if maxUpload > config.maxFetchBytes() {
-		// Unreachable through ExternalConfigFromEnv (MaxFetchBytesFromEnv
-		// refuses it); kept so the invariant cannot rot.
-		return nil, fmt.Errorf("%s (%d) exceeds the inbound fetch cap (%d)", EnvMaxUploadBytes, maxUpload, config.maxFetchBytes())
-	}
 	h.server.SetExternalLocation(config)
-	if provider, ok := config.Storage.(UploadURLProvider); ok {
-		h.SetUploadURLProvider(provider)
+	if StorageVendsUploadGrants(config.Storage) {
+		h.SetUploadURLProvider(config.Storage.(UploadURLProvider))
+		// 0 (unset) advertises the fetch cap itself.
+		h.SetMaxUploadBytes(maxUpload)
 	}
-	// 0 (unset) advertises the fetch cap itself.
-	h.SetMaxUploadBytes(maxUpload)
 	return config, nil
 }
 
