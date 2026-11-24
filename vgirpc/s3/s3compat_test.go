@@ -225,7 +225,9 @@ func checkHost(t *testing.T, raw, endpoint, bucket string) {
 // (status 499).
 func httpRefused(t *testing.T, method, raw string, body []byte, headers map[string]string) (int, []byte) {
 	t.Helper()
-	code, data, err := httpSend(method, raw, body, headers)
+	// A refused upload may make the server close the connection mid-body:
+	// never reuse it for the next request.
+	code, data, err := httpSend(method, raw, body, headers, true)
 	if err != nil {
 		return 499, []byte(err.Error())
 	}
@@ -234,14 +236,14 @@ func httpRefused(t *testing.T, method, raw string, body []byte, headers map[stri
 
 func httpDo(t *testing.T, method, raw string, body []byte, headers map[string]string) (int, []byte) {
 	t.Helper()
-	code, data, err := httpSend(method, raw, body, headers)
+	code, data, err := httpSend(method, raw, body, headers, false)
 	if err != nil {
 		t.Fatalf("%s: %v", method, err)
 	}
 	return code, data
 }
 
-func httpSend(method, raw string, body []byte, headers map[string]string) (int, []byte, error) {
+func httpSend(method, raw string, body []byte, headers map[string]string, closeConn bool) (int, []byte, error) {
 	var rd io.Reader
 	if body != nil {
 		rd = bytes.NewReader(body)
@@ -253,6 +255,7 @@ func httpSend(method, raw string, body []byte, headers map[string]string) (int, 
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
+	req.Close = closeConn
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return 0, nil, err
