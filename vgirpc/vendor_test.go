@@ -313,7 +313,7 @@ func TestVendorStorageUploadAndUploadURL(t *testing.T) {
 		for name, value := range pair.Headers {
 			put.Header.Set(name, value)
 		}
-		resp, err := storageUploadClient.Do(put)
+		resp, err := storageUploadClient().Do(put)
 		if err != nil {
 			t.Fatalf("PUT to vended URL: %v", err)
 		}

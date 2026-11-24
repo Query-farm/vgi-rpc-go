@@ -166,8 +166,9 @@ const uploadContentType = "application/octet-stream"
 // purpose -- not the RPC client, whose cookie jar or credential-injecting
 // transport would otherwise reach the storage host (which may also refuse a
 // second auth mechanism) -- and it never follows a redirect, which could carry
-// the signed URL somewhere nobody vetted.
-var storageUploadClient = &http.Client{CheckRedirect: noRedirects}
+// the signed URL somewhere nobody vetted. It has connect and stall timeouts
+// but no whole-request deadline (see [NewStorageHTTPClient]).
+func storageUploadClient() *http.Client { return sharedStorageHTTPClient() }
 
 // putExternalRequest uploads the request body to a vended URL with exactly
 // the vended headers.
@@ -191,7 +192,7 @@ func (c *HttpClient) putExternalRequest(ctx context.Context, uploadURL string, h
 		}
 		req.Header.Set(name, value)
 	}
-	resp, err := storageUploadClient.Do(req)
+	resp, err := storageUploadClient().Do(req)
 	if err != nil {
 		return &RpcError{Type: "ExternalUploadFailed", Message: fmt.Sprintf("PUT to upload URL %s failed", redactExternalURL(uploadURL))}
 	}

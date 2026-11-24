@@ -286,6 +286,18 @@ Signed-URL requests use a bare client: no caller transport, cookies or
 redirects. Neither the token nor a signed query string appears in logs or
 errors.
 
+Storage timeouts: every storage-host request (signed PUT/GET, inbound pointer
+fetches, request uploads to vended URLs, and the `vgis3` / `vgigcs`
+backends) has a 30 s connect timeout and a stall timeout, and no
+whole-request deadline, so a large transfer on a slow link is never cut off
+while bytes move. The stall timeout (default 30 s, `VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS`,
+`VendorOptions.StallTimeout`, `S3Config.StallTimeout`, `GCSConfig.StallTimeout`)
+fails a transfer that sends or receives nothing for that long. Connection
+errors, stalls, 429 and 5xx are retried: 3 attempts, exponential backoff from
+250 ms capped at 5 s (a retried PUT resends the body). Vendor API calls
+(`/v1/info`, `/v1/blobs/put`, ...) keep a whole-request `VendorOptions.Timeout`
+(default 30 s) per attempt. `NewStorageHTTPClient` builds such a client.
+
 ## RpcError
 
 ```go

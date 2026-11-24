@@ -110,7 +110,10 @@ type ExternalLocationConfig struct {
 	// RetryDelay is the delay between retry attempts. Default: 500ms.
 	RetryDelay time.Duration
 	// HTTPClient is the HTTP client used for fetching external data.
-	// Default: http.DefaultClient.
+	// Default: a shared storage client ([NewStorageHTTPClient]): connect and
+	// stall timeouts, no whole-request deadline. A Timeout set on a client
+	// supplied here is a whole-request deadline and can cut off a large
+	// fetch on a slow link.
 	HTTPClient *http.Client
 	// MaxFetchBytes is the encoded response-body limit. It is enforced while
 	// streaming, before any Content-Encoding is decoded. Default: 256 MiB.
@@ -172,7 +175,7 @@ func (c *ExternalLocationConfig) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
 	}
-	return http.DefaultClient
+	return sharedStorageFetchHTTPClient()
 }
 
 func (c *ExternalLocationConfig) maxFetchBytes() int64 {

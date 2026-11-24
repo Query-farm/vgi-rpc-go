@@ -196,8 +196,14 @@ type VendorInfo struct {
 
 // VendorOptions tunes a vendor client. The zero value is the defaults.
 type VendorOptions struct {
-	// Timeout is the per-request timeout. Default 30s.
+	// Timeout is the whole-request timeout of a vendor API call (/v1/info,
+	// /v1/blobs/put, ...), per attempt. Default 30s. Storage transfers (signed
+	// PUT/GET) have no whole-request deadline; StallTimeout bounds them.
 	Timeout time.Duration
+	// StallTimeout fails a storage transfer that sends or receives no byte
+	// for this long (a slow transfer that keeps moving is never cut off).
+	// Default: VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS, else 30s.
+	StallTimeout time.Duration
 	// HTTPClient carries vendor API requests (its transport only matters:
 	// requests carry exactly the vendor headers, and redirects are never
 	// followed). Signed-URL requests always use a separate bare client.
@@ -449,12 +455,6 @@ const StateRefOrigin = "state_ref"
 // token or a signed URL to a host nobody vetted.
 func noRedirects(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
-// newStorageHTTPClient is the bare client for signed-URL requests: no jar, no
-// caller transport, no redirects.
-func newStorageHTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout, CheckRedirect: noRedirects}
-}
-
 type vendorAPI struct {
 	baseURL      string
 	token        string
@@ -509,7 +509,7 @@ func newVendorAPI(rawURL, token string, opts VendorOptions) (*vendorAPI, error) 
 		attempts:     attempts,
 		backoff:      backoff,
 		client:       client,
-		storage:      newStorageHTTPClient(timeout),
+		storage:      NewStorageHTTPClient(opts.StallTimeout),
 		logger:       logger,
 	}, nil
 }
@@ -519,9 +519,63 @@ func (a *vendorAPI) close() {
 	a.storage.CloseIdleConnections()
 }
 
-// send issues one request, retrying transport errors, 429 and 5xx with
-// backoff. The request carries exactly headers. The caller closes the body of
-// the returned response.
+// backoffSleep waits before retry attempt (attempt >= 1): the base backoff
+// doubled per attempt, capped at vendorMaxBackoff, with 50-100% jitter.
+func (a *vendorAPI) backoffSleep(ctx context.Context, attempt int) error {
+	delay := min(a.backoff*time.Duration(1<<(attempt-1)), vendorMaxBackoff)
+	delay = time.Duration(float64(delay) * (0.5 + rand.Float64()/2))
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(delay):
+		return nil
+	}
+}
+
+// transportErrorKind names a transport failure without its (signed) URL.
+func transportErrorKind(err error) string {
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return "timeout"
+	}
+	return "transport error"
+}
+
+// sendOnce issues one attempt. retry reports a transient failure (transport
+// error, stall, 429 or 5xx); the response is then already closed.
+func (a *vendorAPI) sendOnce(ctx context.Context, client *http.Client, method, rawURL, op string, headers map[string]string, body []byte) (resp *http.Response, retry bool, lastErr string, status int, err error) {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, reader)
+	if err != nil {
+		return nil, false, "", 0, &VendorError{Message: fmt.Sprintf("blob vendor %s: cannot build request for %s", op, redactExternalURL(rawURL))}
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	if body != nil {
+		req.ContentLength = int64(len(body))
+	}
+	resp, err = client.Do(req)
+	if err != nil {
+		// Never err.Error(): a *url.Error embeds the full (signed) URL.
+		return nil, true, transportErrorKind(err), 0, nil
+	}
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		_ = resp.Body.Close()
+		return nil, true, fmt.Sprintf("HTTP %d", resp.StatusCode), resp.StatusCode, nil
+	}
+	return resp, false, "", 0, nil
+}
+
+// send issues one request, retrying transport errors (including a stall),
+// 429 and 5xx with backoff. The request carries exactly headers. The caller
+// closes the body of the returned response. storage selects the bare
+// storage client (no whole-request deadline, stall timeout) over the vendor
+// API client.
 func (a *vendorAPI) send(ctx context.Context, method, rawURL, op string, headers map[string]string, body []byte, storage bool) (*http.Response, error) {
 	client := a.client
 	if storage {
@@ -531,46 +585,17 @@ func (a *vendorAPI) send(ctx context.Context, method, rawURL, op string, headers
 	status := 0
 	for attempt := 0; attempt < a.attempts; attempt++ {
 		if attempt > 0 {
-			delay := min(a.backoff*time.Duration(1<<(attempt-1)), vendorMaxBackoff)
-			delay = time.Duration(float64(delay) * (0.5 + rand.Float64()/2))
-			select {
-			case <-ctx.Done():
+			if a.backoffSleep(ctx, attempt) != nil {
 				return nil, &VendorError{Message: fmt.Sprintf("blob vendor %s cancelled: %s", op, redactExternalURL(rawURL))}
-			case <-time.After(delay):
 			}
 		}
-		var reader io.Reader
-		if body != nil {
-			reader = bytes.NewReader(body)
-		}
-		req, err := http.NewRequestWithContext(ctx, method, rawURL, reader)
+		resp, retry, why, code, err := a.sendOnce(ctx, client, method, rawURL, op, headers, body)
 		if err != nil {
-			return nil, &VendorError{Message: fmt.Sprintf("blob vendor %s: cannot build request for %s", op, redactExternalURL(rawURL))}
+			return nil, err
 		}
-		for k, v := range headers {
-			req.Header.Set(k, v)
-		}
-		if body != nil {
-			req.ContentLength = int64(len(body))
-		}
-		resp, err := client.Do(req)
-		if err != nil {
-			// Never err.Error(): a *url.Error embeds the full (signed) URL.
-			status = 0
-			lastErr = "transport error"
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Timeout() {
-				lastErr = "timeout"
-			}
-			a.logger.Debug("blob vendor transport error", "op", op, "attempt", attempt+1, "of", a.attempts, "error", lastErr, "url", redactExternalURL(rawURL))
-			continue
-		}
-		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			status = resp.StatusCode
-			lastErr = fmt.Sprintf("HTTP %d", resp.StatusCode)
-			a.logger.Debug("blob vendor retryable status", "op", op, "attempt", attempt+1, "of", a.attempts, "status", resp.StatusCode, "url", redactExternalURL(rawURL))
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
-			_ = resp.Body.Close()
+		if retry {
+			lastErr, status = why, code
+			a.logger.Debug("blob vendor retryable failure", "op", op, "attempt", attempt+1, "of", a.attempts, "error", lastErr, "url", redactExternalURL(rawURL))
 			continue
 		}
 		return resp, nil
@@ -958,34 +983,70 @@ func (a *vendorAPI) putObject(ctx context.Context, grant *PutGrant, data []byte,
 }
 
 // download GETs a signed URL on the bare storage client, pinned and capped.
+// A transport error, stall, 429 or 5xx -- also one that cuts the body off
+// part-way -- is retried like any vendor request; a download that keeps
+// moving is never cut off, however long it takes.
 func (a *vendorAPI) download(ctx context.Context, rawURL string, validate func(string) error, maxBytes int64) ([]byte, error) {
 	if err := validate(rawURL); err != nil {
 		return nil, &VendorError{Message: fmt.Sprintf("download rejected: %v", err)}
 	}
-	resp, err := a.send(ctx, http.MethodGet, rawURL, "download", nil, nil, true)
-	if err != nil {
-		return nil, err
+	lastErr := ""
+	status := 0
+	for attempt := 0; attempt < a.attempts; attempt++ {
+		if attempt > 0 {
+			if a.backoffSleep(ctx, attempt) != nil {
+				return nil, &VendorError{Message: fmt.Sprintf("blob vendor download cancelled: %s", redactExternalURL(rawURL))}
+			}
+		}
+		resp, retry, why, code, err := a.sendOnce(ctx, a.storage, http.MethodGet, rawURL, "download", nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		if retry {
+			lastErr, status = why, code
+			a.logger.Debug("blob vendor retryable failure", "op", "download", "attempt", attempt+1, "of", a.attempts, "error", lastErr, "url", redactExternalURL(rawURL))
+			continue
+		}
+		data, readErr, err := readDownload(resp, rawURL, maxBytes)
+		if err != nil {
+			return nil, err
+		}
+		if readErr != nil {
+			lastErr, status = transportErrorKind(readErr), 0
+			a.logger.Debug("blob vendor download interrupted", "attempt", attempt+1, "of", a.attempts, "error", lastErr, "url", redactExternalURL(rawURL))
+			continue
+		}
+		return data, nil
 	}
+	return nil, &VendorError{
+		Message: fmt.Sprintf("download failed while reading after %d attempts (%s): %s", a.attempts, lastErr, redactExternalURL(rawURL)),
+		Status:  status,
+	}
+}
+
+// readDownload reads one download response (and closes it). err is a final
+// failure; readErr a retryable one (the body was cut off or stalled).
+func readDownload(resp *http.Response, rawURL string, maxBytes int64) (data []byte, readErr error, err error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		return nil, &VendorError{
+		return nil, nil, &VendorError{
 			Message: fmt.Sprintf("download failed: HTTP %d: %s", resp.StatusCode, redactExternalURL(rawURL)),
 			Status:  resp.StatusCode,
 			Code:    s3ErrorCode(body),
 		}
 	}
 	if resp.ContentLength > maxBytes {
-		return nil, &VendorError{Message: fmt.Sprintf("download of %d bytes exceeds the %d-byte cap", resp.ContentLength, maxBytes)}
+		return nil, nil, &VendorError{Message: fmt.Sprintf("download of %d bytes exceeds the %d-byte cap", resp.ContentLength, maxBytes)}
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
-	if err != nil {
-		return nil, &VendorError{Message: fmt.Sprintf("download failed while reading: %s", redactExternalURL(rawURL))}
+	data, readErr = io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if readErr != nil {
+		return nil, readErr, nil
 	}
 	if int64(len(data)) > maxBytes {
-		return nil, &VendorError{Message: fmt.Sprintf("download exceeds the %d-byte cap", maxBytes)}
+		return nil, nil, &VendorError{Message: fmt.Sprintf("download exceeds the %d-byte cap", maxBytes)}
 	}
-	return data, nil
+	return data, nil, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,8 +1087,12 @@ func (b vendorClientBase) check(raw string) error {
 	return nil
 }
 
+// requestContext is the context of one storage operation. It has no
+// deadline: each vendor API attempt is bounded by Timeout, and each storage
+// transfer by the connect and stall timeouts, so a large transfer on a slow
+// link is never cut off while it progresses.
 func (b vendorClientBase) requestContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), time.Duration(b.api.attempts)*(b.api.timeout+vendorMaxBackoff))
+	return context.WithCancel(context.Background())
 }
 
 func vendorEnvURLAndToken(getenv func(string) string) (string, string, error) {
@@ -1094,7 +1159,7 @@ func VendorStorageFromEnv(purpose BlobPurpose, getenv func(string) string) (*Ven
 	if err != nil {
 		return nil, err
 	}
-	return NewVendorStorage(rawURL, token, purpose, VendorOptions{})
+	return NewVendorStorage(rawURL, token, purpose, VendorOptions{StallTimeout: StorageStallTimeoutFromEnv(envLookup(getenv))})
 }
 
 // Upload vendors data (already compressed when contentEncoding is set) and
@@ -1297,7 +1362,7 @@ func VendorBlobClientFromEnv(purpose BlobPurpose, getenv func(string) string) (*
 	if err != nil {
 		return nil, err
 	}
-	return NewVendorBlobClient(rawURL, token, purpose, VendorOptions{})
+	return NewVendorBlobClient(rawURL, token, purpose, VendorOptions{StallTimeout: StorageStallTimeoutFromEnv(envLookup(getenv))})
 }
 
 // PutBytes stores data and returns its reference.
@@ -1487,8 +1552,9 @@ func ExternalConfigFromEnv(getenv func(string) string) (*ExternalLocationConfig,
 	config.fetchCapExplicit = strings.TrimSpace(getenv(EnvMaxFetchBytes)) != ""
 	config.URLValidator = storage.URLValidator()
 	// Fetching an inbound pointer is a storage-host request too: a bare
-	// client, never one carrying credentials.
-	config.HTTPClient = &http.Client{Timeout: 5 * time.Minute}
+	// client, never one carrying credentials, with connect and stall
+	// timeouts but no whole-request deadline.
+	config.HTTPClient = newStorageFetchClient(NewStorageTransport(StorageStallTimeoutFromEnv(getenv)))
 	return config, nil
 }
 
