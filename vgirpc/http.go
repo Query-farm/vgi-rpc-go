@@ -323,7 +323,8 @@ const (
 // server did not list.
 const defaultCorsAllowHeaders = "Content-Type, Authorization, " +
 	customAcceptEncodingHeader + ", " + stickySessionHeader + ", " +
-	stickySessionAcceptHeader + ", " + ProofHeader + ", " + acceptMaxResponseBytesHeader
+	stickySessionAcceptHeader + ", " + ProofHeader + ", " + acceptMaxResponseBytesHeader + ", " +
+	ClientProtocolVersionsHeader
 
 // addCapabilityHeaders writes the advertised capability headers (when
 // configured) on every response. On OPTIONS responses an additional
@@ -420,7 +421,7 @@ func (h *HttpServer) addCorsHeaders(w http.ResponseWriter, r *http.Request, isOp
 			maxResponseBytesHeader, maxExternalizedResponseBytesHeader, externalizationEnabledHeader,
 			supportedEncodingsHeader, acceptMaxResponseBytesSupportHeader,
 			stickyEnabledHeader, stickyDefaultTTLHeader, stickyEchoHeadersHeader,
-			stickySessionHeader, stickySessionCloseHeader,
+			stickySessionHeader, stickySessionCloseHeader, ProtocolVersionsHeader,
 		}
 		// Exposed only when actually emitted, mirroring the header itself.
 		// Each condition is the one addCapabilityHeaders advertises under, so
@@ -1429,6 +1430,13 @@ func (h *HttpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// precisely the responses someone later grep's the log for.
 	requestID := resolveRequestID(r)
 	w.Header().Set(requestIDHeader, requestID)
+	// Protocol version negotiation (PROTOCOL_VERSIONS_V1 §4.1): every
+	// response -- 401, 404, 413, 5xx, HEAD /health and preflights included --
+	// names the window of every protocol this server gates, so a client learns
+	// what to speak from whatever it sees first. Emitted even when empty:
+	// present-but-empty is "negotiates, gates nothing", absent is a server
+	// released before negotiation.
+	w.Header().Set(ProtocolVersionsHeader, h.server.ProtocolVersions())
 
 	// Parse the client limit in the matched RPC handler, after authentication.
 	// The request-local budget cell starts with configured limits and is updated

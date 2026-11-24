@@ -86,6 +86,8 @@ type httpClientConfig struct {
 	// protocol is the routing key stamped on every request.
 	protocol            string
 	protocolVersion     string
+	protocolRange       string
+	negotiation         *EndpointNegotiation
 	maxRequest          int64
 	maxEncoded          int64
 	maxDecoded          int64
@@ -198,6 +200,37 @@ func WithClientProtocolVersion(version string) HttpClientOption {
 	}
 }
 
+// WithClientProtocolVersionRange declares the window of versions the client
+// supports ("3.4-3.5", PROTOCOL_VERSIONS_V1 §4.2), widening it downward from
+// [WithClientProtocolVersion], which stays the newest version spoken: the
+// range's MAX must equal its major.minor. The client negotiates per §6: it
+// speaks the highest version inside both its window and the server's
+// advertised one. Default: exactly the declared version's major.minor.
+func WithClientProtocolVersionRange(versionRange string) HttpClientOption {
+	return func(cfg *httpClientConfig) error {
+		if versionRange != "" {
+			if _, err := ParseVersionRange(versionRange); err != nil {
+				return err
+			}
+		}
+		cfg.protocolRange = versionRange
+		return nil
+	}
+}
+
+// WithClientNegotiation shares one endpoint's negotiation state between
+// clients of the same worker (one per protocol bound there, say), so a window
+// one of them learns is used by all. Default: a state of the client's own.
+func WithClientNegotiation(n *EndpointNegotiation) HttpClientOption {
+	return func(cfg *httpClientConfig) error {
+		if n == nil {
+			return errors.New("vgirpc: client negotiation state must not be nil")
+		}
+		cfg.negotiation = n
+		return nil
+	}
+}
+
 // WithClientResponseLimits independently caps encoded network bytes and the
 // decoded response body. Both limits must be positive. The smaller limit also
 // bounds the accepted response budget advertised on the wire; it must remain
@@ -289,6 +322,8 @@ type HttpClient struct {
 	// protocol the server happened to register first.
 	protocol               string
 	protocolVersion        string
+	versioning             *ClientVersioning
+	negotiation            *EndpointNegotiation
 	maxRequest             int64
 	maxEncoded             int64
 	maxDecoded             int64
@@ -380,6 +415,14 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 	if cfg.protocol == "" {
 		return nil, errors.New("vgirpc: a client protocol is required; pass WithClientProtocol")
 	}
+	versioning, err := newClientVersioning(cfg.protocol, cfg.protocolVersion, cfg.protocolRange)
+	if err != nil {
+		return nil, err
+	}
+	negotiation := cfg.negotiation
+	if negotiation == nil {
+		negotiation = NewEndpointNegotiation(u.String())
+	}
 	if cfg.tcpProxy != "" {
 		if cfg.customHTTPClient {
 			return nil, errors.New("vgirpc: WithClientTCPProxy cannot be combined with WithClientHTTPClient")
@@ -397,6 +440,8 @@ func NewHttpClient(baseURL string, options ...HttpClientOption) (*HttpClient, er
 		headers:             cfg.headers.Clone(),
 		protocol:            cfg.protocol,
 		protocolVersion:     cfg.protocolVersion,
+		versioning:          versioning,
+		negotiation:         negotiation,
 		maxRequest:          cfg.maxRequest,
 		maxEncoded:          cfg.maxEncoded,
 		maxDecoded:          cfg.maxDecoded,
@@ -446,6 +491,27 @@ func (c *HttpClient) callUnaryOn(
 	params arrow.RecordBatch,
 	expected *arrow.Schema,
 ) (*ClientBatch, error) {
+	result, err := c.callUnaryOnce(ctx, protocol, method, params, expected)
+	// Protocol version negotiation (PROTOCOL_VERSIONS_V1 §6): learn from a
+	// version refusal, and re-send ONCE at the renegotiated version only when
+	// the call is idempotent -- reflection. Every other refused call surfaces
+	// the refusal; the next call speaks the learned version.
+	if err != nil && c.negotiation != nil && IsVersionRefusal(err) {
+		c.negotiation.ObserveRefusal(protocol, err)
+		if isRetrySafeProtocol(protocol) {
+			return c.callUnaryOnce(ctx, protocol, method, params, expected)
+		}
+	}
+	return result, err
+}
+
+func (c *HttpClient) callUnaryOnce(
+	ctx context.Context,
+	protocol string,
+	method string,
+	params arrow.RecordBatch,
+	expected *arrow.Schema,
+) (*ClientBatch, error) {
 	body, err := c.initialBodyFor(protocol, method, params)
 	if err != nil {
 		return nil, err
@@ -464,6 +530,9 @@ func (c *HttpClient) callUnaryOn(
 	}
 	result := parsed.batches[0]
 	parsed.batches[0] = nil
+	if protocol == ReflectionProtocolName && result != nil && c.negotiation != nil {
+		c.negotiation.ObserveMetadata(result.Metadata)
+	}
 	return result, nil
 }
 
@@ -506,6 +575,11 @@ func (c *HttpClient) openStream(
 	}
 	response, err := c.post(ctx, c.rpcPath(method, "/init"), body)
 	if err != nil {
+		// A refused stream init teaches the endpoint its windows; it is never
+		// retried (PROTOCOL_VERSIONS_V1 §6).
+		if c.negotiation != nil && IsVersionRefusal(err) {
+			c.negotiation.ObserveRefusal(c.protocol, err)
+		}
 		return nil, err
 	}
 	raw := bytes.NewReader(response.body)
@@ -618,10 +692,21 @@ func (c *HttpClient) initialBodyFor(protocol, method string, params arrow.Record
 	metadata[MetaRequestVersion] = ProtocolVersion
 	metadata[MetaRequestID] = requestID
 	switch {
+	case c.versioning != nil && protocol == c.versioning.Protocol && c.negotiation != nil:
+		// The negotiated major.minor plus this client's patch; fails before
+		// sending once the endpoint is known to share no version with us.
+		wire, err := c.negotiation.WireVersion(c.versioning)
+		if err != nil {
+			return nil, err
+		}
+		metadata[MetaProtocolVersion] = wire
 	case c.protocolVersion != "":
 		metadata[MetaProtocolVersion] = c.protocolVersion
 	case callerProtocolVersion != "":
 		metadata[MetaProtocolVersion] = callerProtocolVersion
+	}
+	if c.versioning != nil {
+		metadata[MetaClientProtocolVersions] = c.versioning.Advertised()
 	}
 	return encodeClientBatch(params, metadata, c.maxRequest)
 }
@@ -731,6 +816,9 @@ func (c *HttpClient) postOnce(ctx context.Context, endpoint string, body []byte)
 	req.Header.Set(customAcceptEncodingHeader, "zstd, gzip, identity")
 	req.Header.Set(acceptEncodingHeader, "zstd, gzip, identity")
 	req.Header.Set(acceptMaxResponseBytesHeader, fmt.Sprintf("%d", c.acceptedMaxResponse))
+	if c.versioning != nil {
+		req.Header.Set(ClientProtocolVersionsHeader, c.versioning.Advertised())
+	}
 	resp, err := c.inner.Do(req)
 	if err != nil {
 		var irohErr *IrohTransportError
@@ -741,6 +829,11 @@ func (c *HttpClient) postOnce(ctx context.Context, endpoint string, body []byte)
 	}
 	defer resp.Body.Close()
 	c.observeSessionHeaders(resp.Header)
+	// Every response's advertisement is cached per endpoint; a present header
+	// replaces what was learned (PROTOCOL_VERSIONS_V1 §6).
+	if c.negotiation != nil {
+		c.negotiation.ObserveHeader(resp.Header)
+	}
 	caps, err := ParseHTTPServerCapabilities(resp.Header)
 	if err != nil {
 		return clientHTTPResponse{}, &RpcError{Type: "ProtocolError", Message: err.Error()}
@@ -1350,6 +1443,7 @@ func stripClientControlMetadata(metadata map[string]string) {
 		MetaRequestVersion,
 		MetaRequestID,
 		MetaProtocolVersion,
+		MetaClientProtocolVersions,
 		MetaStreamState,
 		MetaCallState,
 		MetaCancel,
@@ -1484,3 +1578,18 @@ func validateClientContentEncoding(header string) error {
 	}
 	return nil
 }
+
+// newClientVersioning is the client's versioning for protocol, or nil when it
+// declares no version.
+func newClientVersioning(protocol, version, versionRange string) (*ClientVersioning, error) {
+	if version == "" {
+		if versionRange != "" {
+			return nil, errors.New("vgirpc: a protocol version range requires a protocol version")
+		}
+		return nil, nil
+	}
+	return NewClientVersioning(protocol, version, versionRange)
+}
+
+// Negotiation returns the endpoint negotiation state this client uses.
+func (c *HttpClient) Negotiation() *EndpointNegotiation { return c.negotiation }

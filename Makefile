@@ -73,7 +73,7 @@ endif
 .PHONY: build lint go-test s3-compat test coverage leakcheck race docs docs-verify venv clean \
 	conformance-worker conformance-worker-cover benchmark-worker \
 	ci staticcheck-install conformance-runner conformance-access-log cross-port \
-	conformance-client-driver test-client test-client-python hosted-reverse
+	conformance-client-driver conformance-negotiating-client test-client test-client-python hosted-reverse
 
 # --- Build -----------------------------------------------------------------
 
@@ -99,6 +99,11 @@ conformance-worker-cover:
 # suite drive *this port's client*. PHONY for the same reason the worker is.
 conformance-client-driver:
 	go build -o conformance-client-driver ./conformance/cmd/vgi-rpc-conformance-client-driver
+
+# The conformance_negotiating_client hook (protocol version negotiation, the Go
+# HTTP client against the suite's scripted server). PHONY like the others.
+conformance-negotiating-client:
+	go build -o conformance-negotiating-client ./conformance/cmd/vgi-rpc-negotiating-client
 
 benchmark-worker:
 	go build -o benchmark-worker ./benchmark/cmd/vgi-rpc-benchmark-go
@@ -165,7 +170,7 @@ go-test:
 s3-compat:
 	scripts/s3-compat-lane.sh
 
-test: go-test conformance-worker $(PYTHON_BOOTSTRAP)
+test: go-test conformance-worker conformance-negotiating-client $(PYTHON_BOOTSTRAP)
 	$(PYTHON) -m pytest test_go_conformance.py -v $(PYTEST_XDIST)
 
 # --- Client role -----------------------------------------------------------
@@ -330,5 +335,5 @@ docs:
 # --- Clean -----------------------------------------------------------------
 
 clean:
-	rm -f conformance-worker conformance-client-driver benchmark-worker $(ACCESS_LOG)
+	rm -f conformance-worker conformance-client-driver conformance-negotiating-client benchmark-worker $(ACCESS_LOG)
 	rm -rf $(COVDIR) coverage-go.txt

@@ -144,15 +144,10 @@ func (h *HttpServer) handleStreamInit(w http.ResponseWriter, r *http.Request) {
 	// Application-protocol-version gate, against the binding that owns the
 	// resolved method. Same as the HTTP unary path — stream init dispatches
 	// directly here without going through server.serveOne.
-	if binding.VersionSet && !binding.VersionExempt {
-		clientVersion, present := req.Metadata[MetaProtocolVersion]
-		if pverr := gateVersion(
-			binding.Name, binding.Version, binding.VersionParts, clientVersion, present,
-		); pverr != nil {
-			handlerErr = pverr
-			h.writeHttpError(w, http.StatusBadRequest, pverr, nil)
-			return
-		}
+	if pverr := h.server.gate(binding, req.Metadata); pverr != nil {
+		handlerErr = pverr
+		h.writeHttpError(w, http.StatusBadRequest, pverr, nil)
+		return
 	}
 
 	params, err := deserializeParams(req.Batch, info.ParamsType)

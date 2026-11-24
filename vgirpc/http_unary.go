@@ -138,18 +138,13 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	// version", so gating a secondary against the primary would reject correct
 	// callers and name the wrong protocol when it did. A version-exempt binding
 	// (reflection) is skipped: it is what a mismatched client calls to learn
-	// what mismatched. Mismatch surfaces as a 400 EXCEPTION batch carrying
-	// vgi_rpc.error_kind = "protocol_version_mismatch" with the directional
-	// message intact.
-	if binding.VersionSet && !binding.VersionExempt {
-		clientVersion, present := req.Metadata[MetaProtocolVersion]
-		if pverr := gateVersion(
-			binding.Name, binding.Version, binding.VersionParts, clientVersion, present,
-		); pverr != nil {
-			handlerErr = pverr
-			h.writeHttpError(w, http.StatusBadRequest, pverr, info.ResultSchema)
-			return
-		}
+	// what mismatched. A version outside the window surfaces as a 400
+	// EXCEPTION batch carrying vgi_rpc.error_kind =
+	// "protocol_version_unsupported" naming both windows.
+	if pverr := h.server.gate(binding, req.Metadata); pverr != nil {
+		handlerErr = pverr
+		h.writeHttpError(w, http.StatusBadRequest, pverr, info.ResultSchema)
+		return
 	}
 
 	params, err := deserializeParams(req.Batch, info.ParamsType)
@@ -308,6 +303,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 	// Use a closure so the final owner is released. A deferred method call
 	// captures its receiver immediately; that would retain the original batch
 	// here, double-release it after replacement, and leak the pointer wrapper.
+	resultBatch = info.withResultMetadata(resultBatch)
 	defer func() { resultBatch.Release() }()
 
 	// Externalize the result batch if it exceeds the configured threshold.
@@ -323,7 +319,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 			h.writeUnaryCapError(w, info, req.RequestID, logs, overshoot)
 			return
 		}
-		extBatch, extMeta, rawBytes, extErr := externalizeBatchCtx(ctx, resultBatch, arrow.Metadata{}, h.server.externalConfig)
+		extBatch, extMeta, rawBytes, extErr := externalizeBatchCtx(ctx, resultBatch, info.resultMetadata(), h.server.externalConfig)
 		if extErr != nil {
 			slog.Error("failed to externalize unary result", "method", info.Name, "err", extErr)
 		} else if extBatch != resultBatch {
@@ -357,7 +353,7 @@ func (h *HttpServer) handleUnary(w http.ResponseWriter, r *http.Request) {
 		h.server.externalConfig != nil && resultBatch.NumRows() > 0 {
 		if raw, serErr := serializeBatchAsIPC(resultBatch, nil); serErr == nil &&
 			(h.maxExternalizedResponseBytes <= 0 || int64(len(raw)) <= h.maxExternalizedResponseBytes) {
-			extBatch, extMeta, rawBytes, extErr := externalizeBatchCtxMode(ctx, resultBatch, arrow.Metadata{}, h.server.externalConfig, true)
+			extBatch, extMeta, rawBytes, extErr := externalizeBatchCtxMode(ctx, resultBatch, info.resultMetadata(), h.server.externalConfig, true)
 			if extErr != nil {
 				slog.Error("failed to rescue oversized unary response via externalization", "method", info.Name, "err", extErr)
 			} else if extBatch != resultBatch {

@@ -50,7 +50,7 @@ func TestEveryKindDeclaresItsCode(t *testing.T) {
 		{&MethodNotImplementedError{Method: "m"}, "method_not_implemented", CodeUnimplemented},
 		{&ProtocolNotSupportedError{}, "protocol_not_supported", CodeUnimplemented},
 		{&ProtocolNotSpecifiedError{}, "protocol_not_specified", CodeInvalidArgument},
-		{&ProtocolVersionError{}, "protocol_version_mismatch", CodeFailedPrecondition},
+		{&ProtocolVersionError{}, "protocol_version_unsupported", CodeFailedPrecondition},
 		{&SessionLostError{}, "session_lost", CodeAborted},
 		{&ServerDrainingError{}, "server_draining", CodeUnavailable},
 		{&IdentityUnavailableError{}, "identity_unavailable", CodeUnavailable},
@@ -325,7 +325,8 @@ func TestOversizedDetailsAreDroppedFromBoth(t *testing.T) {
 }
 
 func TestVersionMismatchNamesTheProtocolInAPrecondition(t *testing.T) {
-	err := gateVersion("ConformanceService", "2.0.0", [3]int{2, 0, 0}, "1.0.0", true)
+	err := gateVersion("ConformanceService", VersionRange{Min: MajorMinor{2, 0}, Max: MajorMinor{2, 0}}, "1.0.0", true,
+		"", "ConformanceService=2.0-2.0")
 	client := rpcErrorFromMetadata(decodeExceptionMetadata(t, err, false))
 	pf, ok := client.PreconditionFailure()
 	if !ok || len(pf.Violations) != 1 || pf.Violations[0].Type != "protocol_version" ||

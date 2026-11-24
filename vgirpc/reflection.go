@@ -172,6 +172,17 @@ func RegisterReflection(s *Server) error {
 		return s.describeProtocol(p.Protocol)
 	})
 
+	// Every reflection result carries the server's windows
+	// (vgi_rpc.protocol_versions), present even when empty, so a client on
+	// any transport learns them from the call it may make whatever version it
+	// speaks (PROTOCOL_VERSIONS_V1 §4.1).
+	advertise := func() map[string]string {
+		return map[string]string{MetaProtocolVersions: s.ProtocolVersions()}
+	}
+	for _, m := range sub.methods {
+		m.ResultMetadata = advertise
+	}
+
 	binding := &protocolBinding{
 		Name:    ReflectionProtocolName,
 		Methods: sub.methods,

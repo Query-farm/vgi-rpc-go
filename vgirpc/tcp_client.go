@@ -29,6 +29,8 @@ type tcpClientConfig struct {
 	// wire protocol even against a single-protocol server.
 	protocol        string
 	protocolVersion string
+	protocolRange   string
+	negotiation     *EndpointNegotiation
 	maxRequest      int64
 	maxResponse     int64
 	external        *ExternalLocationConfig
@@ -95,6 +97,34 @@ func WithTcpClientProtocolVersion(version string) TcpClientOption {
 	}
 }
 
+// WithTcpClientProtocolVersionRange declares the window of versions the
+// client supports; see [WithClientProtocolVersionRange]. A client whose window
+// is wider than one version reads the server's windows from reflection
+// (list_protocols) before its first call (PROTOCOL_VERSIONS_V1 §6).
+func WithTcpClientProtocolVersionRange(versionRange string) TcpClientOption {
+	return func(config *tcpClientConfig) error {
+		if versionRange != "" {
+			if _, err := ParseVersionRange(versionRange); err != nil {
+				return err
+			}
+		}
+		config.protocolRange = versionRange
+		return nil
+	}
+}
+
+// WithTcpClientNegotiation shares an endpoint's negotiation state; see
+// [WithClientNegotiation].
+func WithTcpClientNegotiation(n *EndpointNegotiation) TcpClientOption {
+	return func(config *tcpClientConfig) error {
+		if n == nil {
+			return errors.New("vgirpc: client negotiation state must not be nil")
+		}
+		config.negotiation = n
+		return nil
+	}
+}
+
 // WithTcpClientLimits sets mandatory encoded request and response bounds.
 func WithTcpClientLimits(maxRequestBytes, maxResponseBytes int64) TcpClientOption {
 	return func(config *tcpClientConfig) error {
@@ -125,6 +155,8 @@ type TcpClient struct {
 	codec    *HttpClient
 	closed   bool
 	poisoned error
+	// probed is set once the negotiation probe has run (or was not needed).
+	probed bool
 }
 
 // NewTcpClient connects to a raw VGI TCP worker. The same context bounds direct
@@ -148,6 +180,9 @@ func NewTcpClient(ctx context.Context, host string, port int, options ...TcpClie
 				return nil, err
 			}
 		}
+	}
+	if err := checkTcpVersioning(config); err != nil {
+		return nil, err
 	}
 	dialCtx := ctx
 	if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > config.connectTimeout {
@@ -205,6 +240,9 @@ func NewUnixClient(ctx context.Context, path string, options ...TcpClientOption)
 			}
 		}
 	}
+	if err := checkTcpVersioning(config); err != nil {
+		return nil, err
+	}
 	if config.proxyConfigured {
 		return nil, errors.New("vgirpc: Unix client does not support a proxy")
 	}
@@ -222,17 +260,69 @@ func NewUnixClient(ctx context.Context, path string, options ...TcpClientOption)
 }
 
 func newTcpClientFromConn(conn net.Conn, config tcpClientConfig) *TcpClient {
+	// Validated by WithTcpClientProtocolVersionRange and checkTcpVersioning;
+	// a combination that still fails declares no version.
+	versioning, _ := newClientVersioning(config.protocol, config.protocolVersion, config.protocolRange)
+	negotiation := config.negotiation
+	if negotiation == nil {
+		endpoint := ""
+		if addr := conn.RemoteAddr(); addr != nil {
+			endpoint = addr.Network() + ":" + addr.String()
+		}
+		negotiation = NewEndpointNegotiation(endpoint)
+	}
 	return &TcpClient{
 		conn: conn,
 		codec: &HttpClient{
 			external:        config.external,
 			protocol:        config.protocol,
 			protocolVersion: config.protocolVersion,
+			versioning:      versioning,
+			negotiation:     negotiation,
 			maxRequest:      config.maxRequest,
 			maxDecoded:      config.maxResponse,
 			onLog:           config.onLog,
 		},
 	}
+}
+
+// checkTcpVersioning refuses an inconsistent version declaration before
+// dialing, where the message can name the fix.
+func checkTcpVersioning(config tcpClientConfig) error {
+	_, err := newClientVersioning(config.protocol, config.protocolVersion, config.protocolRange)
+	return err
+}
+
+// Negotiation returns the endpoint negotiation state this client uses.
+func (client *TcpClient) Negotiation() *EndpointNegotiation { return client.codec.negotiation }
+
+// probeLocked reads the server's windows from reflection before the first
+// application call, when the client has a choice to make: its own window is
+// wider than one version and nothing has been learned yet
+// (PROTOCOL_VERSIONS_V1 §6, "Decisions" 11). A single-version client sends its
+// version as before -- no extra round trip -- and relies on the refusal. A
+// server without reflection, or a failed probe, leaves the endpoint unlearned.
+// Called with client.mu held.
+func (client *TcpClient) probeLocked(ctx context.Context) error {
+	if client.probed {
+		return nil
+	}
+	client.probed = true
+	v := client.codec.versioning
+	if v == nil || v.Range.Min == v.Range.Max || client.codec.negotiation.HasAdvertisement() {
+		return nil
+	}
+	params := emptyBatch(arrow.NewSchema(nil, nil))
+	defer params.Release()
+	result, err := client.callUnaryLocked(ctx, ReflectionProtocolName, "list_protocols", params, nil)
+	if err != nil {
+		if client.closed {
+			return err
+		}
+		return nil
+	}
+	result.Release()
+	return nil
 }
 
 // CallUnary performs one raw unary RPC. The caller owns the returned batch and
@@ -261,14 +351,35 @@ func (client *TcpClient) callUnaryOn(ctx context.Context, protocol, method strin
 	}
 	client.mu.Lock()
 	defer client.mu.Unlock()
+	if ctx == nil {
+		return nil, errors.New("vgirpc: TCP call context must not be nil")
+	}
+	if protocol != ReflectionProtocolName {
+		if err := client.probeLocked(ctx); err != nil {
+			return nil, err
+		}
+	}
+	result, err := client.callUnaryLocked(ctx, protocol, method, params, expected)
+	// Learn from a version refusal and, for reflection only, re-send once at
+	// the renegotiated version (PROTOCOL_VERSIONS_V1 §6).
+	if err != nil && !client.closed && IsVersionRefusal(err) {
+		client.codec.negotiation.ObserveRefusal(protocol, err)
+		if isRetrySafeProtocol(protocol) {
+			return client.callUnaryLocked(ctx, protocol, method, params, expected)
+		}
+	}
+	return result, err
+}
+
+// callUnaryLocked performs one unary exchange on the connection. Called with
+// client.mu held.
+func (client *TcpClient) callUnaryLocked(ctx context.Context, protocol, method string, params arrow.RecordBatch,
+	expected *arrow.Schema) (*ClientBatch, error) {
 	if client.closed {
 		if client.poisoned != nil {
 			return nil, fmt.Errorf("vgirpc: TCP client is closed after a failed call: %w", client.poisoned)
 		}
 		return nil, errors.New("vgirpc: TCP client is closed")
-	}
-	if ctx == nil {
-		return nil, errors.New("vgirpc: TCP call context must not be nil")
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, contextualIrohError(client.conn, err, IrohStageCancel, IrohNotSent)
@@ -321,6 +432,10 @@ func (client *TcpClient) callUnaryOn(ctx context.Context, protocol, method strin
 	}
 	result := parsed.batches[0]
 	parsed.batches[0] = nil
+	// Reflection results carry the server's windows on every transport.
+	if protocol == ReflectionProtocolName && result != nil {
+		client.codec.negotiation.ObserveMetadata(result.Metadata)
+	}
 	return result, nil
 }
 
@@ -365,6 +480,9 @@ func (client *TcpClient) openStream(ctx context.Context, method string, params a
 	if err := ctx.Err(); err != nil {
 		return nil, contextualIrohError(client.conn, err, IrohStageCancel, IrohNotSent)
 	}
+	if err := client.probeLocked(ctx); err != nil {
+		return nil, err
+	}
 	body, err := client.codec.initialBody(method, params)
 	if err != nil {
 		return nil, err
@@ -386,7 +504,12 @@ func (client *TcpClient) openStream(ctx context.Context, method string, params a
 			&cappedTCPReader{reader: client.conn, limit: client.codec.maxDecoded}, schemas.Header, true)
 		if parseErr != nil {
 			// Same rule as the unary path: a stream the server refused to
-			// open, reported in full, leaves the connection reusable.
+			// open, reported in full, leaves the connection reusable. A
+			// version refusal teaches the endpoint; stream inits are never
+			// retried.
+			if IsVersionRefusal(parseErr) {
+				client.codec.negotiation.ObserveRefusal(client.codec.protocol, parseErr)
+			}
 			if drained {
 				return nil, parseErr
 			}

@@ -284,19 +284,14 @@ func (s *Server) serveOne(ctx context.Context, r io.Reader, w io.Writer, shmConn
 	// reject correct callers of a secondary and name the wrong protocol when it
 	// did. A version-exempt binding (reflection) is skipped: it is what a
 	// mismatched client calls to learn what mismatched.
-	if binding.VersionSet && !binding.VersionExempt {
-		clientVersion, present := req.Metadata[MetaProtocolVersion]
-		if pverr := gateVersion(
-			binding.Name, binding.Version, binding.VersionParts, clientVersion, present,
-		); pverr != nil {
-			errSchema := info.ResultSchema
-			if errSchema == nil || methodTypeString(info.Type) != DispatchMethodUnary {
-				errSchema = arrow.NewSchema(nil, nil)
-			}
-			s.logIPCWriteErr("error-response", req.Method,
-				writeErrorResponse(w, errSchema, pverr, s.serverID, req.RequestID, s.traceFor(req.Method)))
-			return nil
+	if pverr := s.gate(binding, req.Metadata); pverr != nil {
+		errSchema := info.ResultSchema
+		if errSchema == nil || methodTypeString(info.Type) != DispatchMethodUnary {
+			errSchema = arrow.NewSchema(nil, nil)
 		}
+		s.logIPCWriteErr("error-response", req.Method,
+			writeErrorResponse(w, errSchema, pverr, s.serverID, req.RequestID, s.traceFor(req.Method)))
+		return nil
 	}
 
 	var hookToken HookToken
@@ -427,8 +422,8 @@ func (s *Server) serveTransportOptions(w io.Writer, allowShm bool) error {
 	if shmSupported && allowShm {
 		shmVal = "true"
 	}
-	keys := []string{MetaTransportShm, MetaRequestVersion}
-	vals := []string{shmVal, ProtocolVersion}
+	keys := []string{MetaTransportShm, MetaRequestVersion, MetaProtocolVersions}
+	vals := []string{shmVal, ProtocolVersion, s.ProtocolVersions()}
 	if s.serverID != "" {
 		keys = append(keys, MetaServerID)
 		vals = append(vals, s.serverID)

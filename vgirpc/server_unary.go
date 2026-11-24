@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"reflect"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
@@ -129,11 +128,12 @@ func (s *Server) serveUnary(ctx context.Context, w io.Writer, req *Request, info
 	// Use a closure so the final owner is released. A deferred method call
 	// captures its receiver immediately; that would retain the original batch
 	// here, double-release it after replacement, and leak the pointer wrapper.
+	resultBatch = info.withResultMetadata(resultBatch)
 	defer func() { resultBatch.Release() }()
 
 	// Maybe externalize large result batch
 	if s.externalConfig != nil {
-		extBatch, extMeta, extErr := maybeExternalizeBatchCtx(ctx, resultBatch, arrow.Metadata{}, s.externalConfig)
+		extBatch, extMeta, extErr := maybeExternalizeBatchCtx(ctx, resultBatch, info.resultMetadata(), s.externalConfig)
 		if extErr != nil {
 			slog.Error("failed to externalize result batch", "err", extErr)
 		} else if extBatch != resultBatch {

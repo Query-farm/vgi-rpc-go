@@ -102,9 +102,9 @@ const (
 	// MetaProtocolVersion carries the application protocol surface version
 	// declared by the Protocol class on every request batch. Format:
 	// canonical semver MAJOR.MINOR.PATCH (see [semverRegex]). The server
-	// enforces an exact major+minor match at the dispatch boundary; patch
-	// is ignored. Mismatches surface as ProtocolVersionError with a
-	// directional message. Distinct from [MetaRequestVersion] (wire framing
+	// accepts a major.minor inside the protocol's advertised window
+	// (PROTOCOL_VERSIONS_V1) at the dispatch boundary; patch is ignored. A
+	// refusal surfaces as ProtocolVersionError naming both windows. Distinct from [MetaRequestVersion] (wire framing
 	// version, currently "1") — this layer versions the *protocol surface*.
 	MetaProtocolVersion = "vgi_rpc.protocol_version"
 

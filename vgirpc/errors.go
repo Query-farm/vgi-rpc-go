@@ -210,19 +210,31 @@ func (e *MethodNotImplementedError) ErrorType() string {
 	return "AttributeError"
 }
 
-// ProtocolVersionError surfaces when the client's declared
-// “vgi_rpc.protocol_version“ is incompatible with the server's
-// (or absent / malformed). The framework writes
-// “vgi_rpc.error_kind = "protocol_version_mismatch"“ and the
-// message text is directional — it tells the reader which side to
-// upgrade. Mirrors Python's ProtocolVersionError (subclass of
-// VersionError). Wraps as HTTP 400 on the HTTP transport.
+// ProtocolVersionError is the refusal of a request whose declared
+// “vgi_rpc.protocol_version“ is absent, malformed, or outside the server's
+// supported window for its protocol (PROTOCOL_VERSIONS_V1 §4.3). The
+// framework writes “vgi_rpc.error_kind = "protocol_version_unsupported"“
+// (code FAILED_PRECONDITION) and a message naming both sides' windows and
+// which side to upgrade. Mirrors Python's ProtocolVersionError. Wraps as HTTP
+// 400 on the HTTP transport.
+//
+// Servers released before negotiation sent “protocol_version_mismatch“;
+// clients still recognise it ([IsVersionRefusal]).
 type ProtocolVersionError struct {
 	Message string
-	// Protocol names the gated protocol. With several bindings, "Server:
-	// 2.0.0" alone does not say which server, so the PreconditionFailure
-	// detail names it.
+	// Protocol names the gated protocol. With several bindings, a window
+	// alone does not say which server, so the PreconditionFailure detail
+	// names it.
 	Protocol string
+	// ClientVersion is what the client declared, or "" when it declared none.
+	ClientVersion string
+	// ServerVersion is the server's window for Protocol ("MIN-MAX").
+	ServerVersion string
+	// ServerVersions is the server's full advertisement, carried in an
+	// ErrorInfo detail and as the vgi_rpc.protocol_versions error-batch key.
+	ServerVersions string
+	// ClientVersions is the client's own advertised windows, when it sent them.
+	ClientVersions string
 }
 
 func (e *ProtocolVersionError) Error() string {
@@ -230,22 +242,58 @@ func (e *ProtocolVersionError) Error() string {
 }
 
 // ErrorKind returns the wire-stable kind for ProtocolVersionError.
-func (e *ProtocolVersionError) ErrorKind() string { return "protocol_version_mismatch" }
+func (e *ProtocolVersionError) ErrorKind() string { return ErrorKindProtocolVersionUnsupported }
 
 // ErrorCode returns FAILED_PRECONDITION.
 func (e *ProtocolVersionError) ErrorCode() Code { return CodeFailedPrecondition }
 
-// ErrorDetails returns one PreconditionFailure naming the gated protocol.
+// ErrorDetails returns a PreconditionFailure naming the gated protocol and an
+// ErrorInfo carrying both sides' windows.
 func (e *ProtocolVersionError) ErrorDetails() []ErrorDetail {
-	return []ErrorDetail{PreconditionFailure{Violations: []PreconditionViolation{{
-		Type:        "protocol_version",
-		Subject:     e.Protocol,
-		Description: "the client's protocol_version is incompatible with the server's",
-	}}}}
+	var details []ErrorDetail
+	if e.Protocol != "" {
+		client := e.ClientVersion
+		if client == "" {
+			client = "<none>"
+		}
+		server := e.ServerVersion
+		if server == "" {
+			server = "<unknown>"
+		}
+		details = append(details, PreconditionFailure{Violations: []PreconditionViolation{{
+			Type:        "protocol_version",
+			Subject:     e.Protocol,
+			Description: "client declares " + client + ", server supports " + server,
+		}}})
+	}
+	if e.ServerVersions != "" {
+		md := map[string]string{MetaProtocolVersions: e.ServerVersions}
+		if e.ClientVersions != "" {
+			md[MetaClientProtocolVersions] = e.ClientVersions
+		}
+		details = append(details, ErrorInfo{Metadata: md})
+	}
+	return details
+}
+
+// ErrorMetadata is extra custom metadata for the error batch: the server's
+// windows, when known.
+func (e *ProtocolVersionError) ErrorMetadata() map[string]string {
+	if e.ServerVersions == "" {
+		return nil
+	}
+	return map[string]string{MetaProtocolVersions: e.ServerVersions}
 }
 
 // ErrorType is the exception type name surfaced to Python clients.
 func (e *ProtocolVersionError) ErrorType() string { return "ProtocolVersionError" }
+
+// errorMetadataCarrier is satisfied by errors that carry machine-readable
+// error-batch metadata of their own (ProtocolVersionError's
+// vgi_rpc.protocol_versions). The framework's own keys win on a collision.
+type errorMetadataCarrier interface {
+	ErrorMetadata() map[string]string
+}
 
 // SessionLostError surfaces from the sticky session machinery when a
 // presented VGI-Session token cannot be resolved to a live registry

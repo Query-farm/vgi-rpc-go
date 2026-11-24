@@ -6,8 +6,11 @@ package vgirpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"sort"
 	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -263,6 +266,10 @@ func writeErrorBatch(w *ipc.Writer, schema *arrow.Schema, err error, serverID, r
 		keys = append(keys, MetaErrorDetails)
 		vals = append(vals, string(model.details))
 	}
+	var carrier errorMetadataCarrier
+	if errors.As(err, &carrier) {
+		keys, vals = appendExtraMetadata(keys, vals, carrier.ErrorMetadata())
+	}
 
 	meta := arrow.NewMetadata(keys, vals)
 	batch := emptyBatch(schema)
@@ -272,6 +279,27 @@ func writeErrorBatch(w *ipc.Writer, schema *arrow.Schema, err error, serverID, r
 	defer batchWithMeta.Release()
 
 	return w.Write(batchWithMeta)
+}
+
+// appendExtraMetadata adds extra's keys that are not already present, in
+// sorted order so the wire bytes are deterministic.
+func appendExtraMetadata(keys, vals []string, extra map[string]string) ([]string, []string) {
+	if len(extra) == 0 {
+		return keys, vals
+	}
+	names := make([]string, 0, len(extra))
+	for k := range extra {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	for _, k := range names {
+		if slices.Contains(keys, k) {
+			continue
+		}
+		keys = append(keys, k)
+		vals = append(vals, extra[k])
+	}
+	return keys, vals
 }
 
 // WriteUnaryResponse writes a complete IPC stream containing log batches followed

@@ -76,6 +76,11 @@ type protocolBinding struct {
 	// *what* mismatched -- gating it would deny the client the diagnosis it
 	// came for.
 	VersionExempt bool
+	// DeclaredRange widens the accepted window downward from Version's
+	// major.minor ([Server.SetProtocolVersionRange]); nil means exactly
+	// Version's major.minor. A server-level override
+	// ([Server.SetProtocolVersionRanges]) takes precedence.
+	DeclaredRange *VersionRange
 	// Hash is this protocol's canonical fingerprint.
 	Hash string
 	// Impl is the object implementing this protocol's methods. A single object
@@ -143,11 +148,12 @@ func (e *ProtocolNotSupportedError) ErrorCode() Code { return CodeUnimplemented 
 func (s *Server) bindings() map[string]*protocolBinding {
 	out := make(map[string]*protocolBinding, 1+len(s.extraBindings))
 	out[s.primaryProtocolName()] = &protocolBinding{
-		Name:         s.primaryProtocolName(),
-		Methods:      s.methods,
-		Version:      s.protocolVersion,
-		VersionParts: s.protocolVersionParts,
-		VersionSet:   s.protocolVersionSet,
+		Name:          s.primaryProtocolName(),
+		Methods:       s.methods,
+		Version:       s.protocolVersion,
+		VersionParts:  s.protocolVersionParts,
+		VersionSet:    s.protocolVersionSet,
+		DeclaredRange: s.protocolVersionRange,
 		// The canonical hash, not the legacy byte-based one: ProtocolHash()
 		// still digests serialized IPC, which is not stable across Arrow
 		// implementations and so cannot be compared with another port.
@@ -253,13 +259,14 @@ func (s *Server) AddProtocol(protocol *Server) error {
 		impl = protocol
 	}
 	return s.addBinding(&protocolBinding{
-		Name:         name,
-		Methods:      protocol.methods,
-		Version:      protocol.protocolVersion,
-		VersionParts: protocol.protocolVersionParts,
-		VersionSet:   protocol.protocolVersionSet,
-		Hash:         hash,
-		Impl:         impl,
+		Name:          name,
+		Methods:       protocol.methods,
+		Version:       protocol.protocolVersion,
+		VersionParts:  protocol.protocolVersionParts,
+		VersionSet:    protocol.protocolVersionSet,
+		DeclaredRange: protocol.protocolVersionRange,
+		Hash:          hash,
+		Impl:          impl,
 	}, false)
 }
 

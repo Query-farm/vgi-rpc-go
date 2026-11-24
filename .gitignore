@@ -3,6 +3,7 @@
 # tools/docverify/), which tools that honour .gitignore, such as rsync, then skip.
 /conformance-worker
 /conformance-client-driver
+/conformance-negotiating-client
 /vgi-rpc-conformance-go
 /hello-worker
 /benchmark-worker

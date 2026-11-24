@@ -154,6 +154,11 @@ jobs:
       - name: Build conformance client driver
         run: go build -o conformance-client-driver ./conformance/cmd/vgi-rpc-conformance-client-driver
 
+      # The conformance_negotiating_client hook: the Go HTTP client negotiating
+      # protocol versions against the suite's scripted server.
+      - name: Build negotiating client
+        run: go build -o conformance-negotiating-client ./conformance/cmd/vgi-rpc-negotiating-client
+
       # The Go worker tracks the *unreleased* Python reference (the TCP
       # transport — tcp_connect / --tcp — lands on main ahead of PyPI), so
       # install vgi_rpc from source off the default branch rather than

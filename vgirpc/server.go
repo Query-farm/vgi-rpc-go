@@ -4,14 +4,20 @@
 package vgirpc
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"unicode/utf8"
 
 	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/arrow-go/v18/arrow/ipc"
 )
 
@@ -91,6 +97,35 @@ type methodInfo struct {
 	// input. A dynamic schema should not make the kind undiscoverable.
 	DeclaredStreamKind string
 	HeaderSchema       *arrow.Schema // Arrow schema for header type (if HasHeader)
+	// ResultMetadata, when set, supplies custom metadata for the unary result
+	// batch. Reflection uses it to carry vgi_rpc.protocol_versions on every
+	// transport (PROTOCOL_VERSIONS_V1 §4.1).
+	ResultMetadata func() map[string]string
+}
+
+// resultMetadata is info's extra unary result-batch metadata, empty when none.
+func (info *methodInfo) resultMetadata() arrow.Metadata {
+	if info.ResultMetadata == nil {
+		return arrow.Metadata{}
+	}
+	md := info.ResultMetadata()
+	if len(md) == 0 {
+		return arrow.Metadata{}
+	}
+	keys, vals := appendExtraMetadata(nil, nil, md)
+	return arrow.NewMetadata(keys, vals)
+}
+
+// withResultMetadata returns batch carrying info's extra result metadata,
+// releasing batch when it is replaced.
+func (info *methodInfo) withResultMetadata(batch arrow.RecordBatch) arrow.RecordBatch {
+	md := info.resultMetadata()
+	if md.Len() == 0 {
+		return batch
+	}
+	out := array.NewRecordBatchWithMetadata(batch.Schema(), batch.Columns(), batch.NumRows(), md)
+	batch.Release()
+	return out
 }
 
 // Server is the RPC server that dispatches incoming requests to registered methods.
@@ -101,8 +136,17 @@ type Server struct {
 	protocolVersion      string // canonical semver MAJOR.MINOR.PATCH, or "" when opted out
 	protocolVersionParts [3]int // parsed (major, minor, patch); used when protocolVersion != ""
 	protocolVersionSet   bool   // true when SetProtocolVersion was called with a non-empty value
-	canonicalHashValue   string
-	canonicalHashOnce    sync.Once
+	// protocolVersionRange widens the primary's accepted window downward
+	// (SetProtocolVersionRange); nil means exactly protocolVersion's major.minor.
+	protocolVersionRange *VersionRange
+	// protocolVersionRanges overrides the window of hosted protocols by wire
+	// name (SetProtocolVersionRanges) -- how a fixture impersonates an older
+	// server.
+	protocolVersionRanges map[string]VersionRange
+	// protocolVersionsCache is the advertisement once the server is sealed.
+	protocolVersionsCache atomic.Pointer[string]
+	canonicalHashValue    string
+	canonicalHashOnce     sync.Once
 
 	// extraBindings holds protocols beyond the primary. The primary's methods
 	// stay in `methods` so every existing registration path is untouched; it is
@@ -312,11 +356,14 @@ func capabilitiesEqual(a, b map[string]bool) bool {
 //   - surfaces “v“ as protocol_version on the vgi_rpc.Reflection.v1
 //     description (so a mismatched client can introspect the expected
 //     version), and
-//   - enforces an exact major+minor match against the client's
-//     “vgi_rpc.protocol_version“ request metadata at the dispatch
-//     boundary. Patch is ignored. Mismatch raises
+//   - accepts a client “vgi_rpc.protocol_version“ whose major.minor lies
+//     in the protocol's window -- exactly v's major.minor unless widened by
+//     [Server.SetProtocolVersionRange] or overridden by
+//     [Server.SetProtocolVersionRanges]. Patch is ignored. A refusal raises
 //     [ProtocolVersionError] (vgi_rpc.error_kind =
-//     “protocol_version_mismatch“) with a directional message.
+//     “protocol_version_unsupported“) naming both windows, and
+//   - advertises the window (PROTOCOL_VERSIONS_V1): the VGI-Protocol-Versions
+//     HTTP header and the vgi_rpc.protocol_versions metadata key.
 //
 // The vgi_rpc.Reflection.v1 binding is exempt from the dispatch check so
 // a mismatched client can discover the server's version. Mirrors Python's
@@ -330,6 +377,7 @@ func (s *Server) SetProtocolVersion(v string) {
 		s.protocolVersion = ""
 		s.protocolVersionSet = false
 		s.protocolVersionParts = [3]int{}
+		s.protocolVersionRange = nil
 		return
 	}
 	major, minor, patch, err := parseSemver(v)
@@ -348,69 +396,214 @@ func (s *Server) ProtocolVersion() string {
 	return s.protocolVersion
 }
 
-// gateVersion enforces one binding's declared protocol_version.
+// SetProtocolVersionRange widens the window the server's own protocol accepts
+// and advertises downward from its declared version (PROTOCOL_VERSIONS_V1 §5;
+// Python's Protocol.protocol_version_range). r is "MIN-MAX" in major.minor;
+// MAX must equal the declared version's major.minor, because the declared
+// version is the newest spoken. "" restores the default (exactly the declared
+// version's major.minor).
 //
-// Takes the binding's name and version rather than reading the server's,
-// because a server hosting several protocols has a version per binding and no
-// single "server version" -- gating a secondary against the primary rejects
-// correct callers and names the wrong protocol when it does. Every message
-// names the protocol for the same reason: with N bindings, "Server: 1.0.0"
-// alone does not say which server.
-//
-// Comparison rule: exact major+minor match; patch ignored.
-func gateVersion(
-	protocolName, serverVersion string,
-	serverParts [3]int,
-	clientVersion string,
-	present bool,
-) *ProtocolVersionError {
-	if !present {
-		return &ProtocolVersionError{
-			Protocol: protocolName,
-			Message: "VGI client/worker protocol_version mismatch for protocol " + protocolName + ".\n" +
-				"  Client: <not declared>\n" +
-				"  Server: " + serverVersion + "\n" +
-				"  Direction: the client did not send a vgi_rpc.protocol_version " +
-				"metadata key. This is either a vgi-rpc framework bug or a " +
-				"non-VGI client connecting to a VGI worker.",
+// Call after [Server.SetProtocolVersion]. Panics on a malformed or
+// inconsistent range, close to the configuration call site.
+func (s *Server) SetProtocolVersionRange(r string) {
+	if r == "" {
+		s.protocolVersionRange = nil
+		return
+	}
+	if !s.protocolVersionSet {
+		panic(fmt.Errorf("vgirpc: SetProtocolVersionRange(%q) requires SetProtocolVersion first", r))
+	}
+	rng, err := ParseVersionRange(r)
+	if err != nil {
+		panic(err)
+	}
+	top := MajorMinor{s.protocolVersionParts[0], s.protocolVersionParts[1]}
+	if rng.Max != top {
+		panic(fmt.Errorf(
+			"vgirpc: protocol version range %q must end at protocol_version %s's major.minor (%s): "+
+				"protocol_version is the newest version spoken, and the range widens it downward only",
+			r, s.protocolVersion, top))
+	}
+	s.protocolVersionRange = &rng
+}
+
+// SetProtocolVersionRanges overrides the window hosted protocols accept and
+// advertise, keyed by wire name ({"vgi.v3": "3.3-3.4"}; PROTOCOL_VERSIONS_V1
+// §5, Python's RpcServer(protocol_version_ranges=...)). Unconstrained: it is
+// how a fixture worker impersonates an older server. Call after every
+// protocol is hosted and before serving; naming a protocol that is not
+// hosted, is version-exempt, or declares no version is an error.
+func (s *Server) SetProtocolVersionRanges(ranges map[string]string) error {
+	if s.sealed.Load() {
+		return fmt.Errorf("vgirpc: cannot change protocol version ranges: the server is already serving")
+	}
+	all := s.bindings()
+	parsed := make(map[string]VersionRange, len(ranges))
+	for name, text := range ranges {
+		b, ok := all[name]
+		if !ok || !b.VersionSet || b.VersionExempt {
+			var versioned []string
+			for _, n := range s.orderedBindingNames() {
+				if bb := all[n]; bb.VersionSet && !bb.VersionExempt {
+					versioned = append(versioned, n)
+				}
+			}
+			return fmt.Errorf(
+				"vgirpc: protocol version ranges name %q, which is not a hosted protocol that declares a "+
+					"protocol_version. Versioned protocols here: %v", name, versioned)
+		}
+		rng, err := ParseVersionRange(text)
+		if err != nil {
+			return fmt.Errorf("vgirpc: protocol version range for %q: %w", name, err)
+		}
+		parsed[name] = rng
+	}
+	if len(parsed) == 0 {
+		s.protocolVersionRanges = nil
+	} else {
+		s.protocolVersionRanges = parsed
+	}
+	return nil
+}
+
+// bindingWindow returns the major.minor window binding b accepts and
+// advertises, and false when b is not gated (no version, or exempt).
+func (s *Server) bindingWindow(b *protocolBinding) (VersionRange, bool) {
+	if b == nil || !b.VersionSet || b.VersionExempt {
+		return VersionRange{}, false
+	}
+	if rng, ok := s.protocolVersionRanges[b.Name]; ok {
+		return rng, true
+	}
+	if b.DeclaredRange != nil {
+		return *b.DeclaredRange, true
+	}
+	mm := MajorMinor{b.VersionParts[0], b.VersionParts[1]}
+	return VersionRange{Min: mm, Max: mm}, true
+}
+
+// ProtocolVersions returns the VGI-Protocol-Versions advertisement: every
+// gated protocol's window, "name=MIN-MAX[, name=MIN-MAX]..." in hosting order,
+// primary first. Lists only protocols this server gates -- those declaring a
+// protocol_version -- so reflection (exempt) and unversioned protocols are
+// absent. Empty when nothing is gated. Advertised on every HTTP response and
+// as vgi_rpc.protocol_versions metadata on reflection results,
+// __transport_options__ replies and refusals.
+func (s *Server) ProtocolVersions() string {
+	if cached := s.protocolVersionsCache.Load(); cached != nil {
+		return *cached
+	}
+	all := s.bindings()
+	var windows []ProtocolWindow
+	for _, name := range s.orderedBindingNames() {
+		if rng, ok := s.bindingWindow(all[name]); ok {
+			windows = append(windows, ProtocolWindow{Name: name, Range: rng})
 		}
 	}
-	// Exact equality is overwhelmingly the common case and has already been
-	// validated when the server was configured. Avoid running the semver regexp
-	// and allocating its capture slice on every RPC in that case.
-	if clientVersion == serverVersion {
+	value := FormatProtocolVersions(windows)
+	// The hosted set and every version are fixed once the server serves, so
+	// the advertisement is computed once from then on.
+	if s.sealed.Load() {
+		s.protocolVersionsCache.Store(&value)
+	}
+	return value
+}
+
+// gate enforces binding's supported version window against one request's
+// metadata. nil when the binding is not gated or the version is accepted.
+//
+// The client's own advertised windows (vgi_rpc.protocol_versions_client) are
+// logged at debug and quoted in a refusal; they never cause one.
+func (s *Server) gate(binding *protocolBinding, md map[string]string) *ProtocolVersionError {
+	if binding == nil || !binding.VersionSet || binding.VersionExempt {
 		return nil
+	}
+	clientVersion, present := md[MetaProtocolVersion]
+	window, _ := s.bindingWindow(binding)
+	// Exact equality with the declared version is the common case. Skip the
+	// parsing and logging on every RPC then -- unless an override moved the
+	// window off the declared version (a fixture impersonating an older
+	// server), when the declared version itself is refused.
+	if present && clientVersion == binding.Version &&
+		window.Contains(MajorMinor{binding.VersionParts[0], binding.VersionParts[1]}) {
+		return nil
+	}
+	clientVersions := md[MetaClientProtocolVersions]
+	if clientVersions != "" && slog.Default().Enabled(context.Background(), slog.LevelDebug) {
+		slog.Debug("client protocol versions", "protocol", binding.Name, "client_versions", clientVersions,
+			"server_id", s.serverID)
+	}
+	return gateVersion(binding.Name, window, clientVersion, present, clientVersions, s.ProtocolVersions())
+}
+
+// gateVersion checks one request's declared version against a binding's
+// window, returning the refusal or nil.
+//
+// Takes the binding's name and window rather than reading the server's,
+// because a server hosting several protocols has a window per binding and no
+// single "server version". Every message names the protocol for the same
+// reason. Message texts mirror the Python reference exactly
+// (PROTOCOL_VERSIONS_V1, "Decisions" 6).
+func gateVersion(
+	protocolName string,
+	window VersionRange,
+	clientVersion string,
+	present bool,
+	clientVersions string,
+	advertisement string,
+) *ProtocolVersionError {
+	serverWindow := "this server supports " + protocolName + " " + window.String()
+	refusal := func(message, declared string) *ProtocolVersionError {
+		return &ProtocolVersionError{
+			Message:        message,
+			Protocol:       protocolName,
+			ClientVersion:  declared,
+			ServerVersion:  window.String(),
+			ServerVersions: advertisement,
+			ClientVersions: clientVersions,
+		}
+	}
+	if !present {
+		return refusal(ErrorKindProtocolVersionUnsupported+": the client did not send vgi_rpc.protocol_version for "+
+			protocolName+"; "+serverWindow+". This is either a vgi-rpc framework bug or a non-VGI "+
+			"client connecting to a VGI worker.", "")
+	}
+	if !utf8.ValidString(clientVersion) {
+		return refusal(ErrorKindProtocolVersionUnsupported+": the client sent a non-UTF-8 protocol_version for "+
+			protocolName+"; "+serverWindow+".", "<undecodable>")
 	}
 	major, minor, _, err := parseSemver(clientVersion)
 	if err != nil {
-		return &ProtocolVersionError{
-			Protocol: protocolName,
-			Message: "VGI client/worker protocol_version mismatch for protocol " + protocolName + ".\n" +
-				"  Client: " + clientVersion + "\n" +
-				"  Server: " + serverVersion + "\n" +
-				"  Direction: client sent a malformed protocol_version. " +
-				"Expected canonical semver MAJOR.MINOR.PATCH.",
-		}
+		return refusal(ErrorKindProtocolVersionUnsupported+": the client sent a malformed protocol_version "+
+			pyRepr(clientVersion)+" for "+protocolName+" (expected canonical semver MAJOR.MINOR.PATCH); "+
+			serverWindow+".", clientVersion)
 	}
-	serverMajor, serverMinor := serverParts[0], serverParts[1]
-	if major == serverMajor && minor == serverMinor {
+	client := MajorMinor{major, minor}
+	if window.Contains(client) {
 		return nil
 	}
+	speaks := "client speaks " + protocolName + " " + client.String()
+	if supports, ok := ParseProtocolVersions(clientVersions)[protocolName]; ok {
+		speaks += " (supports " + supports.String() + ")"
+	}
 	var direction string
-	if major < serverMajor || (major == serverMajor && minor < serverMinor) {
-		direction = "client is too old; upgrade the VGI extension/client to a " +
-			"version supporting protocol_version " + serverVersion + "."
+	if client.Less(window.Min) {
+		direction = "The client is too old (this server is too new for it). Upgrade the client, or use a " +
+			"worker that supports " + protocolName + " " + client.String() + "."
 	} else {
-		direction = "server is too old; upgrade the VGI worker to a version " +
-			"supporting protocol_version " + clientVersion + "."
+		direction = "The server is too old (the client is too new for it). Upgrade the worker, or use a " +
+			"client that supports " + protocolName + " " + window.Max.String() + "."
 	}
-	return &ProtocolVersionError{
-		Protocol: protocolName,
-		Message: "VGI client/worker protocol_version mismatch for protocol " + protocolName + ".\n" +
-			"  Client: " + clientVersion + "\n" +
-			"  Server: " + serverVersion + "\n" +
-			"  Direction: " + direction,
+	return refusal(ErrorKindProtocolVersionUnsupported+": "+speaks+"; "+serverWindow+". "+direction, clientVersion)
+}
+
+// pyRepr quotes s the way Python's repr() quotes a str without quotes or
+// backslashes in it, so refusal texts match the reference byte for byte.
+func pyRepr(s string) string {
+	if !strings.ContainsAny(s, "'\\") {
+		return "'" + s + "'"
 	}
+	return strconv.Quote(s)
 }
 
 // SetIncludeTracebacks decides whether EXCEPTION batches carry the remote
