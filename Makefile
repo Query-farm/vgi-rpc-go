@@ -151,12 +151,14 @@ endif
 #             ones. Runs go-test first, since it is nearly free.
 #
 # jwtauth carries its own tests (the hardened verifier Orchard hosted mode
-# uses); the other submodules (otel, sentry, s3, gcs) carry none and are
-# covered by `make lint`.
+# uses), s3 and gcs their storage throttle tests; the other submodules (otel,
+# sentry) carry none and are covered by `make lint`.
 
 go-test:
 	go test ./...
 	cd vgirpc/jwtauth && go test ./...
+	cd vgirpc/s3 && go test ./...
+	cd vgirpc/gcs && go test ./...
 
 test: go-test conformance-worker $(PYTHON_BOOTSTRAP)
 	$(PYTHON) -m pytest test_go_conformance.py -v $(PYTEST_XDIST)

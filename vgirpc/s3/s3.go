@@ -21,11 +21,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/smithy-go"
 
@@ -38,10 +42,35 @@ type S3Config struct {
 	Prefix string
 	// PresignExpirySeconds is the lifetime of pre-signed GET URLs. Default: 3600 (1 hour).
 	PresignExpirySeconds int
-	// Region overrides the AWS region. If empty, uses default config.
+	// Region overrides the AWS region. If empty, uses default config (the
+	// AWS_REGION env, the shared config profile); with an EndpointURL and no
+	// region found anywhere, "us-east-1" (MinIO, Ceph, LocalStack and R2
+	// accept it; R2's own name is "auto").
 	Region string
-	// EndpointURL overrides the S3 endpoint (for MinIO, LocalStack, etc.).
+	// EndpointURL overrides the S3 endpoint for S3-compatible services
+	// (MinIO, Ceph, LocalStack, Cloudflare R2, Wasabi, Backblaze B2);
+	// http:// endpoints work. Presigned URLs use this host.
 	EndpointURL string
+	// VirtualHostedStyle addresses buckets as <bucket>.<host> on an
+	// EndpointURL. The default with an EndpointURL is path-style
+	// (<host>/<bucket>), which MinIO and Ceph need; without an EndpointURL
+	// the SDK picks (virtual-hosted on AWS).
+	VirtualHostedStyle bool
+	// AccessKeyID, SecretAccessKey and SessionToken are static credentials
+	// (e.g. an R2 API token). When AccessKeyID is empty the SDK's default
+	// chain applies: AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY/AWS_SESSION_TOKEN,
+	// the shared config/credentials profile (AWS_PROFILE), web identity,
+	// ECS and EC2 instance roles.
+	AccessKeyID     string
+	SecretAccessKey string
+	SessionToken    string
+	// StallTimeout fails a transfer that sends or receives no byte for this
+	// long; a slow transfer that keeps moving is never cut off (there is no
+	// whole-request deadline). Default: VGI_RPC_STORAGE_STALL_TIMEOUT_SECONDS,
+	// else 30s. The connect timeout is 30s. Failed requests (connection
+	// errors, stalls, 5xx, throttling) are retried by the SDK's standard
+	// retryer: 3 attempts, jittered exponential backoff capped at 5s.
+	StallTimeout time.Duration
 }
 
 // S3Storage implements vgirpc.ExternalStorage using AWS S3.
@@ -69,16 +98,36 @@ func NewS3Storage(bucket string, cfg S3Config) (*S3Storage, error) {
 	if cfg.Region != "" {
 		opts = append(opts, config.WithRegion(cfg.Region))
 	}
+	if cfg.AccessKeyID != "" {
+		opts = append(opts, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken)))
+	}
+	stall := stallTimeout(cfg.StallTimeout)
+	opts = append(opts,
+		config.WithHTTPClient(awshttp.NewBuildableClient().WithTransportOptions(func(tr *http.Transport) {
+			tr.DialContext = stallDialer(stall)
+			tr.TLSHandshakeTimeout = storageConnectTimeout
+		})),
+		config.WithRetryer(func() aws.Retryer {
+			return retry.NewStandard(func(o *retry.StandardOptions) {
+				o.MaxAttempts = 3
+				o.MaxBackoff = 5 * time.Second
+			})
+		}),
+	)
 	awsCfg, err := config.LoadDefaultConfig(context.Background(), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("loading AWS config: %w", err)
+	}
+	if awsCfg.Region == "" && cfg.EndpointURL != "" {
+		awsCfg.Region = "us-east-1"
 	}
 
 	s3Opts := []func(*s3.Options){}
 	if cfg.EndpointURL != "" {
 		s3Opts = append(s3Opts, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(cfg.EndpointURL)
-			o.UsePathStyle = true
+			o.UsePathStyle = !cfg.VirtualHostedStyle
 		})
 	}
 
@@ -208,9 +257,11 @@ func (s *S3Storage) Get(objectID string, maxBytes int64) ([]byte, error) {
 // declares the interface, since this module pins a published core.)
 var _ vgirpc.ExternalStorage = (*S3Storage)(nil)
 
-// generateUUID returns a random UUID string.
+// generateUUID returns a random (version 4) UUID string.
 func generateUUID() string {
-	b := make([]byte, 16)
-	_, _ = bytes.NewReader([]byte(fmt.Sprintf("%d", time.Now().UnixNano()))).Read(b)
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
