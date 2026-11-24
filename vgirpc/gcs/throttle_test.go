@@ -71,6 +71,10 @@ func (f *fakeGCS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.received.Store(int64(total))
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"bucket":"bucket","name":"obj","size":"%d","generation":"1","metageneration":"1"}`, total)
+	case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/storage/v1/b/bucket"):
+		// The first-use bucket check.
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"name":"bucket"}`)
 	case r.Method == http.MethodGet:
 		f.gets.Add(1)
 		// The client resumes a broken read with "Range: bytes=N-".

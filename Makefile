@@ -70,7 +70,7 @@ else
 PYTHON_BOOTSTRAP :=
 endif
 
-.PHONY: build lint go-test test coverage leakcheck race docs docs-verify venv clean \
+.PHONY: build lint go-test s3-compat test coverage leakcheck race docs docs-verify venv clean \
 	conformance-worker conformance-worker-cover benchmark-worker \
 	ci staticcheck-install conformance-runner conformance-access-log cross-port \
 	conformance-client-driver test-client test-client-python hosted-reverse
@@ -159,6 +159,11 @@ go-test:
 	cd vgirpc/jwtauth && go test ./...
 	cd vgirpc/s3 && go test ./...
 	cd vgirpc/gcs && go test ./...
+
+# The direct-S3 lane: vgirpc/s3 against RustFS in docker (plain http and
+# TLS, static keys and an STS session token); fails if any test skips.
+s3-compat:
+	scripts/s3-compat-lane.sh
 
 test: go-test conformance-worker $(PYTHON_BOOTSTRAP)
 	$(PYTHON) -m pytest test_go_conformance.py -v $(PYTEST_XDIST)

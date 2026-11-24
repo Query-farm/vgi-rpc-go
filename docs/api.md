@@ -298,6 +298,59 @@ errors, stalls, 429 and 5xx are retried: 3 attempts, exponential backoff from
 (`/v1/info`, `/v1/blobs/put`, ...) keep a whole-request `VendorOptions.Timeout`
 (default 30 s) per attempt. `NewStorageHTTPClient` builds such a client.
 
+### Direct object storage (S3, GCS)
+
+A self-hosted server can use the operator's own bucket instead of the blob
+vendor (direct-storage contract v1). `vgis3.S3Storage` (module
+`vgirpc/s3`) and `vgigcs.GCSStorage` (module `vgirpc/gcs`) implement all
+three roles: `ExternalStorage`, `UploadURLProvider` and `ObjectStore`. They
+sign their own URLs.
+
+```go
+backend, err := vgirpc.StorageBackendFromEnv(nil) // "vendor", "s3", "gcs" or "none"
+storage, err := vgis3.FromEnv(nil)                // or vgigcs.FromEnv(nil)
+config, err := vgirpc.ConfigureHTTPServerWithStorage(httpServer, storage, nil)
+```
+
+`StorageBackendFromEnv` reads `VGI_STORAGE_BACKEND`. When it is unset, the
+backend is inferred:
+- `vendor` when `VGI_BLOB_VENDOR_URL` is set;
+- else `s3` when `VGI_STORAGE_S3_BUCKET` is set;
+- else `gcs` when `VGI_STORAGE_GCS_BUCKET` is set;
+- else `none`.
+
+Setting more than one of those without `VGI_STORAGE_BACKEND` is an error.
+`ConfigureHTTPServerFromEnv` builds only the vendor. It returns an error for
+`s3` and `gcs`, since those backends live in their own modules.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `VGI_STORAGE_S3_BUCKET` | bucket (required for `s3`) | |
+| `VGI_STORAGE_S3_PREFIX` | key prefix | empty |
+| `VGI_STORAGE_S3_ENDPOINT` | custom endpoint, `https://` or `http://` (MinIO, Ceph, R2, Wasabi, B2, LocalStack) | AWS |
+| `VGI_STORAGE_S3_REGION` | signing region (`auto` for R2) | `AWS_REGION`, `AWS_DEFAULT_REGION`, `us-east-1` |
+| `VGI_STORAGE_S3_FORCE_PATH_STYLE` | bucket in the path | `true` with an endpoint |
+| `VGI_STORAGE_S3_PUBLIC_ENDPOINT` | endpoint used only in pre-signed URLs handed to clients | the endpoint |
+| `VGI_STORAGE_S3_CHECKSUM` | `sha256`, or `none` for services that do not enforce `x-amz-checksum-sha256` (see below) | `sha256` |
+| `VGI_STORAGE_S3_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN` | explicit credentials | AWS default chain |
+| `VGI_STORAGE_S3_VERIFY` | `1`: check the bucket at startup | first use |
+| `VGI_STORAGE_GCS_BUCKET`, `_PREFIX`, `_ENDPOINT`, `_CREDENTIALS_FILE` | GCS bucket, prefix, custom endpoint (emulator), service-account key | ADC |
+| `VGI_STORAGE_URL_TTL_SECONDS` | pre-signed URL lifetime, at most 7 days | 3600 |
+| `VGI_STORAGE_ALLOW_PLAIN_HTTP` | `1`: accept inbound `http://` URLs on the configured endpoint | off |
+
+Credentials:
+- Without explicit keys, the AWS default chain applies: env, profile (including `credential_process` and `role_arn`), web identity, ECS/EKS, and IMDSv2.
+- Temporary credentials are refreshed 5 minutes before they expire.
+- A pre-signed URL never outlives the credentials that signed it. Its lifetime is the smaller of the configured TTL and (credential refresh time − now − 60 s).
+- An upload grant needs 15 minutes. Credentials that expire sooner are refreshed once before signing.
+- Objects are addressed by key, so `StateRef`s and argument references survive credential rotation.
+
+Upload grants sign `Content-Length` and `x-amz-checksum-sha256`. Header hoisting is off, so storage rejects a body that does not match. `VGI_STORAGE_S3_CHECKSUM=none` turns grants off: no `VGI-Upload-URL-Support` and no argument references, so large arguments stay inline. Results are still externalized and objects stored. With `none`, the SDK's default CRC32 checksums are off as well.
+
+The bucket check is a HEAD request, which needs `s3:ListBucket`. On failure it names the problem: a missing bucket, access denied, or the bucket's actual region.
+
+Neither backend deletes objects. Add a lifecycle rule that expires the prefix after 1–2 days.
+
 ## RpcError
 
 ```go

@@ -40,6 +40,24 @@ jobs:
           (cd vgirpc/s3 && go test ./...)
           (cd vgirpc/gcs && go test ./...)
 
+  # Direct S3 storage against an S3-compatible server (RustFS, the same
+  # image as vgi-rpc-java's storage-integration job): plain http with path
+  # style and TLS, static keys and an STS AssumeRole session token, upload
+  # grants that storage enforces, checksum=none, and the URL lifetime cap
+  # under expiring credentials. The lane fails if any of those tests skips.
+  s3-compat:
+    name: S3 compatibility (RustFS)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+
+      - name: vgirpc/s3 against RustFS (http + TLS, static keys + STS)
+        run: scripts/s3-compat-lane.sh
+
   lint:
     runs-on: ubuntu-latest
     steps:

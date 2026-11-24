@@ -43,6 +43,8 @@ type fakeS3 struct {
 
 func (f *fakeS3) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
+	case http.MethodHead: // the first-use bucket check
+		w.WriteHeader(http.StatusOK)
 	case http.MethodPut:
 		f.puts.Add(1)
 		start, total, buf := time.Now(), 0, make([]byte, 16<<10)
