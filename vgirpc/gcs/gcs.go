@@ -40,8 +40,11 @@ import (
 
 // GCSConfig configures the GCS storage backend.
 type GCSConfig struct {
-	// Prefix is the object key prefix for uploaded objects. Default: "vgi-rpc/"
-	// unless ExactPrefix is set.
+	// Prefix is the object key prefix. Objects go under <Prefix>rpc/ (results,
+	// upload grants, StateRef and argument objects) and <Prefix>fs/ (function
+	// storage, [GCSStorage.FunctionStore]); add lifecycle rules deleting rpc/
+	// after 1 day and fs/ after 2 days. Default: "vgi-rpc/" unless
+	// ExactPrefix is set.
 	Prefix string
 	// ExactPrefix uses Prefix exactly as given, even when it is empty.
 	ExactPrefix bool
@@ -77,7 +80,8 @@ type GCSConfig struct {
 // vgirpc.ObjectStore using Google Cloud Storage.
 type GCSStorage struct {
 	bucket        string
-	prefix        string
+	root          string // the configured prefix
+	prefix        string // root + "rpc/"
 	presignExpiry time.Duration
 	stall         time.Duration
 	client        *storage.Client
@@ -130,7 +134,8 @@ func NewGCSStorage(bucket string, cfg GCSConfig) (*GCSStorage, error) {
 
 	return &GCSStorage{
 		bucket:        bucket,
-		prefix:        prefix,
+		root:          prefix,
+		prefix:        prefix + "rpc/",
 		presignExpiry: expiry,
 		stall:         stall,
 		client:        client,

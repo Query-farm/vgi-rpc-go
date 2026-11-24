@@ -110,6 +110,10 @@ func exerciseAllRoles(t *testing.T, e minioEnv, storage *S3Storage) {
 	if err != nil {
 		t.Fatalf("PutObject: %v", err)
 	}
+	if !strings.HasPrefix(key, storage.root+"rpc/") {
+		t.Fatalf("object key %q is not under %srpc/", key, storage.root)
+	}
+	exerciseFunctionStore(t, storage, payload)
 	got, err := storage.Get(key, 0)
 	if err != nil || !bytes.Equal(got, payload) {
 		t.Fatalf("Get: err=%v equal=%v", err, bytes.Equal(got, payload))
@@ -161,6 +165,47 @@ func exerciseAllRoles(t *testing.T, e minioEnv, storage *S3Storage) {
 	}
 	if code, body := httpDo(t, "GET", grant.DownloadURL, nil, nil); code != http.StatusOK || !bytes.Equal(body, payload) {
 		t.Fatalf("grant GET: HTTP %d", code)
+	}
+}
+
+// exerciseFunctionStore: function-storage objects live under <prefix>fs/,
+// grouped by scope, and a scope delete removes them (best effort).
+func exerciseFunctionStore(t *testing.T, storage *S3Storage, payload []byte) {
+	t.Helper()
+	ctx := context.Background()
+	fs := storage.FunctionStore()
+	scope := "att-00/s." + strconv.FormatInt(time.Now().UnixNano(), 36)
+	k1, err := fs.PutObjectScoped(ctx, payload, scope)
+	if err != nil {
+		t.Fatalf("FunctionStore.PutObjectScoped: %v", err)
+	}
+	k2, err := fs.PutObjectScoped(ctx, payload[:10], scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	k3, err := fs.PutObjectScoped(ctx, payload[:5], "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{k1, k2, k3} {
+		if !strings.HasPrefix(k, storage.root+"fs/") {
+			t.Fatalf("function-storage key %q is not under %sfs/", k, storage.root)
+		}
+	}
+	if got, err := fs.Get(k1, 0); err != nil || !bytes.Equal(got, payload) {
+		t.Fatalf("FunctionStore.Get: %v", err)
+	}
+	if n, _ := fs.DeleteScope(ctx, scope); n != 2 {
+		t.Errorf("DeleteScope deleted %d objects, want 2", n)
+	}
+	if _, err := fs.Get(k1, 0); err == nil || !strings.Contains(err.Error(), "gone") {
+		t.Errorf("scoped object after DeleteScope: %v", err)
+	}
+	if got, err := fs.Get(k3, 0); err != nil || !bytes.Equal(got, payload[:5]) {
+		t.Errorf("unscoped object removed by DeleteScope: %v", err)
+	}
+	if n, _ := fs.DeleteObjects(ctx, []string{k3}); n != 1 {
+		t.Errorf("DeleteObjects deleted %d", n)
 	}
 }
 
@@ -252,7 +297,7 @@ func TestS3CompatFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if storage.prefix != "vgi-env/" {
+	if storage.prefix != "vgi-env/rpc/" {
 		t.Errorf("prefix %q", storage.prefix)
 	}
 	exerciseAllRoles(t, e, storage)

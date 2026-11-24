@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func envOf(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
@@ -53,6 +54,60 @@ func TestConfigFromEnv(t *testing.T) {
 		} else if strings.Contains(err.Error(), "SK") || strings.Contains(err.Error(), "ST\"") {
 			t.Errorf("%s: error leaks a secret: %v", name, err)
 		}
+	}
+}
+
+func TestPlainHTTPNeedsOptIn(t *testing.T) {
+	for _, k := range []string{EnvEndpoint, EnvPublicEndpoint} {
+		m := map[string]string{EnvBucket: "b", EnvEndpoint: "https://s3.example.com", k: "http://minio:9000"}
+		if _, _, err := ConfigFromEnv(envOf(m)); err == nil || !strings.Contains(err.Error(), EnvAllowPlainHTTP) {
+			t.Errorf("%s over http without opt-in: %v", k, err)
+		}
+		m[EnvAllowPlainHTTP] = "1"
+		if _, _, err := ConfigFromEnv(envOf(m)); err != nil {
+			t.Errorf("%s over http with opt-in: %v", k, err)
+		}
+	}
+}
+
+func TestSessionExpires(t *testing.T) {
+	for _, raw := range []string{"2026-11-25T18:00:00Z", "1795975200"} {
+		if ts, err := ParseSessionExpires(raw); err != nil || ts.IsZero() {
+			t.Errorf("%s: %v", raw, err)
+		}
+	}
+	if _, err := ParseSessionExpires("tomorrow"); err == nil {
+		t.Error("bad expiry accepted")
+	}
+	base := map[string]string{EnvBucket: "b", EnvAccessKeyID: "AK", EnvSecretAccessKey: "SK"}
+	base[EnvSessionExpires] = "1795975200"
+	if _, _, err := ConfigFromEnv(envOf(base)); err == nil {
+		t.Error("expiry without a session token accepted")
+	}
+	// Token without expiry: a startup warning, no cap.
+	t.Setenv("AWS_CONFIG_FILE", "/nonexistent")
+	s, err := NewS3Storage("b", S3Config{AccessKeyID: "AK", SecretAccessKey: "SK", SessionToken: "ST"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := s.StartupWarnings(); len(w) != 1 || !strings.Contains(w[0], EnvSessionExpires) || strings.Contains(w[0], "ST ") {
+		t.Errorf("warnings %v", w)
+	}
+	// Token with an expiry 10 minutes out: URLs are capped (10 - 5 refresh window - 1).
+	s, err = NewS3Storage("b", S3Config{AccessKeyID: "AK", SecretAccessKey: "SK", SessionToken: "ST",
+		SessionExpires: time.Now().Add(10 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.StartupWarnings()) != 0 {
+		t.Errorf("warnings with an expiry: %v", s.StartupWarnings())
+	}
+	_, expires, err := s.presignOptions(context.Background(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left := time.Until(expires); left <= 0 || left > 4*time.Minute+time.Second {
+		t.Errorf("URL lifetime %v, want <= 4m under a session expiring in 10m", left)
 	}
 }
 

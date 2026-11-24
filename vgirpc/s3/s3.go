@@ -78,8 +78,11 @@ const (
 
 // S3Config configures the S3 storage backend.
 type S3Config struct {
-	// Prefix is the S3 key prefix for uploaded objects. Default: "vgi-rpc/"
-	// unless ExactPrefix is set.
+	// Prefix is the S3 key prefix. Objects go under <Prefix>rpc/ (results,
+	// upload grants, StateRef and argument objects) and <Prefix>fs/ (function
+	// storage, [S3Storage.FunctionStore]); add lifecycle rules expiring rpc/
+	// after 1 day and fs/ after 2 days. Default: "vgi-rpc/" unless
+	// ExactPrefix is set.
 	Prefix string
 	// ExactPrefix uses Prefix exactly as given, even when it is empty
 	// (VGI_STORAGE_S3_PREFIX unset means no prefix).
@@ -123,6 +126,11 @@ type S3Config struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	SessionToken    string
+	// SessionExpires is when the static SessionToken expires
+	// (VGI_STORAGE_S3_SESSION_EXPIRES). Set, pre-signed URLs are capped at it
+	// like any temporary credentials. Unset with a SessionToken, URL
+	// lifetimes cannot be capped ([S3Storage.StartupWarnings] says so).
+	SessionExpires time.Time
 	// Checksum is ChecksumSHA256 (default) or ChecksumNone.
 	Checksum string
 	// AllowPlainHTTP lets [S3Storage.ValidateStorageURL] accept http:// URLs
@@ -141,7 +149,9 @@ type S3Config struct {
 // vgirpc.ObjectStore using S3.
 type S3Storage struct {
 	bucket        string
-	prefix        string
+	root          string // the configured prefix
+	prefix        string // root + "rpc/"
+	warnings      []string
 	region        string
 	endpoint      string // where the worker reaches storage ("" = AWS)
 	publicURL     string // endpoint in pre-signed URLs ("" = AWS)
@@ -217,9 +227,20 @@ func NewS3Storage(bucket string, cfg S3Config) (*S3Storage, error) {
 	if cfg.Region != "" {
 		opts = append(opts, config.WithRegion(cfg.Region))
 	}
+	var warnings []string
 	if cfg.AccessKeyID != "" {
-		opts = append(opts, config.WithCredentialsProvider(
-			credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken)))
+		var provider aws.CredentialsProvider = credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, cfg.SessionToken)
+		if !cfg.SessionExpires.IsZero() {
+			provider = expiringStaticProvider{aws.Credentials{
+				AccessKeyID: cfg.AccessKeyID, SecretAccessKey: cfg.SecretAccessKey, SessionToken: cfg.SessionToken,
+				Source: "StaticCredentials", CanExpire: true, Expires: cfg.SessionExpires,
+			}}
+		} else if cfg.SessionToken != "" {
+			warnings = append(warnings, "an explicit S3 session token (VGI_STORAGE_S3_SESSION_TOKEN) has no expiry "+
+				"(VGI_STORAGE_S3_SESSION_EXPIRES), so pre-signed URL lifetimes cannot be capped at it: URLs may outlive "+
+				"the session and fail; set VGI_STORAGE_S3_SESSION_EXPIRES, or use credential_process or the standard AWS chain")
+		}
+		opts = append(opts, config.WithCredentialsProvider(provider))
 	}
 	stall := stallTimeout(cfg.StallTimeout)
 	opts = append(opts,
@@ -270,7 +291,9 @@ func NewS3Storage(bucket string, cfg S3Config) (*S3Storage, error) {
 
 	return &S3Storage{
 		bucket:        bucket,
-		prefix:        prefix,
+		root:          prefix,
+		prefix:        prefix + "rpc/",
+		warnings:      warnings,
 		region:        awsCfg.Region,
 		endpoint:      cfg.EndpointURL,
 		publicURL:     public,
@@ -285,6 +308,18 @@ func NewS3Storage(bucket string, cfg S3Config) (*S3Storage, error) {
 
 // Bucket is the configured bucket.
 func (s *S3Storage) Bucket() string { return s.bucket }
+
+// StartupWarnings are configuration warnings a worker should log at startup
+// (never containing secrets): an explicit session token without an expiry.
+func (s *S3Storage) StartupWarnings() []string { return append([]string(nil), s.warnings...) }
+
+// expiringStaticProvider is static credentials with a known expiry
+// (VGI_STORAGE_S3_SESSION_EXPIRES), so the URL lifetime cap applies.
+type expiringStaticProvider struct{ creds aws.Credentials }
+
+func (p expiringStaticProvider) Retrieve(context.Context) (aws.Credentials, error) {
+	return p.creds, nil
+}
 
 // Region is the signing region in use.
 func (s *S3Storage) Region() string { return s.region }
@@ -578,12 +613,15 @@ type objectMissingError struct{}
 func (objectMissingError) Error() string       { return "S3 object is gone" }
 func (objectMissingError) ObjectMissing() bool { return true }
 
-func (s *S3Storage) newObjectKey(ext string) (string, error) {
+func (s *S3Storage) newObjectKey(ext string) (string, error) { return randomKey(s.prefix, ext) }
+
+// randomKey is prefix + 32 random hex characters + ext.
+func randomKey(prefix, ext string) (string, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", fmt.Errorf("S3 object key: %w", err)
 	}
-	return s.prefix + hex.EncodeToString(raw[:]) + ext, nil
+	return prefix + hex.EncodeToString(raw[:]) + ext, nil
 }
 
 // PutObject stores data under a fresh key and returns the key: the

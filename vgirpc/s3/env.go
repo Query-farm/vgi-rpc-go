@@ -6,9 +6,11 @@ package vgis3
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Environment variables of the direct-storage contract v1 (S3).
@@ -23,6 +25,7 @@ const (
 	EnvAccessKeyID     = "VGI_STORAGE_S3_ACCESS_KEY_ID"
 	EnvSecretAccessKey = "VGI_STORAGE_S3_SECRET_ACCESS_KEY"
 	EnvSessionToken    = "VGI_STORAGE_S3_SESSION_TOKEN"
+	EnvSessionExpires  = "VGI_STORAGE_S3_SESSION_EXPIRES"
 	EnvVerify          = "VGI_STORAGE_S3_VERIFY"
 	// EnvURLTTLSeconds and EnvAllowPlainHTTP are shared with the GCS backend.
 	EnvURLTTLSeconds  = "VGI_STORAGE_URL_TTL_SECONDS"
@@ -90,6 +93,16 @@ func ConfigFromEnv(getenv func(string) string) (string, S3Config, error) {
 	if cfg.SessionToken != "" && cfg.AccessKeyID == "" {
 		return "", S3Config{}, fmt.Errorf("%s needs %s and %s", EnvSessionToken, EnvAccessKeyID, EnvSecretAccessKey)
 	}
+	if raw := get(EnvSessionExpires); raw != "" {
+		t, err := ParseSessionExpires(raw)
+		if err != nil {
+			return "", S3Config{}, fmt.Errorf("%s=%q: %w", EnvSessionExpires, raw, err)
+		}
+		if cfg.SessionToken == "" {
+			return "", S3Config{}, fmt.Errorf("%s needs %s", EnvSessionExpires, EnvSessionToken)
+		}
+		cfg.SessionExpires = t
+	}
 	if raw := get(EnvAllowPlainHTTP); raw != "" {
 		v, err := parseBool(raw)
 		if err != nil {
@@ -97,7 +110,29 @@ func ConfigFromEnv(getenv func(string) string) (string, S3Config, error) {
 		}
 		cfg.AllowPlainHTTP = v
 	}
+	// A plain-http endpoint sends pre-signed URLs (their credential is the
+	// query string) and object bytes in the clear: an explicit opt-in.
+	for name, ep := range map[string]string{EnvEndpoint: cfg.EndpointURL, EnvPublicEndpoint: cfg.PublicEndpointURL} {
+		if u, err := url.Parse(ep); err == nil && u.Scheme == "http" && !cfg.AllowPlainHTTP {
+			return "", S3Config{}, fmt.Errorf("%s is plain http (%s://%s): set %s=1 to allow it (and the extension's vgi_storage_allow_plain_http)",
+				name, u.Scheme, u.Host, EnvAllowPlainHTTP)
+		}
+	}
 	return bucket, cfg, nil
+}
+
+// ParseSessionExpires reads VGI_STORAGE_S3_SESSION_EXPIRES: an RFC 3339
+// timestamp or Unix epoch seconds.
+func ParseSessionExpires(raw string) (time.Time, error) {
+	raw = strings.TrimSpace(raw)
+	if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 {
+		return time.Unix(n, 0).UTC(), nil
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("expected an RFC 3339 timestamp or epoch seconds")
+	}
+	return t.UTC(), nil
 }
 
 // FromEnv builds the S3 storage from [ConfigFromEnv]. With

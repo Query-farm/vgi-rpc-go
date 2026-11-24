@@ -333,10 +333,12 @@ Setting more than one of those without `VGI_STORAGE_BACKEND` is an error.
 | `VGI_STORAGE_S3_PUBLIC_ENDPOINT` | endpoint used only in pre-signed URLs handed to clients | the endpoint |
 | `VGI_STORAGE_S3_CHECKSUM` | `sha256`, or `none` for services that do not enforce `x-amz-checksum-sha256` (see below) | `sha256` |
 | `VGI_STORAGE_S3_ACCESS_KEY_ID`, `_SECRET_ACCESS_KEY`, `_SESSION_TOKEN` | explicit credentials | AWS default chain |
+| `VGI_STORAGE_S3_SESSION_EXPIRES` | expiry of the explicit session token (RFC 3339 or epoch seconds); caps URL lifetimes | none (startup warning) |
 | `VGI_STORAGE_S3_VERIFY` | `1`: check the bucket at startup | first use |
 | `VGI_STORAGE_GCS_BUCKET`, `_PREFIX`, `_ENDPOINT`, `_CREDENTIALS_FILE` | GCS bucket, prefix, custom endpoint (emulator), service-account key | ADC |
+| `VGI_STORAGE_GCS_VERIFY` | `1`: check the GCS bucket at startup | first use |
 | `VGI_STORAGE_URL_TTL_SECONDS` | pre-signed URL lifetime, at most 7 days | 3600 |
-| `VGI_STORAGE_ALLOW_PLAIN_HTTP` | `1`: accept inbound `http://` URLs on the configured endpoint | off |
+| `VGI_STORAGE_ALLOW_PLAIN_HTTP` | `1`: allow an `http://` endpoint or public endpoint (without it the worker refuses to start) and accept inbound `http://` URLs on it | off |
 
 Credentials:
 - Without explicit keys, the AWS default chain applies: env, profile (including `credential_process` and `role_arn`), web identity, ECS/EKS, and IMDSv2.
@@ -349,7 +351,15 @@ Upload grants sign `Content-Length` and `x-amz-checksum-sha256`. Header hoisting
 
 The bucket check is a HEAD request, which needs `s3:ListBucket`. On failure it names the problem: a missing bucket, access denied, or the bucket's actual region.
 
-Neither backend deletes objects. Add a lifecycle rule that expires the prefix after 1–2 days.
+Key layout:
+- `<prefix>rpc/` holds results, upload grants, StateRef objects and argument objects. Add a lifecycle rule expiring it after 1 day.
+- `<prefix>fs/` holds function storage (`FunctionStore()`, grouped by scope). Add a lifecycle rule expiring it after 2 days.
+
+The vendor uses the same lifetimes. Function-storage deletes are best effort: the DELETE is issued and a failure is ignored. Nothing else is deleted.
+
+An explicit session token without `VGI_STORAGE_S3_SESSION_EXPIRES` produces a startup warning (`StartupWarnings()`), because URL lifetimes can't be capped. Prefer `credential_process` or the standard chain.
+
+The worker must also be able to reach `VGI_STORAGE_S3_PUBLIC_ENDPOINT`: request-upload pointers are fetched by URL. Argument references and StateRefs are fetched by object id through the internal endpoint.
 
 ## RpcError
 

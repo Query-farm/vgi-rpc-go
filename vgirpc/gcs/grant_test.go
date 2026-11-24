@@ -117,3 +117,24 @@ func TestGCSConfigFromEnvErrors(t *testing.T) {
 		t.Error("default endpoint validation")
 	}
 }
+
+func TestGCSKeyLayoutAndEnv(t *testing.T) {
+	t.Setenv("STORAGE_EMULATOR_HOST", "localhost:1")
+	s, err := NewGCSStorage("b", GCSConfig{Prefix: "p/", ExactPrefix: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.prefix != "p/rpc/" || s.FunctionStore().scopePrefix("att-00/s.1") != "p/fs/att-00%2Fs.1/" || s.FunctionStore().scopePrefix("") != "p/fs/" {
+		t.Errorf("layout rpc=%q fs=%q", s.prefix, s.FunctionStore().scopePrefix("att-00/s.1"))
+	}
+	if _, _, err := ConfigFromEnv(func(k string) string {
+		return map[string]string{EnvBucket: "b", EnvEndpoint: "http://gcs:4443"}[k]
+	}); err == nil || !strings.Contains(err.Error(), EnvAllowPlainHTTP) {
+		t.Errorf("plain-http endpoint without opt-in: %v", err)
+	}
+	if _, err := FromEnv(func(k string) string {
+		return map[string]string{EnvBucket: "b", EnvVerify: "maybe"}[k]
+	}); err == nil {
+		t.Error("bad VGI_STORAGE_GCS_VERIFY accepted")
+	}
+}
