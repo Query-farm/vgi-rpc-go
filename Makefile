@@ -317,7 +317,7 @@ leakcheck: $(PYTHON_BOOTSTRAP)
 
 race: $(PYTHON_BOOTSTRAP)
 	go build -race -o conformance-worker ./conformance/cmd/vgi-rpc-conformance-go
-	GORACE=halt_on_error=1 VGI_GO_WORKER_TEARDOWN_TIMEOUT=30 $(PYTHON) -m pytest test_go_conformance.py -v -p no:timeout $(PYTEST_XDIST)
+	GORACE=halt_on_error=1 VGI_GO_RACE=1 VGI_GO_WORKER_TEARDOWN_TIMEOUT=30 $(PYTHON) -m pytest test_go_conformance.py -v -p no:timeout $(PYTEST_XDIST)
 
 # --- Documentation verification -------------------------------------------
 # Checks README.md, CLAUDE.md and docs/** against the code: module paths

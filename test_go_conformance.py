@@ -326,7 +326,11 @@ def conformance_resource_soak_target() -> Iterator[Any]:
             connect=connect,
             limits=ResourceSoakLimits(
                 rss_growth_bytes=32 * 1024 * 1024,
-                rss_slope_bytes_per_epoch=2 * 1024 * 1024,
+                # Under -race (make race sets VGI_GO_RACE=1) the race detector
+                # keeps shadow memory for every heap word the worker touches,
+                # which inflates the retained RSS per epoch: CI measured
+                # 2.2-2.6 MiB/epoch against the 2 MiB plain-build budget.
+                rss_slope_bytes_per_epoch=(4 if os.environ.get("VGI_GO_RACE") == "1" else 2) * 1024 * 1024,
                 descriptor_growth=3,
                 thread_growth=4,
                 child_growth=0,
