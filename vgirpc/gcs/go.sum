@@ -28,8 +28,8 @@ github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/cloudmock v0
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/cloudmock v0.58.0/go.mod h1:dzcEjy1WJ0Q4u9twNR3LcLhNoYMRCrMCMafpxa0TjPQ=
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.58.0 h1:SBZzZCiPmDrUV7NSCWY54OnKikO/oTydPCvyEyYaDDE=
 github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.58.0/go.mod h1:YqwkQPrWSC7+byyc1VlKbWLBF5JsW5IoL6xUkemYSXk=
-github.com/Query-farm/vgi-rpc-go v0.38.0 h1:IDu+tZkSb2ZqJYwbiK5Owy9atjbPCh7Fw0tKlADm0nM=
-github.com/Query-farm/vgi-rpc-go v0.38.0/go.mod h1:/7M2bvcmgZ56Cb8qsxlC8AmpNU3s/k2vcmKvxqM778U=
+github.com/Query-farm/vgi-rpc-go v0.38.1 h1:45gOh3EusbBxX4sjPVVK5kb3wZ5GdMupHiv0ejNh9gU=
+github.com/Query-farm/vgi-rpc-go v0.38.1/go.mod h1:/7M2bvcmgZ56Cb8qsxlC8AmpNU3s/k2vcmKvxqM778U=
 github.com/andybalholm/brotli v1.2.2 h1:HzTuoo2ErYQqf5qvcJInB8uvqSVxRttzkFexPWtnceM=
 github.com/andybalholm/brotli v1.2.2/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/apache/arrow-go/v18 v18.6.0 h1:GX/Jyd3R7mCLiECAwY9FWbbaYblie2WXBSz4Sw8fNpM=

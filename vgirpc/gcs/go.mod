@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	cloud.google.com/go/storage v1.63.1
-	github.com/Query-farm/vgi-rpc-go v0.38.0
+	github.com/Query-farm/vgi-rpc-go v0.38.1
 	github.com/apache/arrow-go/v18 v18.6.0
 	github.com/google/uuid v1.6.0
 	github.com/googleapis/gax-go/v2 v2.23.0

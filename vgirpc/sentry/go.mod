@@ -3,7 +3,7 @@ module github.com/Query-farm/vgi-rpc-go/vgirpc/sentry
 go 1.26.0
 
 require (
-	github.com/Query-farm/vgi-rpc-go v0.38.0
+	github.com/Query-farm/vgi-rpc-go v0.38.1
 	github.com/getsentry/sentry-go v0.48.0
 )
 
